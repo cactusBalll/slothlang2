@@ -7,7 +7,7 @@ use crate::sys;
 use sloth_frontend::ast::*;
 use sloth_frontend::lexer::{Pos, StrPart};
 use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Layout width of an object word (bytes); objects: [cls_info ptr, k/V...]
 // runtime ABI: pointers flow as i64 words
@@ -49,6 +49,8 @@ pub struct ModEmitter {
     pub cross_funcs: HashMap<String, (String, TyId)>,
     /// satisfied import paths (file canonical)
     pub imported_paths: Vec<String>,
+    /// non-pub symbols exported by imported modules; access = diagnostic
+    pub hidden: HashSet<String>,
     /// foreign globals: "mod.name" or "alias.name" -> (mangled global symbol, ty)
     pub fglobals: HashMap<String, (String, TyId)>,
     /// global symbol declarations to prepend to the module IR
@@ -100,6 +102,7 @@ impl ModEmitter {
             cur_mod: name.to_string(),
             cross_funcs: HashMap::new(),
             imported_paths: Vec::new(),
+            hidden: HashSet::new(),
             fglobals: HashMap::new(),
             global_decls: Vec::new(),
             declared_syms: std::collections::HashSet::new(),
@@ -119,6 +122,8 @@ impl ModEmitter {
     /// module's name and registers them for cross-module calls)
     pub fn register_import(&mut self, mname: &str, alias: Option<&str>, prog: &Program) {
         self.cur_mod = mname.to_string();
+        let _hide_mark = ();
+
         if let Some(a) = alias {
             self.mod_alias.insert(a.to_string(), mname.to_string());
         }
@@ -134,14 +139,24 @@ impl ModEmitter {
                 DeclNode::Func(f) => {
                     let mangled = mangle(mname, None, &d.name);
                     let plan = self.plan_func(&d.name, None, f, None);
-                    self.cross_funcs.insert(d.name.clone(), (mangled.clone(), plan.ret));
+                    if d.visible {
+                        self.cross_funcs.insert(d.name.clone(), (mangled.clone(), plan.ret));
+                    } else {
+                        self.hidden.insert(d.name.clone());
+                    }
                     self.cross_funcs
                         .insert(format!("{}.{}", qname, d.name), (mangled, plan.ret));
+                    if !d.visible {
+                        self.hidden.insert(format!("{}.{}", qname, d.name));
+                    }
                     self.emit_func(&d.name, None, f, None, false);
                 }
                 DeclNode::Class(c) => {
                     let cid: i64 = 100 + self.foreign_cls.len() as i64;
                     self.foreign_cls.insert(d.name.clone());
+                    if !d.visible {
+                        self.hidden.insert(format!("{}.{}", qname, d.name));
+                    }
                     self.cls_mod.insert(d.name.clone(), mname.to_string());
                     self.class_ids.insert(d.name.clone(), cid);
                     if !self.class_order.contains(&d.name) {
@@ -185,6 +200,9 @@ impl ModEmitter {
                 let sym = self.declare_global(mname, &d.name, t);
                 self.fglobals.insert(format!("{}.{}", qname, d.name), (sym.clone(), t));
                 self.fglobals.insert(format!("{}.{}", mname, d.name), (sym.clone(), t));
+                if !visible_of(d) {
+                    self.hidden.insert(format!("{}.{}", qname, d.name));
+                }
             }
         }
         // module init func: runs this module's var inits at startup
@@ -1513,6 +1531,115 @@ impl ModEmitter {
 impl ModEmitter {
     fn emit_expr_arith_codes(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         match &e.node {
+            ExprNode::Is { negated, lhs, rhs } => {
+                let (lv, lt) = self.emit_expr(fw, lhs);
+                // nil test
+                if let ExprNode::Nil = &rhs.node {
+                    let zc = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", zc));
+                    let c = fw.v();
+                    fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", c, lv, zc));
+                    let c1 = fw.v();
+                    fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+                    let r = if *negated {
+                        let one = fw.v();
+                        let o = fw.v();
+                        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                        fw.op(&format!("    {} = arith.xori {}, {} : i64", o, c1, one));
+                        o
+                    } else {
+                        c1
+                    };
+                    return (r, self.r.mk(Ty::I64));
+                }
+                // class membership test via static ancestor chain of cls ids
+                if let ExprNode::Ident(cn) = &rhs.node {
+                    if self.class_ids.get(cn).is_none() {
+                        self.err(&e.pos, format!("`is` type `{}` not a known class", cn));
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
+                    if self.is_float(lt) {
+                        self.err(&e.pos, "`is` on float is unsupported".to_string());
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
+                    // membership set: cn and every class whose ancestor chain reaches cn
+                    let mut idsv: Vec<i64> = Vec::new();
+                    if let Some(id) = self.class_ids.get(cn) {
+                        idsv.push(*id);
+                    }
+                    for candv in self.class_order.clone() {
+                        let cand = candv.clone();
+                        let mut cur = Some(cand.clone());
+                        while let Some(pn) = cur {
+                            cur = self
+                                .classes
+                                .get(&pn)
+                                .and_then(|ci| ci.superclass.clone());
+                            if cur.as_deref() == Some(cn.as_str()) {
+                                if let Some(id) = self.class_ids.get(&cand.clone()) {
+                                    idsv.push(*id);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if idsv.is_empty() {
+                        self.err(&e.pos, "`is` chain unavailable".to_string());
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
+                    // or-chain of cmpi eq over cls ids
+                    let mut acc: Option<String> = None;
+                    for id in &idsv {
+                        let ci = fw.v();
+                        fw.op(&format!("    {} = arith.constant {} : i64", ci, id));
+                        let clsid = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                            clsid, lv
+                        ));
+                        let eq = fw.v();
+                        fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", eq, clsid, ci));
+                        let eq1 = fw.v();
+                        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", eq1, eq));
+                        acc = match acc {
+                            None => Some(eq1),
+                            Some(a) => {
+                                let o = fw.v();
+                                fw.op(&format!("    {} = arith.ori {}, {} : i64", o, a, eq1));
+                                Some(o)
+                            }
+                        };
+                    }
+                    let base = acc.unwrap();
+                    let r = if *negated {
+                        let one = fw.v();
+                        let o = fw.v();
+                        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                        fw.op(&format!("    {} = arith.xori {}, {} : i64", o, base, one));
+                        o
+                    } else {
+                        base
+                    };
+                    return (r, self.r.mk(Ty::Bool));
+                }
+                self.err(&e.pos, "unsupported `is` right side".to_string());
+                return (String::new(), self.r.mk(Ty::Unit));
+            }
+            ExprNode::Elvis { lhs, rhs } => {
+                let (lv, lt) = self.emit_expr(fw, lhs);
+                let (rv, _rt) = self.emit_expr(fw, rhs);
+                if self.is_float(lt) {
+                    self.err(&e.pos, "`?:` on float is unsupported".to_string());
+                    return (String::new(), self.r.mk(Ty::Unit));
+                }
+                let zc = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", zc));
+                let c = fw.v();
+                fw.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", c, lv, zc));
+                let r = fw.v();
+                fw.op(&format!("    {} = arith.select {}, {}, {} : i64", r, c, lv, rv));
+                (r, lt)
+            }
             ExprNode::Arith { op, lhs, rhs } => {
                 let (a, at) = self.emit_expr(fw, lhs);
                 let (b, bt) = self.emit_expr(fw, rhs);
@@ -1689,6 +1816,7 @@ impl ModEmitter {
             ExprNode::Field { obj, name } => {
                 // qualified foreign-global read: lib.g / lib.Cls.f handled in arith path only for globals
                 if let ExprNode::Ident(m) = &obj.node {
+                    self.guard_hidden(m, name, &e.pos);
                     let key = format!("{}.{}", m, name);
                     if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
                         return self.emit_global_read(fw, &g, gt);
@@ -1859,6 +1987,7 @@ impl ModEmitter {
             // qualified cross-module call: lib.fn(...) or alias.fn(...)
             if let ExprNode::Ident(m) = &obj.node {
                 let key = format!("{}.{}", m, mname2);
+                self.guard_hidden(m, mname2, pos);
                 if let Some(fs) = self.cross_funcs.get(&key).cloned() {
                     let mut cargv: Vec<(String, TyId)> = Vec::new();
                     let mut csig: Vec<String> = Vec::new();
@@ -1890,6 +2019,7 @@ impl ModEmitter {
                 if self.classes.contains_key(mname2.as_str())
                     && self.class_ids.contains_key(mname2.as_str())
                 {
+                    self.guard_hidden(m, mname2, pos);
                     let mut cargv: Vec<(String, TyId)> = Vec::new();
                     for a in args {
                         let (v, t) = self.emit_expr(fw, a);
@@ -2869,13 +2999,18 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
 /// canonical path), emits each imported module's surface first, then runs the
 /// root module's entry statements under @main
 pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
-    let (root, mods) = resolve_program(root_src, base_dir, &mut Vec::new())?;
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    let mut done: HashSet<std::path::PathBuf> = HashSet::new();
+    let (root, mods) = resolve_program(root_src, base_dir, &mut stack, &mut done)?;
     let mut me = ModEmitter::new("main");
     for (mname, prog, alias) in &mods {
         me.register_import(mname, alias.as_deref(), prog);
     }
     // hmm: root module runs under @sloth_main through emit_module
     me.emit_module(&root);
+    if !me.diags.is_empty() {
+        return Err(format!("codegen diags: {:?}", me.diags));
+    }
     let ir0 = ModEmitter::take_ir(&mut me);
     Ok(normalize_indices(&ir0))
 }
@@ -2883,24 +3018,40 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
 fn resolve_program(
     src: &str,
     dir: &std::path::Path,
-    seen: &mut Vec<std::path::PathBuf>,
+    stack: &mut Vec<std::path::PathBuf>,
+    done: &mut HashSet<std::path::PathBuf>,
 ) -> Result<(Program, Vec<(String, Program, Option<String>)>), String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     let mut mods: Vec<(String, Program, Option<String>)> = Vec::new();
-    _ = seen;
     for imp in &prog.imports {
         let pb = dir.join(&imp.path);
         let pb2 = match std::fs::canonicalize(&pb) {
             Ok(p) => p,
             Err(_) => pb.clone(),
         };
-        if seen.iter().any(|x| x == &pb2) {
+        if stack.iter().any(|x| x == &pb2) {
+            let join = stack
+                .iter()
+                .filter_map(|x| x.file_name().map(|f| f.to_string_lossy().to_string()))
+                .collect::<Vec<String>>()
+                .join(" -> ");
+            return Err(format!(
+                "circular import: {} -> {}",
+                join,
+                pb2.file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "self".to_string())
+            ));
+        }
+        if done.contains(&pb2) {
             continue;
         }
-        seen.push(pb2.clone());
         let src2 = std::fs::read_to_string(&pb2).map_err(|e| format!("read {:?}: {}", pb2, e))?;
         let dir2 = pb2.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-        let (_p2, mut m2) = resolve_program(&src2, &dir2, seen)?;
+        stack.push(pb2.clone());
+        let (_p2, mut m2) = resolve_program(&src2, &dir2, stack, done)?;
+        stack.pop();
+        done.insert(pb2.clone());
         let stem = pb2
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -2916,5 +3067,20 @@ fn prog2_of(prog: &Program) -> Program {
         imports: Vec::new(),
         decls: prog.decls.clone(),
         stmts: Vec::new(),
+    }
+}
+
+/// visibility flag of a toplevel declaration
+fn visible_of(d: &Decl) -> bool {
+    d.visible
+}
+
+impl ModEmitter {
+    /// access to a non-pub symbol from another module: diagnostic
+    fn guard_hidden(&mut self, qualifier: &str, name: &str, pos: &Pos) {
+        let key = format!("{}.{}", qualifier, name);
+        if self.hidden.contains(&key) {
+            self.err(pos, format!("`{}` is private to its module (not `pub`)", key));
+        }
     }
 }

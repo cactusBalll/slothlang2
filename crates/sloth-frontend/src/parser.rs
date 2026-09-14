@@ -166,16 +166,16 @@ impl Parser {
     }
 
     fn decl(&mut self) -> PResult<Decl> {
-        let _ = self.eat_kw("pub");
+        let visible = self.eat_kw("pub");
         match self.peek().cloned() {
             Some(Tok::Ident(s)) if s == "func" => {
                 self.ptr += 1;
                 let (name, pos, f) = self.func_after_kw()?;
-                Ok(Decl { kind: DeclKind::Func, name, pos, node: DeclNode::Func(Box::new(f)) })
+                Ok(Decl { kind: DeclKind::Func, name, pos, visible, node: DeclNode::Func(Box::new(f)) })
             }
-            Some(Tok::Ident(s)) if s == "var" || s == "let" => self.var_let_decl(),
-            Some(Tok::Ident(s)) if s == "class" => self.class_decl(),
-            Some(Tok::Ident(s)) if s == "trait" => self.trait_decl(),
+            Some(Tok::Ident(s)) if s == "var" || s == "let" => self.var_let_decl(visible),
+            Some(Tok::Ident(s)) if s == "class" => self.class_decl(visible),
+            Some(Tok::Ident(s)) if s == "trait" => self.trait_decl(visible),
             Some(other) => Err(ParseError {
                 msg: format!(
                     "unexpected token in toplevel declaration: {}",
@@ -187,7 +187,7 @@ impl Parser {
         }
     }
 
-    fn var_let_decl(&mut self) -> PResult<Decl> {
+    fn var_let_decl(&mut self, visible: bool) -> PResult<Decl> {
         let pos = self.pos();
         let kind = match self.advance() {
             Some(Token { tok: Tok::Ident(s), .. }) if s == "var" => DeclKind::Var,
@@ -199,7 +199,7 @@ impl Parser {
         self.expect(Tok::Assign, "'=' in declaration")?;
         let init = self.expr(0)?;
         self.expect(Tok::Semi, "';'")?;
-        Ok(Decl { kind, name, pos, node: DeclNode::Var { ty, init } })
+        Ok(Decl { kind, name, pos, visible, node: DeclNode::Var { ty, init } })
     }
 
     fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
@@ -361,7 +361,7 @@ impl Parser {
         ))
     }
 
-    fn class_decl(&mut self) -> PResult<Decl> {
+    fn class_decl(&mut self, visible: bool) -> PResult<Decl> {
         let pos = self.pos();
         self.expect_kw("class")?;
         let (name, _) = self.ident("class name")?;
@@ -409,6 +409,7 @@ impl Parser {
             kind: DeclKind::Class,
             name,
             pos,
+            visible,
             node: DeclNode::Class(Box::new(ClassDef {
                 superclass,
                 impls,
@@ -419,7 +420,7 @@ impl Parser {
         })
     }
 
-    fn trait_decl(&mut self) -> PResult<Decl> {
+    fn trait_decl(&mut self, visible: bool) -> PResult<Decl> {
         let pos = self.pos();
         self.expect_kw("trait")?;
         let (name, _) = self.ident("trait name")?;
@@ -445,6 +446,7 @@ impl Parser {
             kind: DeclKind::Trait,
             name,
             pos,
+            visible,
             node: DeclNode::Trait(Box::new(TraitDef { methods })),
         })
     }
@@ -839,6 +841,10 @@ impl Parser {
                 "super" => {
                     self.ptr += 1;
                     Ok(Expr { pos, node: ExprNode::Super })
+                }
+                "nil" => {
+                    self.ptr += 1;
+                    Ok(Expr { pos, node: ExprNode::Nil })
                 }
                 "and" | "or" | "not" | "if" | "else" | "while" | "for" | "return" | "break"
                 | "continue" | "func" | "class" | "trait" | "pub" | "impl" | "as" | "var"

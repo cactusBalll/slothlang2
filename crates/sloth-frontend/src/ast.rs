@@ -41,6 +41,7 @@ pub struct Decl {
     pub kind: DeclKind,
     pub name: String,
     pub pos: Pos,
+    pub visible: bool,
     pub node: DeclNode,
 }
 

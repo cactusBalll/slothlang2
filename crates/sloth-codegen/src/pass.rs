@@ -308,7 +308,7 @@ mod irgen_p4 {
     fn multimodb_works() {
         let d = std::env::temp_dir().join("sloth_mm");
         let _ = std::fs::create_dir_all(&d);
-        std::fs::write(d.join("lib.mm.sl"), "func twofold(a: int) -> int {\n    return a + a;\n}").unwrap();
+        std::fs::write(d.join("lib.mm.sl"), "pub func twofold(a: int) -> int {\n    return a + a;\n}").unwrap();
         let src = "import \"lib.mm.sl\";\nvar x = twofold(6);\nprint(x);\n";
         run_src_multimod(src, &d).unwrap();
     }
@@ -319,7 +319,7 @@ mod irgen_p4 {
         let _ = std::fs::create_dir_all(&d);
         std::fs::write(
             d.join("cfg.mm.sl"),
-            "pub var counter = 20;\nfunc twice(v: int) -> int {\n    return v + v;\n}\n",
+            "pub var counter = 20;\npub func twice(v: int) -> int {\n    return v + v;\n}\n",
         )
         .unwrap();
         let src = "import \"cfg.mm.sl\" as cfg;\nprint(cfg.twice(3));\nprint(cfg.counter);\n";
@@ -337,6 +337,87 @@ mod irgen_p4 {
         .unwrap();
         let src = "import \"lib.mm.sl\" as lib;\nvar c = lib.Counter(1);\nprint(c.bump(4));\nprint(c.n);\n";
         run_src_multimod(src, &d).unwrap();
+    }
+
+    /// non-pub fn/var access from another module is rejected
+    #[test]
+    fn private_cross_module_rejected() {
+        let d = std::env::temp_dir().join("sloth_mmpriv");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(
+            d.join("priv.mm.sl"),
+            "func hidden() -> int {\n    return 1;\n}\nvar secret = 5;\n",
+        )
+        .unwrap();
+        for src in [
+            "import \"priv.mm.sl\" as p;\nprint(p.hidden());\n",
+            "import \"priv.mm.sl\" as p;\nprint(p.secret);\n",
+        ] {
+            let r = run_src_multimod(src, &d);
+            let e = match r {
+                Ok(()) => panic!("private access accepted: {:?}", src),
+                Err(e) => e,
+            };
+            assert!(e.contains("private to its module"), "unexpected: {}", e);
+        }
+    }
+
+    /// pub fn/var/class access from another module still works
+    #[test]
+    fn pub_cross_module_allowed() {
+        let d = std::env::temp_dir().join("sloth_mmpub");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(
+            d.join("pub.mm.sl"),
+            "pub var n = 3;\npub class Box {\n    var v: int;\n    func __init__(a: int) {\n        this.v = a;\n    }\n}\npub func triple(x: int) -> int {\n    return x * 3;\n}\n",
+        )
+        .unwrap();
+        let src = "import \"pub.mm.sl\" as q;\nprint(q.triple(q.n));\nvar b = q.Box(2);\nprint(b.v);\n";
+        run_src_multimod(src, &d).unwrap();
+    }
+
+    /// is/is not with nil and class chains
+    #[test]
+    fn is_type_tests_work() {
+        let src = r#"
+            class Animal { }
+            class Dog: Animal { }
+            var d = Dog();
+            var n: int? = nil;
+            print(d is Dog);
+            print(d is Animal);
+            print(d is not Animal);
+            print(n is nil);
+            print(not (n is nil));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// elvis default
+    #[test]
+    fn elvis_nil_default_works() {
+        let src = r#"
+            var a: int? = nil;
+            var b: int? = 7;
+            print(a ?: 5);
+            print(b ?: 5);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// circular import chain is diagnosed
+    #[test]
+    fn circular_import_diagnosed() {
+        let d = std::env::temp_dir().join("sloth_mmcyc");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(d.join("b.sl"), "import \"a.sl\";\nfunc bx() -> int {\n    return 1;\n}\n").unwrap();
+        std::fs::write(d.join("a.sl"), "import \"b.sl\";\npub func ax() -> int {\n    return bx();\n}\n").unwrap();
+        let src = "import \"a.sl\";\nprint(ax());\n";
+        let e = match run_src_multimod(src, &d) {
+            Ok(()) => panic!("cycle accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("circular import"), "unexpected: {}", e);
     }
 
     #[test]
