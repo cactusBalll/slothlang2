@@ -48,7 +48,7 @@ pub struct ModEmitter {
 pub struct ClassInfo {
     pub name: String,
     pub fields: Vec<(String, TyId, bool)>, // (name, ty, mutable)
-    pub methods: Vec<FuncDef>,
+    pub methods: Vec<(String, FuncDef)>,
     pub superclass: Option<String>,
     pub impls: Vec<String>,
 }
@@ -293,6 +293,12 @@ fn mangle_t(args: &[TyId], r: &Reg) -> String {
 }
 
 impl ModEmitter {
+    fn plan_mangled(&mut self, name: &str, cls: Option<&str>, f: &FuncDef, variadic: Option<&Variadic>) -> FuncPlan {
+        let mangled = mangle(&self.name, cls, name);
+        let plan = self.plan_func(name, cls, f, variadic);
+        FuncPlan { mangled, params: plan.params, ret: plan.ret }
+    }
+
     pub fn collect(&mut self, prog: &Program) {
         let mut class_id = 0i64;
         for d in &prog.decls {
@@ -315,12 +321,17 @@ impl ModEmitter {
                         .iter()
                         .map(|fd| (fd.name.clone(), self.ty_of(&fd.ty), fd.mutable))
                         .collect();
+                    let meth: Vec<(String, FuncDef)> = c
+                        .methods
+                        .iter()
+                        .map(|m| (m.name.clone(), m.fd.clone()))
+                        .collect();
                     self.classes.insert(
                         d.name.clone(),
                         ClassInfo {
                             name: d.name.clone(),
                             fields,
-                            methods: c.methods.clone(),
+                            methods: meth,
                             superclass: c.superclass.clone(),
                             impls: c.impls.clone(),
                         },
@@ -1082,6 +1093,22 @@ impl ModEmitter {
             ExprNode::Call { callee, args } => {
                 return self.emit_call(fw, callee, args, &e.pos);
             }
+            ExprNode::Field { obj, name } => {
+                let (recv, rt) = self.emit_expr(fw, obj);
+                if let Ty::Named(c, _) = self.r.get(rt) {
+                    let idx = self.field_index(c, name);
+                    let zi = fw.v();
+                    fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                        r, recv, zi
+                    ));
+                    return (r, self.r.mk(Ty::I64));
+                }
+                self.err(&e.pos, format!("field `{}` on unknown type", name));
+                (String::new(), self.r.mk(Ty::Unit))
+            }
             ExprNode::Range { low, high, inclusive } => {
                 // MVP range lit as two-word repr: [lo, hi(+1)] held as i64 lo packed
                 let (lo, _lt) = self.emit_expr(fw, low);
@@ -1132,7 +1159,7 @@ impl ModEmitter {
         pos: &Pos,
     ) -> (String, TyId) {
         // resolve name
-        let name = match &callee.node {
+        let mut name = match &callee.node {
             ExprNode::Ident(n) => n.clone(),
             ExprNode::Field { obj: _, name } => name.clone(),
             _ => {
@@ -1142,22 +1169,43 @@ impl ModEmitter {
         };
         let mut argv: Vec<(String, TyId)> = Vec::new();
         let mut sigargs: Vec<String> = Vec::new();
+        // method call: receiver becomes first argument
+        let mut recv: Option<(String, TyId)> = None;
+        if let ExprNode::Field { obj, name: _ } = &callee.node {
+            let (rv, rt) = self.emit_expr(fw, obj);
+            recv = Some((rv.clone(), rt));
+            argv.insert(0, (rv, rt));
+            sigargs.insert(0, "i64".to_string());
+            name = match &callee.node {
+                ExprNode::Field { name, .. } => name.clone(),
+                _ => name.clone(),
+            };
+        }
         for a in args {
             let (v, t) = self.emit_expr(fw, a);
             argv.push((v.clone(), t));
             sigargs.push(mlir_word_ty(t, &self.r));
         }
-        // receiver for method calls
-        let mut recv: Option<(String, TyId)> = None;
-        if let ExprNode::Field { obj, name: _ } = &callee.node {
-            if !name.matches('.').count() == 0 {
-                // still needed: obj
+        // constructor: bare class name call
+        if let ExprNode::Ident(ctor) = &callee.node {
+            if self.classes.contains_key(&name) && name == *ctor {
+                return self.emit_new_obj(fw, &name, &argv, &sigargs, pos);
             }
-            let _ = name;
-            // We must recompute? we discarded; re-emit: use stored receiver path below
-            let _ = obj;
         }
-        let _ = recv;
+        // method call inside classes
+        if let Some((rv, rt)) = recv.clone() {
+            if let Ty::Named(cls, _) = self.r.get(rt) {
+                let clsname = cls.to_string();
+                let fd = self
+                    .classes
+                    .get(&clsname)
+                    .and_then(|ci| ci.methods.iter().find(|(n, _)| *n == name).map(|(_, f)| f.clone()));
+                if let Some(m) = fd {
+                    return self.emit_method_call(fw, &clsname, &name, &m, &argv, &sigargs, pos);
+                }
+                let _ = rv;
+            }
+        }
         // direct function call
         if let Some(fd) = self.funcs.get(&name).cloned() {
             let plan = self.plan_func(&name, None, &fd, None);
@@ -1267,9 +1315,14 @@ impl ModEmitter {
             if let DeclNode::Func(f) = &d.node {
                 let entry = d.name == "main";
                 self.emit_func(&d.name, None, f, None, entry);
-            } else {
-                // MVP: unsupported decls
-                let _ = d;
+            }
+        }
+        // 1b) classes: emit methods + ctor
+        for d in &prog.decls {
+            if let DeclNode::Class(c) = &d.node {
+                for m in &c.methods {
+                    self.emit_func(&m.name, Some(&d.name), &m.fd, None, false);
+                }
             }
         }
         // 2) script statements run in entry if no main() was declared
@@ -1337,6 +1390,7 @@ impl ModEmitter {
         let mut m = format!("module @{} {{\n", me.name);
         m.push_str(&emit_str_globals(me));
         m.push_str(&rt_decls());
+        m.push_str(&obj_rt_decls());
         m.push_str("\n");
         m.push_str(&me.out);
         // now the out is func bodies only; globals were prepended
@@ -1384,4 +1438,101 @@ pub fn normalize_indices(src: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+// ---------------- classes (MVP: flat classes this-module) ----------------
+
+pub fn obj_rt_decls() -> String {
+    let mut s = String::new();
+    s.push_str("  func.func private @sloth_obj_new(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_field(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_field_f64(i64, i64) -> f64\n");
+    s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_set_field_f64(i64, i64, f64) -> i64\n");
+    s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
+    s
+}
+
+fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
+    me.classes
+        .get(clsname)
+        .map(|ci| ci.fields.len())
+        .unwrap_or(0)
+    + 2
+}
+
+impl ModEmitter {
+    /// class ctor: named `sloth_main_<Cls>_cls`
+    fn class_ctor_name(&self, cls: &str) -> String {
+        format!("{}_{}", self.name, cls)
+    }
+}
+
+
+impl ModEmitter {
+    /// allocate object with GC; fields set after ctor body
+    fn emit_new_obj(
+        &mut self,
+        fw: &mut FnWalk,
+        clsname: &str,
+        argv: &Vec<(String, TyId)>,
+        _sigargs: &Vec<String>,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let nf = words_for_cls(self, clsname);
+        if !self.classes.contains_key(clsname) {
+            self.err(pos, format!("unknown class `{}`", clsname));
+            return (String::new(), self.r.mk(Ty::Unit));
+        }
+        // construct cls info on the fly (MVP: fresh per call)
+        let niln = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", niln));
+        let cid = fw.v();
+        let clsid = *self.class_ids.get(clsname).unwrap_or(&0);
+        let ids = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", ids, clsid));
+        fw.op(&format!(
+            "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
+            cid, niln, ids
+        ));
+        let obj = fw.v();
+        let nfw = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", nfw, nf));
+        let r2 = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
+            r2, cid, nfw
+        ));
+        (r2, self.r.mk(Ty::Named(clsname.to_string(), vec![])))
+    }
+}
+
+impl ModEmitter {
+    /// call the ctor to build the object body, then return it
+    fn emit_method_call(
+        &mut self,
+        fw: &mut FnWalk,
+        cls: &str,
+        mname: &str,
+        m: &FuncDef,
+        argv: &Vec<(String, TyId)>,
+        sigargs: &Vec<String>,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        // ctor: emit the class ctor wrapper (allocates then runs __init__)
+        if mname == "__init__" {
+            return self.emit_new_obj(fw, cls, argv, sigargs, pos);
+        }
+        // direct method dispatch: obj.method(args) => sloth_main_Cls__method(this, args...)
+        let plan = self.plan_mangled(mname, Some(cls), m, None);
+        let r = fw.v();
+        let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
+        let tys = sigargs.join(", ");
+        let rt = mlir_ret_ty(self, plan.ret);
+        fw.op(&format!(
+            "    {} = call @{}({}) : ({}) -> {}",
+            r, plan.mangled, vals.join(", "), tys, rt
+        ));
+        (r, plan.ret)
+    }
 }

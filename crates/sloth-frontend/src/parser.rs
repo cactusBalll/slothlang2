@@ -399,10 +399,7 @@ impl Parser {
             } else if self.is_kw("func") {
                 self.ptr += 1;
                 let (mname, _, f) = self.func_after_kw()?;
-                if mname != "__init__" {
-                    // methods may have any name
-                }
-                methods.push(f);
+                methods.push(MethodDef { name: mname, fd: f });
             } else {
                 return Err(self.err("expected field or method in class body"));
             }

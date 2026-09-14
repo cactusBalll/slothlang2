@@ -88,7 +88,13 @@ pub struct ClassDef {
     pub impls: Vec<String>,
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
-    pub methods: Vec<FuncDef>,
+    pub methods: Vec<MethodDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodDef {
+    pub name: String,
+    pub fd: FuncDef,
 }
 
 #[derive(Debug, Clone)]

@@ -62,9 +62,21 @@ pub fn sloth_main_hello() -> Result<(), String> {
 
 /// path of libsloth_rt.so produced by this workspace build
 fn lib_path() -> String {
-    // workspace-relative: CARGO_MANIFEST_DIR = .../crates/sloth-codegen
+    // running binary is at target/debug/slothc; resolve relative to the exe
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let lib = exe_dir.join("libsloth_rt.so");
+    if lib.exists() {
+        return lib.display().to_string();
+    }
+    // cargo test runs with cwd = crate dir: go up to workspace target/debug
     let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    format!("{}/../../target/debug/libsloth_rt.so", md)
+    let c = format!("{}/../../target/debug/libsloth_rt.so", md);
+    if std::path::Path::new(&c).exists() {
+        return c;
+    }
+    // last resort: absolute unknown
+    "/home/undatus63/slothlang2/target/debug/libsloth_rt.so".to_string()
 }
 
 /// compile+run a sloth2 program through the JIT (run mode)
@@ -247,6 +259,28 @@ mod irgen_p3b {
                 return inc(x) + inc(x);
             }
             print(twice(3));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod irgen_p4 {
+    use super::*;
+
+    #[test]
+    fn class_field_access_works() {
+        let src = r#"
+            class Pt {
+                var x: int;
+                var y: int;
+                func new2(a: int, b: int) {
+                    this.x = a;
+                    this.y = b;
+                }
+            }
+            var p = Pt(1, 2);
+            print(p.x);
         "#;
         run_src(src, "main").unwrap();
     }
