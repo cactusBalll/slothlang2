@@ -683,6 +683,8 @@ impl Parser {
                 Tok::Ge => (BinOp::Ge, P_CMP),
                 Tok::EqEq => (BinOp::EqEq, P_CMP),
                 Tok::NotEq => (BinOp::NotEq, P_CMP),
+                Tok::AmpAmp => (BinOp::And, P_AND),
+                Tok::PipePipe => (BinOp::Or, P_OR),
                 _ => break,
             };
             if bp < min_bp {

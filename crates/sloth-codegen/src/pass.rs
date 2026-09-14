@@ -211,3 +211,43 @@ mod irgen_p3 {
         run_src(src, "main").unwrap();
     }
 }
+
+#[cfg(test)]
+mod irgen_p3b {
+    use super::*;
+
+    #[test]
+    fn str_display_int_works() {
+        let src = r#"
+            var n: int = 15;
+            print(n * 2);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn logical_ops_work() {
+        let src = r#"
+            var a: int = 1;
+            var b: int = 2;
+            if a == 1 && b > 0 {
+                print(7);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn nested_fn_calls_work() {
+        let src = r#"
+            func inc(x: int) -> int {
+                return x + 1;
+            }
+            func twice(x: int) -> int {
+                return inc(x) + inc(x);
+            }
+            print(twice(3));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
