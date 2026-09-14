@@ -975,7 +975,13 @@ pub fn expr_to_path(e: &Expr) -> Option<Vec<PathSeg>> {
                 segs.reverse();
                 return Some(segs);
             }
-            ExprNode::This | ExprNode::Super => {
+            ExprNode::This => {
+                segs.push(PathSeg::Name("this".to_string()));
+                segs.reverse();
+                return Some(segs);
+            }
+            ExprNode::Super => {
+                segs.push(PathSeg::Name("super".to_string()));
                 segs.reverse();
                 return Some(segs);
             }

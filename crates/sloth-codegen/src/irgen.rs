@@ -1425,12 +1425,29 @@ impl ModEmitter {
 
 // final IR normalization: rewrite zero consts used as memref indices to `index`
 pub fn normalize_indices(src: &str) -> String {
+    // process per-function so that per-fn scoped SSA names don't collide
+    let mut out = String::new();
+    let mut chunk: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let starts_fn = line.trim_start().starts_with("func.func");
+        if starts_fn && !chunk.is_empty() {
+            out.push_str(&normalize_chunk(&chunk));
+            chunk = Vec::new();
+        }
+        chunk.push(line.to_string());
+    }
+    if !chunk.is_empty() {
+        out.push_str(&normalize_chunk(&chunk));
+    }
+    out
+}
+
+fn normalize_chunk(lines: &[String]) -> String {
     use std::collections::HashSet;
     let mut idx_tokens: HashSet<String> = HashSet::new();
-    for line in src.lines() {
+    for line in lines {
         let t = line.trim();
-        let bracketed = t.contains('[') && t.contains(']');
-        if !bracketed {
+        if !(t.contains('[') && t.contains(']')) {
             continue;
         }
         let open = t.find('[').unwrap();
@@ -1444,7 +1461,7 @@ pub fn normalize_indices(src: &str) -> String {
         }
     }
     let mut out = String::new();
-    for line in src.lines() {
+    for line in lines {
         let t = line.trim();
         if let Some(i) = t.find(" = arith.constant ") {
             let tok = t[..i].trim().to_string();
