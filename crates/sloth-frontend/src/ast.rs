@@ -103,6 +103,7 @@ pub struct FieldDecl {
     pub mutable: bool,
     pub name: String,
     pub ty: Type,
+    pub init: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]

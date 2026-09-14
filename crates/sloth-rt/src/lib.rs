@@ -124,6 +124,76 @@ pub extern "C" fn sloth_str_len(p: i64) -> i64 {
     unsafe { (*(p as *mut StrT)).len as i64 }
 }
 
+
+unsafe fn strb_append(p: *mut StrB, src: *const libc::c_void, n: usize) {
+    if (*p).cap < (*p).len + n {
+        let nc = ((*p).len + n + 16).next_power_of_two();
+        (*p).data = libc::realloc((*p).data, nc);
+        (*p).cap = nc;
+    }
+    libc::memcpy(
+        ((*p).data as *mut libc::c_char).offset((*p).len as isize) as *mut libc::c_void,
+        src,
+        n,
+    );
+    (*p).len += n;
+}
+
+unsafe fn strb_or_new(b: i64) -> *mut StrB {
+    if b == 0 {
+        let raw = libc::calloc(1, std::mem::size_of::<StrB>()) as *mut StrB;
+        (*raw).cap = 0;
+        raw
+    } else {
+        b as *mut StrB
+    }
+}
+
+/// push an interned (pooled) string's bytes onto a builder
+#[no_mangle]
+pub extern "C" fn sloth_str_pushp(b: i64, h: i64) -> i64 {
+    unsafe {
+        let p = strb_or_new(b);
+        let td = h as *mut StrT;
+        let n = (*td).len;
+        strb_append(p, (*td).data, n);
+        p as i64
+    }
+}
+
+/// push an i64 rendered in decimal
+#[no_mangle]
+pub extern "C" fn sloth_str_push_i(b: i64, v: i64) -> i64 {
+    unsafe {
+        let s = format!("{}", v);
+        let p = strb_or_new(b);
+        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        p as i64
+    }
+}
+
+/// push an f64 rendered with one decimal
+#[no_mangle]
+pub extern "C" fn sloth_str_push_f(b: i64, v: f64) -> i64 {
+    unsafe {
+        let s = format!("{}", v);
+        let p = strb_or_new(b);
+        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        p as i64
+    }
+}
+
+/// push a bool rendered as true/false
+#[no_mangle]
+pub extern "C" fn sloth_str_push_b(b: i64, v: i64) -> i64 {
+    unsafe {
+        let s = if v != 0 { "true" } else { "false" };
+        let p = strb_or_new(b);
+        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        p as i64
+    }
+}
+
 /// finalize: return the pooled interned string for a built byte buffer
 #[no_mangle]
 pub extern "C" fn sloth_str_finish(b: i64) -> i64 {

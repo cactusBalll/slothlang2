@@ -49,6 +49,8 @@ pub struct ModEmitter {
     pub cross_funcs: HashMap<String, (String, TyId)>,
     /// satisfied import paths (file canonical)
     pub imported_paths: Vec<String>,
+    /// raw class defs (for field-initializer emission at ctor time)
+    pub class_defs: HashMap<String, (String, ClassDef)>,
     /// non-pub symbols exported by imported modules; access = diagnostic
     pub hidden: HashSet<String>,
     /// foreign globals: "mod.name" or "alias.name" -> (mangled global symbol, ty)
@@ -102,6 +104,7 @@ impl ModEmitter {
             cur_mod: name.to_string(),
             cross_funcs: HashMap::new(),
             imported_paths: Vec::new(),
+            class_defs: HashMap::new(),
             hidden: HashSet::new(),
             fglobals: HashMap::new(),
             global_decls: Vec::new(),
@@ -134,6 +137,7 @@ impl ModEmitter {
                 self.traits.insert(d.name.clone(), t.methods.clone());
             }
         }
+        // pass 2a: register classes + symbols (before emission)
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
@@ -149,7 +153,6 @@ impl ModEmitter {
                     if !d.visible {
                         self.hidden.insert(format!("{}.{}", qname, d.name));
                     }
-                    self.emit_func(&d.name, None, f, None, false);
                 }
                 DeclNode::Class(c) => {
                     let cid: i64 = 100 + self.foreign_cls.len() as i64;
@@ -173,6 +176,10 @@ impl ModEmitter {
                         .iter()
                         .map(|m| (m.name.clone(), m.fd.clone()))
                         .collect();
+                    self.class_defs.insert(
+                        d.name.clone(),
+                        (self.cur_mod.clone(), (**c).clone()),
+                    );
                     self.classes.insert(
                         d.name.clone(),
                         ClassInfo {
@@ -183,8 +190,44 @@ impl ModEmitter {
                             impls: c.impls.clone(),
                         },
                     );
-                    for m in &c.methods {
-                        self.emit_func(&m.name, Some(&d.name), &m.fd, None, false);
+                }
+                _ => {}
+            }
+        }
+        // pass 2b: effective trait surfaces (incl. inherited) -> vtable slots
+        for d in &prog.decls {
+            if let DeclNode::Class(c) = &d.node {
+                let mut eff: Vec<String> = Vec::new();
+                let mut cur = Some(d.name.clone());
+                while let Some(pn) = cur {
+                    match self.classes.get(&pn) {
+                        Some(ci) => {
+                            for t in &ci.impls {
+                                if !eff.contains(t) {
+                                    eff.push(t.clone());
+                                }
+                            }
+                            cur = ci.superclass.clone();
+                        }
+                        None => break,
+                    }
+                }
+                self.check_impls(&d.name, &eff, &d.pos);
+            }
+        }
+        // pass 2c: emit method bodies (llvm.func decision now settled)
+        for d in &prog.decls {
+            match &d.node {
+                DeclNode::Func(f) => {
+                    self.emit_func(&d.name, None, f, None, false);
+                }
+                DeclNode::Class(_) => {
+                    let meths = match self.classes.get(&d.name) {
+                        Some(ci) => ci.methods.clone(),
+                        None => Vec::new(),
+                    };
+                    for m in meths {
+                        self.emit_func(&m.0, Some(&d.name), &m.1, None, false);
                     }
                 }
                 _ => {}
@@ -588,6 +631,10 @@ impl ModEmitter {
                         .iter()
                         .map(|m| (m.name.clone(), m.fd.clone()))
                         .collect();
+                    self.class_defs.insert(
+                        d.name.clone(),
+                        (self.cur_mod.clone(), (**c).clone()),
+                    );
                     self.classes.insert(
                         d.name.clone(),
                         ClassInfo {
@@ -605,10 +652,26 @@ impl ModEmitter {
                 }
             }
         }
-        // validate `impl` surfaces after all classes are collected
+        // validate `impl` surfaces after all classes are collected;
+        // subclass inheritance transitively carries the trait surface
         for d in &prog.decls {
             if let DeclNode::Class(c) = &d.node {
-                self.check_impls(&d.name, &c.impls, &d.pos);
+                let mut eff: Vec<String> = Vec::new();
+                let mut cur = Some(d.name.clone());
+                while let Some(pn) = cur {
+                    match self.classes.get(&pn) {
+                        Some(ci) => {
+                            for t in &ci.impls {
+                                if !eff.contains(t) {
+                                    eff.push(t.clone());
+                                }
+                            }
+                            cur = ci.superclass.clone();
+                        }
+                        None => break,
+                    }
+                }
+                self.check_impls(&d.name, &eff, &d.pos);
             }
         }
     }
@@ -855,8 +918,8 @@ impl ModEmitter {
         }
         // bare `call` is func-dialect sugar valid only in func.func regions;
         // inside llvm.func bodies it must be spelled func.call
-        let entry_text = if is_ll { entry_text.replace("call @", "func.call @") } else { entry_text };
-        let ret_text = if is_ll { ret_text.replace("call @", "func.call @") } else { ret_text };
+        let entry_text = if is_ll { rename_plain_calls(&entry_text) } else { entry_text };
+        let ret_text = if is_ll { rename_plain_calls(&ret_text) } else { ret_text };
         self.out.push_str(&entry_text);
         self.out.push_str(&ret_text);
         self.out.push_str("  }\n");
@@ -904,6 +967,14 @@ impl ModEmitter {
                         let dt = self.ty_of(te);
                         match self.r.get(dt) {
                             Ty::Dyn(_) => dt,
+                            // declared Array<dyn T> coerces a list literal binding
+                            Ty::Array(el) => match self.r.get(*el) {
+                                Ty::Dyn(_) => match self.r.get(t) {
+                                    Ty::Array(_) => dt,
+                                    _ => t,
+                                },
+                                _ => t,
+                            },
                             Ty::Named(n, _) if self.traits.contains_key(n.as_str()) => {
                                 // only coerce actual object values (class instances)
                                 match self.r.get(t) {
@@ -1457,6 +1528,79 @@ impl ModEmitter {
     fn emit_expr_rest(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         match &e.node {
             ExprNode::Str(ss) => {
+                if !ss.is_plain() {
+                    // interpolated string: chain per-part push onto a builder
+                    let mut curw = String::new();
+                    let c0 = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", c0));
+                    curw = c0;
+                    for part in &ss.parts {
+                        match part {
+                            StrPart::Lit(l) => {
+                                let bytes: Vec<u8> = l.bytes().collect();
+                                let mut pads = bytes.clone();
+                                while !pads.is_empty() && pads.len() % 8 != 0 {
+                                    pads.push(0);
+                                }
+                                if pads.is_empty() {
+                                    continue;
+                                }
+                                let blen = bytes.len();
+                                for (ci_, ch) in pads.chunks(8).enumerate() {
+                                    let mut w: u64 = 0;
+                                    for (k, b) in ch.iter().enumerate() {
+                                        w |= (*b as u64) << (8 * k);
+                                    }
+                                    let c1 = fw.v();
+                                    fw.op(&format!("    {} = arith.constant {} : i64", c1, w as i64));
+                                    let tail = std::cmp::min(8usize, blen - ci_ * 8);
+                                    let c2 = fw.v();
+                                    fw.op(&format!("    {} = arith.constant {} : i64", c2, tail as i64));
+                                    let r = fw.v();
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
+                                        r, curw, c1, c2
+                                    ));
+                                    curw = r;
+                                }
+                            }
+                            StrPart::ExprAst(e) => {
+                                let (v, t) = self.emit_expr(fw, e);
+                                let r = fw.v();
+                                if self.is_str(t) {
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
+                                        r, curw, v
+                                    ));
+                                } else if self.is_float(t) {
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_push_f({}, {}) : (i64, f64) -> i64",
+                                        r, curw, v
+                                    ));
+                                } else if self.r.get(t) == &Ty::Bool {
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_push_b({}, {}) : (i64, i64) -> i64",
+                                        r, curw, v
+                                    ));
+                                } else {
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
+                                        r, curw, v
+                                    ));
+                                }
+                                curw = r;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let fin = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_str_finish({}) : (i64) -> i64",
+                        fin, curw
+                    ));
+                    let t = self.r.mk(Ty::Str);
+                    return (fin, t);
+                }
                 // packed 8-byte words across the runtime; buffer token chains
                 let plain: Vec<u8> = ss.plain().unwrap_or("").bytes().collect();
                 let len = plain.len();
@@ -1827,12 +1971,38 @@ impl ModEmitter {
                     let idx = self.field_index(c, name);
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                    let r = fw.v();
-                    fw.op(&format!(
-                        "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
-                        r, recv, zi
-                    ));
-                    return (r, self.r.mk(Ty::I64));
+                    let fty = self
+                        .classes
+                        .get(c)
+                        .and_then(|ci| ci.fields.iter().find(|f| f.0 == *name))
+                        .map(|f| f.1);
+                    let fty2 = match fty { Some(x) => x, None => self.r.mk(Ty::I64) };
+                    match self.r.get(fty2) {
+                        Ty::Str => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                r, recv, zi
+                            ));
+                            return (r, self.r.mk(Ty::Str));
+                        }
+                        Ty::Named(_, _) | Ty::Dyn(_) => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                r, recv, zi
+                            ));
+                            return (r, fty2);
+                        }
+                        _ => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                r, recv, zi
+                            ));
+                            return (r, self.r.mk(Ty::I64));
+                        }
+                    }
                 }
                 self.err(&e.pos, format!("field `{}` on unknown type", name));
                 (String::new(), self.r.mk(Ty::Unit))
@@ -2215,7 +2385,11 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_range_pack(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_finish(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_str_finish(i64) -> i64
+  func.func private @sloth_str_pushp(i64, i64) -> i64
+  func.func private @sloth_str_push_i(i64, i64) -> i64
+  func.func private @sloth_str_push_f(i64, f64) -> i64
+  func.func private @sloth_str_push_b(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
@@ -2646,6 +2820,30 @@ impl ModEmitter {
             r2, cid, nfw
         ));
         self.emit_vt_build(fw, clsname, &r2);
+        // field initializers run before __init__
+        {
+            // field decls need the original program AST: find via decl map
+            let defs: Vec<(String, Option<sloth_frontend::ast::Expr>, sloth_frontend::ast::Type)> = {
+                match self.class_defs.get(clsname) {
+                    Some((_, cdef)) => cdef
+                        .fields
+                        .iter()
+                        .map(|fd| (fd.name.clone(), fd.init.clone(), fd.ty.clone()))
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            for (fname, iopt, fty) in defs {
+                if let Some(ix) = &iopt {
+                    let idx = self.field_index(clsname, &fname);
+                    let (iv, _it) = self.emit_expr(fw, ix);
+                    let zi = fw.v();
+                    fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                    let ft2 = self.ty_of(&fty);
+                    self.op_set_field(fw, &r2, &zi, &iv, ft2, ix.pos.clone());
+                }
+            }
+        }
         let fdinit = self.find_method(clsname, "__init__");
         if let Some((defcls, fd)) = fdinit {
             let saved_mod = self.cur_mod.clone();
@@ -3081,6 +3279,58 @@ impl ModEmitter {
         let key = format!("{}.{}", qualifier, name);
         if self.hidden.contains(&key) {
             self.err(pos, format!("`{}` is private to its module (not `pub`)", key));
+        }
+    }
+}
+
+/// inside llvm.func bodies bare `call @` must be spelled `func.call @`,
+/// but `llvm.call @` (direct llvm-func calls) must not be touched
+fn rename_plain_calls(t: &str) -> String {
+    let ch: Vec<char> = t.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < ch.len() {
+        if i + 6 <= ch.len() && ch[i] == 'c' && i >= 5 {
+            let prev: String = ch[i - 5..i].iter().collect();
+            if prev == "llvm." && ch[i..i + 6].iter().collect::<String>() == "call @" {
+                out.push_str("call @");
+                i += 6;
+                continue;
+            }
+        }
+        if i + 6 <= ch.len() && ch[i..i + 6].iter().collect::<String>() == "call @" {
+            out.push_str("func.call @");
+            i += 6;
+            continue;
+        }
+        out.push(ch[i]);
+        i += 1;
+    }
+    out
+}
+
+impl ModEmitter {
+    /// typed field store (float fields use the f64 rt routine)
+    fn op_set_field(
+        &mut self,
+        fw: &mut FnWalk,
+        obj: &str,
+        idx: &str,
+        v: &str,
+        ft: TyId,
+        pos: Pos,
+    ) {
+        let _ = pos;
+        if self.is_float(ft) {
+            fw.op(&format!(
+                "    call @sloth_obj_set_field_f64({}, {}, {}) : (i64, i64, f64) -> i64",
+                obj, idx, v
+            ));
+        } else {
+            fw.op(&format!(
+                "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                obj, idx, v
+            ));
         }
     }
 }

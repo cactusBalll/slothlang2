@@ -19,7 +19,7 @@
 | P3 对象与闭包 | **基本完成** | class（单模块 + 跨模块）字段/方法/ctor 可跑（63e0413、a358058）；闭包快照捕获完成（cecfab7）；字符串池/插值完成；继承 `class A: B` + `super.__init__`/`super.x`(读写)/`super.m()` 静态直调完成（patch #2，字段槽基类优先布局，方法沿链解析到定义类符号）；**trait MVP + dyn 虚表分派完成**（patch #4，用户要求从 cls_id 链升级为真虚表）：`impl` known-trait/方法存在/arity/ABI 校验、(trait,method) 全局槽位全局编址、对象头 word1 存 vt 指针、vt=[cap, slot0..] 为 i64 fn ptr 数组、槽值 = `llvm.mlir.addressof`+`llvm.ptrtoint`、分派 = `sloth_vt_get` + `llvm.inttoptr` + 间接 `llvm.call`（形如 `llvm.call %vp(args): !llvm.ptr, (i64) ret`）、`llvm.func` 混合 func 方言体方法直接成为 vt 项（无 thunk 层）、静态调用点对 llvm 标记方法发 `llvm.call`、无满足槽时 `sloth_vt_get`=0 → `sloth_panic_noimpl`；测试 47 全绿，JIT/AOT 双路一致。**未做**：`is` 类型测试、trait 默认方法体、异构容器 `Array<dyn T>`、vtable 全局缓存（每对象重建） |
 | P4 泛型与单态化 | **部分推进** | parser 支持 `type_params`；**容器运行时（Array MVP）完成**（patch #5）：`sloth_arr_new/get(_f64)/set(_f64)/len`（rt [len, e0..] 布局 + 越界 panic）、`[...]` 字面量发射（元素统一：均匀取元素类型 / 混浮点归一为 Array(f64)/对象字为词）、`a[i]` 读、`a[i] = v` 单层索引赋值、`len(a)` 数组长度、`for x in arr` 迭代（槽式计数器 + FeTy 元素取词）；`Array<dyn T>` 元素走 dyn 分派 ✓。**未做**：Map 运行时（仅 `@(k: v)` 解析）、数组 push/append（字面量定长 MVP）、`Iterator`/`Iterable` trait 协议、泛型单态化 |
 | P5 模块与标准库 | **核心完成** | 编译期 `import`（递归、canonicalize 去重、`as` 别名、`mod.fn()`/`mod.g` 限定调用/读取，ec5a2c7 + a7a8b0d）；`pub var` 全局单元格 `memref.global @{mod}_g_{name} {mutable}` + 每模块 `__ginit` 启动时调用；类跨模块可见。**patch #7**：`pub` 强制（parser 记录 `Decl.visible`；register_import 对非 pub fn/var/class 记 `hidden` 集，限定访问点 guard 报 "`x` is private to its module"；compile_multimod 补 diags 检查——此前 codegen diags 被静默吞掉）；循环依赖检测（resolve 栈 + done 集，报 `circular import: a.sl -> b.sl -> a.sl`）。**缺**：标准库 |
-| P1 补遗 | **部分** | `is`/`is not`/`nil` 落地（patch #7）：`nil` 作为 primary（lexer 产出 Ident 因由记工程债 11）；`ctx is nil` = cmpi eq 0、`x is C` = 静态成员集（C 及 class_order 中可达 C 的后代）对 `sloth_obj_cls_id` 逐 id or 链、结果 Ty::Bool（print 走 print_bool）；`?:` Elvis = cmpi ne + `arith.select`（仅 i64/对象词，float/str 报错；RHS 无条件求值 MVP）；测试 irgen_p4：priv/pub 跨模块、is 链（Animal/Cat/Robot）、elvis、circular_diag | |
+| P1 补遗 | **部分** | `is`/`is not`/`nil` 落地（patch #7）：`nil` 作为 primary（lexer 产出 Ident 因由记工程债 11）；`ctx is nil` = cmpi eq 0、`x is C` = 静态成员集（C 及 class_order 中可达 C 的后代）对 `sloth_obj_cls_id` 逐 id or 链、结果 Ty::Bool（print 走 print_bool）；`?:` Elvis = cmpi ne + `arith.select`（仅 i64/对象词，float/str 报错；RHS 无条件求值 MVP）；测试 irgen_p4：priv/pub 跨模块、is 链（Animal/Cat/Robot）、elvis、circular_diag。**patch #8**：字符串插值落地（`StrPart::ExprAst` 逐部分 push 链：Lit 8 字节词 + rt `sloth_str_pushp/_i/_f/_b`；此前任意 `${}` 被当空串）；str/对象字段读取保持声明类型（不再一律 I64）；trait 平面继承下推（check_impls 沿链取有效 impl 面：Cat 经 Mammal 获得 vt 槽 + llvm.func 发射）；register_import 拆 2a 注册 / 2b impl 校验 / 2c 发射（跨模块 dyn 分派修复）；类字段初始化器 `let x: T = expr;`（parser + emit_new_obj ctor 前置）；llvm.func 体内 `call @`→`func.call` 改写跳过 `llvm.call @`（旧 replace 产出非法 `llvm.func.call`） |
 | P6 精确 GC | **未开始 / 替代路径** | 采用自研 `sloth_gc_alloc`（sloth-rt 内标记-清理式 stub，非 Boehm、非 statepoint）；`O = [info_ptr, cls_id, fields...]` 布局，`sloth_obj_field/set_field` 手工寻址（偏移 +2） |
 
 ## 设计文档关键决策的偏离（记录在案）
@@ -57,6 +57,9 @@
 2. ~~trait MVP：`impl` 校验 + 静态 trait 方法直调 + `dyn Trait`~~ **已完成**（patch #3 cls_id 链 MVP → patch #4 真虚表（用户指令）：`llvm.func` 方法 + addressof/ptrtoint 槽值 + 间接 `llvm.call`；测试 irgen_p3d：dispatch/inherited/override/missing_diag/unknown_diag）。
 3. ~~容器运行时：`sloth_array_new/push/get/set`（带边界检查）+ 迭代协议 inline~~ **Array MVP 已完成**（_rt arr get/set/len/越界 panic、字面量、a[i]读写、len、for-in；无 push/Map/迭代 trait 协议，见债 10）。
 4. ~~`pub` 可见性强制 + 循环依赖诊断 + `is`/`nil`/`?:`~~ **已完成**（patch #7：guard_hidden/可见性 gate + resolve 栈环诊断 + is/nil/?:；**注意**：非 pub 访问现在报错——旧 fixture 中无 pub 前缀签名如 `func twice` 已全部改为 `pub`）。
-5. 用 example（§9.1/9.2 改写版）做回归金标。
+5. ~~用 example（§9.1/9.2 改写版）做回归金标~~ **已完成**（patch #8）：`examples/hello2.sl`（§9.1，map→显式 for）、`examples/objects2.sl`（§9.2 原样：trait/继承/super.say/Array<dyn>/for (var m: l)/字段初始化器/插值）；JIT+AOT 双路输出一致（`Mammal kind is: Mammal
+meow
+...
+Fish kind is: Fish`）；pass.rs `irgen_examples` 回归）。
 
 ——本文件为状态快照，随阶段推进应更新对应行。

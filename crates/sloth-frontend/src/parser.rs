@@ -394,8 +394,13 @@ impl Parser {
                 let (fname, _) = self.ident("field name")?;
                 self.expect(Tok::Colon, "':' after field name (fields require types)")?;
                 let fty = self.ty()?;
+                let finit = if self.eat(Tok::Assign) {
+                    Some(self.expr(0)?)
+                } else {
+                    None
+                };
                 self.expect(Tok::Semi, "';' after field")?;
-                fields.push(FieldDecl { mutable, name: fname, ty: fty });
+                fields.push(FieldDecl { mutable, name: fname, ty: fty, init: finit });
             } else if self.is_kw("func") {
                 self.ptr += 1;
                 let (mname, _, f) = self.func_after_kw()?;

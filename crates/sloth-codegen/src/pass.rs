@@ -769,3 +769,33 @@ mod irgen_p3d {
         );
     }
 }
+
+
+// examples/ regression gold (§9.1/§9.2 adapted versions)
+mod irgen_examples {
+    use super::*;
+
+    fn ws_root() -> std::path::PathBuf {
+        let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        std::path::PathBuf::from(md).join("..").join("..").join("examples")
+    }
+
+    fn run_example(name: &str) {
+        let p = ws_root().join(name);
+        let src = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {:?}: {}", p, e));
+        run_src(&src, "main").unwrap();
+    }
+
+    /// §9.1: array of strings, for-in-array, string-interpolation prints
+    #[test]
+    fn example_hello2_runs() {
+        run_example("hello2.sl");
+    }
+
+    /// §9.2: trait dispatch, inheritance super chain, dyn array iteration,
+    /// field initializers, interpolated str fields
+    #[test]
+    fn example_objects2_runs() {
+        run_example("objects2.sl");
+    }
+}
