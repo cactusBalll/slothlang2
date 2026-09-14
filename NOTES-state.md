@@ -41,7 +41,7 @@
 ## 已知工程债 / 风险
 
 1. irgen 仍是**文本拼接 + 事后 normalize_indices 正规化**：新 op 类型（如 index以外的 memref 类型、f64 全）需逐处验证；跨模块 `%vN` 名冲突历史 bug 即源于全局索引改写。
-2. `pass.rs` 测试追加多次出现 `#[test]`/函数头重复的编辑事故（python str.replace 锚点），每次需人工修复——建议改为 append-only 或 fixture 文件驱动。
+~~2. `pass.rs` 测试追加多次出现 `#[test]`/函数头重复的编辑事故（python str.replace 锚点），每次需人工修复——建议改为 append-only 或 fixture 文件驱动。~~
 3. `emit_call` 分支顺序复杂（ctor→方法→本地函数→lambda→跨模块→builtin），限定名 `lib.fn()` 的 ctor 合法性仅查 class_ids；建议重构为符号表驱动。
 4. `run` 模式 segfault 史（context 生存期）：临时表达式持 raw 指针；已在 multimod 路径用绑定变量规避，仍未全局审计。
 5. `expr_to_path`（parser.rs:968）已修（this/super 段）；`super.x` 路径已在 irgen 消费（Assign super 段 → 本对象字段槽写入）。
