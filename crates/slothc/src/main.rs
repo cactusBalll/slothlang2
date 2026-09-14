@@ -1,82 +1,93 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // usage: slothc <check|ir|run> file.sl   |   slothc <file.mlir> (raw IR probe)
-    let mut raw_probe = String::new();
-    let mut mode = String::new();
-    let mut path = String::new();
-    let mut it = args[2..].iter();
-    let mut want_raw = false;
-    match args.get(1) {
-        Some(a) => match a.as_str() {
-            "check" | "ir" | "run" => {
-                mode = a.clone();
-                if let Some(p) = it.next() {
-                    path = p.clone();
+    if let Err(e) = dispatch(&args) {
+        eprintln!("err: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn dispatch(args: &Vec<String>) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err("usage: slothc <check|ir|run|build> file.sl [out]".to_string());
+    }
+    let mode = args[1].clone();
+    match mode.as_str() {
+        "check" | "ir" | "run" | "build" => {
+            if args.len() < 3 {
+                return Err("missing file".to_string());
+            }
+            let path = args[2].clone();
+            let out_path = if mode == "build" && args.len() > 3 {
+                args[3].clone()
+            } else {
+                String::new()
+            };
+            let src = std::fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+            match mode.as_str() {
+                "check" => {
+                    sloth_codegen::irgen::compile_to_ir(&src, "main")?;
+                    Ok("check ok".to_string())
                 }
-            }
-            _ => {
-                want_raw = true;
-                raw_probe = a.clone();
-            }
-        },
-        None => {
-            eprintln!("usage: slothc <check|ir|run> file.sl | <file.mlir>");
-            std::process::exit(2);
-        }
-    }
-    let _ = want_raw;
-    if raw_probe.is_empty() {
-        path = params_path(&path, args.len());
-    }
-    if !raw_probe.is_empty() {
-        let src = std::fs::read_to_string(&raw_probe).expect("read");
-        match sloth_codegen::parse_print_raw(&src, "probe.mlir") {
-            Ok(p) => println!("{}", p),
-            Err(e) => {
-                eprintln!("err: {}", e);
-                std::process::exit(1);
+                "ir" => sloth_codegen::irgen::compile_to_ir(&src, "main"),
+                "run" => {
+                    sloth_codegen::pass::run_src(&src, "main")?;
+                    Ok(String::new())
+                }
+                "build" => build_mode(&src, if out_path.is_empty() { "sloth_app" } else { &out_path }),
+                _ => unreachable!(),
             }
         }
-        return;
-    }
-    if path.is_empty() {
-        eprintln!("missing file");
-        std::process::exit(2);
-    }
-    let _ = mode.as_str();
-    let src = std::fs::read_to_string(&path).expect("read");
-    match run_mode(&mode, &src) {
-        Ok(out) => {
-            if !out.is_empty() {
-                println!("{}", out);
-            }
-        }
-        Err(e) => {
-            eprintln!("err: {}", e);
-            std::process::exit(1);
+        _ => {
+            let src = std::fs::read_to_string(&args[1]).map_err(|e| format!("read: {}", e))?;
+            let p = sloth_codegen::parse_print_raw(&src, "probe.mlir")?;
+            Ok(p)
         }
     }
 }
 
-fn params_path(p: &str, argc: usize) -> String {
-    if argc > 2 && !p.is_empty() {
-        return p.to_string();
+fn build_mode(src: &str, out_path: &str) -> Result<String, String> {
+    let ir = sloth_codegen::irgen::compile_to_ir(src, "main")?;
+    let wrapper = "  func.func @main() -> i32 attributes {llvm.emit_c_interface} {\n    call @sloth_main() : () -> ()\n    %z = arith.constant 0 : i32\n    return %z : i32\n  }\n";
+    let closed = ir.strip_suffix("}\n").unwrap_or(&ir);
+    let full = format!("{}\n{}\n}}\n", closed, wrapper);
+    std::fs::write("/tmp/opencode/app.mlir", &full).map_err(|e| e.to_string())?;
+    let st = std::process::Command::new("/usr/lib/llvm-21/bin/mlir-opt")
+        .args([
+            "/tmp/opencode/app.mlir",
+            "-o",
+            "/tmp/opencode/app-llvm.mlir",
+            "--canonicalize",
+            "--cse",
+            "--convert-func-to-llvm",
+            "--convert-arith-to-llvm",
+            "--convert-index-to-llvm",
+            "--convert-cf-to-llvm",
+            "--finalize-memref-to-llvm",
+            "--reconcile-unrealized-casts",
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err("mlir-opt failed".to_string());
     }
-    p.to_string()
-}
-
-fn run_mode(mode: &str, src: &str) -> Result<String, String> {
-    match mode {
-        "check" => {
-            let ir = sloth_codegen::irgen::compile_to_ir(src, "main")?;
-            let _ = ir;
-            Ok("check ok".to_string())
-        }
-        "ir" => sloth_codegen::irgen::compile_to_ir(src, "main"),
-        "run" => {
-            sloth_codegen::pass::run_src(src, "main")?;
-            Ok(String::new())
-        }
-        _ => Err("unknown mode".to_string()),
+    let st2 = std::process::Command::new("/usr/lib/llvm-21/bin/mlir-translate")
+        .args(["--mlir-to-llvmir", "/tmp/opencode/app-llvm.mlir", "-o", "/tmp/opencode/app.ll"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !st2.success() {
+        return Err("mlir-translate failed".to_string());
     }
+    let st3 = std::process::Command::new("clang")
+        .args([
+            "/tmp/opencode/app.ll",
+            "/home/undatus63/slothlang2/target/debug/libsloth_rt.so",
+            "-o",
+            out_path,
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !st3.success() {
+        return Err("clang link failed".to_string());
+    }
+    Ok(format!("built: {}", out_path))
 }
