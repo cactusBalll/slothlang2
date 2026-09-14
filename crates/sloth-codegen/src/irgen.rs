@@ -1599,3 +1599,15 @@ impl ModEmitter {
         (r, plan.ret)
     }
 }
+
+/// parse + lower a sloth2 source to normalized MLIR text (no execution)
+pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
+    let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
+    let mut me = ModEmitter::new(mod_name);
+    me.emit_module(&prog);
+    if !me.diags.is_empty() {
+        return Err(format!("codegen diags: {:?}", me.diags));
+    }
+    let ir0 = ModEmitter::take_ir(&mut me);
+    Ok(normalize_indices(&ir0))
+}
