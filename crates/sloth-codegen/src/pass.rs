@@ -282,4 +282,23 @@ mod irgen_p4 {
         "#;
         run_src(src, "main").unwrap();
     }
+
+    #[test]
+    fn class_method_call_works() {
+        let src = r#"
+            class Counter {
+                var n: int;
+                func __init__(a: int) {
+                    this.n = a;
+                }
+                func bump(d: int) -> int {
+                    this.n = this.n + d;
+                    return this.n;
+                }
+            }
+            var c = Counter(1);
+            print(c.bump(4));
+        "#;
+        run_src(src, "main").unwrap();
+    }
 }
