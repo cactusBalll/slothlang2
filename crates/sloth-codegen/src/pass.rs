@@ -340,6 +340,25 @@ mod irgen_p4 {
     }
 
     #[test]
+    fn lambda_plain_works() {
+        let src = r#"
+            var add = |a: int, b: int| { return a + b; };
+            print(add(2, 3));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn lambda_captures_works() {
+        let src = r#"
+            var base = 10;
+            var inc = |x: int| { return x + base; };
+            print(inc(5));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
     fn class_method_call_works() {
         let src = r#"
             class Counter {

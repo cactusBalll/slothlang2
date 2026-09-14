@@ -28,6 +28,15 @@ pub enum Ty {
 pub struct FnTy {
     pub params: Vec<TyId>,
     pub ret: TyId,
+    /// lambda frame metadata (None for named function types)
+    pub lam: Option<LamMeta>,
+}
+
+/// metadata attached to lambda values (frames capture by snapshot)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LamMeta {
+    pub sym: String,
+    pub caps: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,14 +88,14 @@ impl Reg {
                 self.mk(Ty::Map(nk, nv))
             }
             Ty::Fn(f) => {
-                let params = FnTy { params: f.params.clone(), ret: f.ret };
+                let params = FnTy { params: f.params.clone(), ret: f.ret, lam: None };
                 let ps: Vec<TyId> = params
                     .params
                     .iter()
                     .map(|p| self.subst(*p, map))
                     .collect();
                 let nr = self.subst(params.ret, map);
-                self.mk(Ty::Fn(FnTy { params: ps, ret: nr }))
+                self.mk(Ty::Fn(FnTy { params: ps, ret: nr, lam: None }))
             }
             Ty::Named(n, args) => {
                 let a2: Vec<TyId> = args.iter().map(|a| self.subst(*a, map)).collect();

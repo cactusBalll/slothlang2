@@ -6,7 +6,7 @@
 use crate::sys;
 use sloth_frontend::ast::*;
 use sloth_frontend::lexer::{Pos, StrPart};
-use sloth_frontend::ty::{Diag, Reg, Ty, TyId};
+use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
 use std::collections::HashMap;
 
 /// Layout width of an object word (bytes); objects: [cls_info ptr, k/V...]
@@ -63,6 +63,8 @@ pub struct ModEmitter {
     pub foreign_cls: std::collections::HashSet<String>,
     /// module that owns a class (own modules use `name`; foreign classes owned mod)
     pub cls_mod: HashMap<String, String>,
+    /// lambda function counter (unique symbols per lambda site)
+    pub lamcount: usize,
 }
 
 pub struct ClassInfo {
@@ -97,6 +99,7 @@ impl ModEmitter {
             mod_alias: HashMap::new(),
             foreign_cls: std::collections::HashSet::new(),
             cls_mod: HashMap::new(),
+            lamcount: 0,
         }
     }
 
@@ -189,6 +192,86 @@ impl ModEmitter {
         ));
         self.init_mods.push(mname.to_string());
         self.cur_mod = self.name.clone();
+    }
+
+    /// snapshot-capturing lambda: value = frame obj; symbol = clo function
+    fn emit_lambda(&mut self, fw: &mut FnWalk, l: &Lambda, pos: &Pos) -> (String, TyId) {
+        self.lamcount += 1;
+        let lname = format!("lam{}", self.lamcount);
+        let caps = lambda_caps(self, l);
+        let ncap = caps.len();
+        let ret = match &l.ret {
+            Some(t) => self.ty_of(t),
+            None => self.r.mk(Ty::I64),
+        };
+        // frame allocation through the object runtime
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        let cid = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", cid));
+        let ci = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
+            ci, z, cid
+        ));
+        let nf = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", nf, ncap));
+        let frame = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
+            frame, ci, nf
+        ));
+        // snapshot each captured variable into the frame words
+        for (j, cn) in caps.iter().enumerate() {
+            let (cv, _ct) = match fw.lookup(cn) {
+                Some((a, t)) => {
+                    let zz = fw.v();
+                    let mty = memref_cell_ty(self, t);
+                    fw.op(&format!("    {} = arith.constant 0 : i64", zz));
+                    let vv = fw.v();
+                    fw.op(&format!("    {} = memref.load {}[{}] : {}", vv, a, zz, mty));
+                    (vv, t)
+                }
+                None => {
+                    self.err(pos, format!("lambda captures unknown `{}`", cn));
+                    (String::new(), self.r.mk(Ty::Unit))
+                }
+            };
+            let zi = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", zi, j));
+            fw.op(&format!(
+                "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                frame, zi, cv
+            ));
+        }
+        // construct the closured function body
+        let mut params: Vec<Param> = caps
+            .iter()
+            .map(|c| Param { name: c.clone(), ty: None })
+            .collect();
+        params.extend(l.params.iter().cloned());
+        let fd = FuncDef {
+            type_params: Vec::new(),
+            params,
+            variadic: None,
+            ret: Some(l.ret.clone().unwrap_or_else(|| Type::prim(Prim::Int))),
+            body: l.body.clone(),
+        };
+        let sym = self.emit_func(&lname, None, &fd, None, false);
+        let pty: Vec<TyId> = l
+            .params
+            .iter()
+            .map(|p| match &p.ty {
+                Some(t) => self.ty_of(t),
+                None => self.r.mk(Ty::I64),
+            })
+            .collect();
+        let ft = self.r.mk(Ty::Fn(FnTy {
+            params: pty,
+            ret,
+            lam: Some(LamMeta { sym, caps }),
+        }));
+        (frame, ft)
     }
 
     fn err(&mut self, pos: &Pos, msg: String) {
@@ -336,7 +419,7 @@ impl ModEmitter {
                     .map(|p| self.ty_of(p))
                     .collect();
                 let nr = self.ty_of(&f.ret);
-                self.r.mk(Ty::Fn(FnTy { params: ps, ret: nr }))
+                self.r.mk(Ty::Fn(FnTy { params: ps, ret: nr, lam: None }))
             }
             SimpleType::Dyn(t) => self.r.mk(Ty::Dyn(t.clone())),
             SimpleType::Named(n, args) => {
@@ -1041,6 +1124,9 @@ impl ModEmitter {
                 let t = self.r.mk(Ty::Str);
                 (fin, t)
             }
+            ExprNode::Lambda(l) => {
+                return self.emit_lambda(fw, l, &e.pos);
+            }
             ExprNode::Ident(name) => {
                 if name == "true" || name == "false" {
                     let b = name == "true";
@@ -1405,6 +1491,57 @@ impl ModEmitter {
             ));
             return (r, plan.ret);
         }
+        // lambda value call: local symbol carrying a lambda frame dispatches via its sym
+        if let Some((_lv, lt)) = fw.lookup(&name) {
+            let larr = match self.r.get(lt) {
+                Ty::Fn(ft) => ft.lam.clone().map(|lam| (ft.ret, lam)),
+                _ => None,
+            };
+            if let Some((lret, lam)) = larr {
+                // lambda invoked via its frame value: capt words loaded back in order
+                let framev = match fw.lookup(&name) {
+                    Some((fv, _)) => {
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        let vv = fw.v();
+                        fw.op(&format!(
+                            "    {} = memref.load {}[{}] : memref<1xi64>",
+                            vv, fv, z
+                        ));
+                        Some((fv, vv))
+                    }
+                    None => None,
+                };
+                let mut vals: Vec<String> = Vec::new();
+                let mut tys: Vec<String> = Vec::new();
+                if let Some((_fv, frame)) = framev {
+                    for j in 0..lam.caps.len() {
+                        let zi = fw.v();
+                        fw.op(&format!("    {} = arith.constant {} : i64", zi, j));
+                        let cv = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                            cv, frame, zi
+                        ));
+                        vals.push(cv);
+                        tys.push("i64".to_string());
+                    }
+                }
+                for a in args {
+                    let (v, t) = self.emit_expr(fw, a);
+                    vals.push(v);
+                    tys.push(mlir_word_ty(t, &self.r));
+                }
+                let sig = tys.join(", ");
+                let r = fw.v();
+                let rt = mlir_ret_ty(self, lret);
+                fw.op(&format!(
+                    "    {} = call @{}({}) : ({}) -> {}",
+                    r, lam.sym, vals.join(", "), sig, rt
+                ));
+                return (r, lret);
+            }
+        }
         // foreign-module function: symbol was pre-mangled at import time
         if let Some(fs) = self.cross_funcs.get(&name).cloned() {
             let r = fw.v();
@@ -1629,6 +1766,117 @@ impl ModEmitter {
 
 fn memref_cell_ty(me: &ModEmitter, t: TyId) -> &'static str {
     if me.is_float(t) { "memref<1xf64>" } else { "memref<1xi64>" }
+}
+
+/// free variables of a lambda body (used minus declared/params), in first-use order
+fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
+    let mut used: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &l.params {
+        decls.insert(p.name.clone());
+    }
+    let mut capfn = |n: &String| {
+        if seen.insert(n.clone()) {
+            used.push(n.clone());
+        }
+    };
+    walk_ids_stmt(&l.body, &mut capfn, &mut decls);
+    let mut out: Vec<String> = Vec::new();
+    let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for u in used {
+        if !decls.contains(&u) && !me.globals.contains_key(&u) && got.insert(u.clone()) {
+            out.push(u);
+        }
+    }
+    out
+}
+
+/// collect identifier uses inside statements, tracking declarations
+fn walk_ids_stmt(
+    s: &Stmt,
+    push_use: &mut dyn FnMut(&String),
+    decls: &mut std::collections::HashSet<String>,
+) {
+    match &s.node {
+        StmtNode::Expr(e) => walk_ids_expr(e, push_use, decls),
+        StmtNode::Let { name, init, .. } => {
+            walk_ids_expr(init, push_use, decls);
+            decls.insert(name.clone());
+        }
+        StmtNode::Assign { target, value } => {
+            walk_ids_expr(value, push_use, decls);
+            for seg in target {
+                if let PathSeg::Name(n) = seg {
+                    push_use(n);
+                }
+                if let PathSeg::Index(e) = seg {
+                    walk_ids_expr(e, push_use, decls);
+                }
+            }
+        }
+        StmtNode::While { cond, body } => {
+            walk_ids_expr(cond, push_use, decls);
+            walk_ids_stmt(body, push_use, decls);
+        }
+        StmtNode::If { cond, then_, else_ } => {
+            walk_ids_expr(cond, push_use, decls);
+            walk_ids_stmt(then_, push_use, decls);
+            if let Some(els) = else_ {
+                walk_ids_stmt(els, push_use, decls);
+            }
+        }
+        StmtNode::For { var, iter, body } => {
+            walk_ids_expr(iter, push_use, decls);
+            walk_ids_stmt(body, push_use, decls);
+            decls.insert(var.clone());
+        }
+        StmtNode::Return(Some(e)) => {
+            walk_ids_expr(e, push_use, decls);
+        }
+        StmtNode::Return(None) | StmtNode::Break | StmtNode::Continue => {}
+        StmtNode::Block(ss) => {
+            for st in ss {
+                walk_ids_stmt(st, push_use, decls);
+            }
+        }
+    }
+}
+
+/// collect identifier uses inside expressions (lambda-free path)
+fn walk_ids_expr(
+    e: &Expr,
+    push_use: &mut dyn FnMut(&String),
+    decls: &mut std::collections::HashSet<String>,
+) {
+    match &e.node {
+        ExprNode::Ident(n) => push_use(n),
+        ExprNode::Call { callee, args } => {
+            walk_ids_expr(callee, push_use, decls);
+            for a in args {
+                walk_ids_expr(a, push_use, decls);
+            }
+        }
+        ExprNode::Field { obj, .. } => walk_ids_expr(obj, push_use, decls),
+        ExprNode::Index { obj, idx } => {
+            walk_ids_expr(obj, push_use, decls);
+            walk_ids_expr(idx, push_use, decls);
+        }
+        ExprNode::Arith { op: _, lhs, rhs }
+        | ExprNode::Bin { op: _, lhs, rhs } => {
+            walk_ids_expr(lhs, push_use, decls);
+            walk_ids_expr(rhs, push_use, decls);
+        }
+        ExprNode::Un { expr, .. } => walk_ids_expr(expr, push_use, decls),
+        ExprNode::List(xs) => {
+            for x in xs {
+                walk_ids_expr(x, push_use, decls);
+            }
+        }
+        ExprNode::Int(_) | ExprNode::Float(_) | ExprNode::Bool(_)
+        | ExprNode::Str(_) | ExprNode::Nil | ExprNode::This | ExprNode::Super => {}
+        _ => {}
+    }
 }
 
 fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
