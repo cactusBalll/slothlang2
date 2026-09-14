@@ -59,6 +59,10 @@ pub struct ModEmitter {
     pub init_mods: Vec<String>,
     /// import aliases: alias -> module name
     pub mod_alias: HashMap<String, String>,
+    /// foreign classes imported (ids 100+; offset starts here)
+    pub foreign_cls: std::collections::HashSet<String>,
+    /// module that owns a class (own modules use `name`; foreign classes owned mod)
+    pub cls_mod: HashMap<String, String>,
 }
 
 pub struct ClassInfo {
@@ -91,6 +95,8 @@ impl ModEmitter {
             declared_syms: std::collections::HashSet::new(),
             init_mods: Vec::new(),
             mod_alias: HashMap::new(),
+            foreign_cls: std::collections::HashSet::new(),
+            cls_mod: HashMap::new(),
         }
     }
 
@@ -113,6 +119,31 @@ impl ModEmitter {
                     self.emit_func(&d.name, None, f, None, false);
                 }
                 DeclNode::Class(c) => {
+                    let cid: i64 = 100 + self.foreign_cls.len() as i64;
+                    self.foreign_cls.insert(d.name.clone());
+                    self.cls_mod.insert(d.name.clone(), mname.to_string());
+                    self.class_ids.insert(d.name.clone(), cid);
+                    // register info for ctor + method dispatch
+                    let fields = c
+                        .fields
+                        .iter()
+                        .map(|fd| (fd.name.clone(), self.ty_of(&fd.ty), fd.mutable))
+                        .collect();
+                    let meth: Vec<(String, FuncDef)> = c
+                        .methods
+                        .iter()
+                        .map(|m| (m.name.clone(), m.fd.clone()))
+                        .collect();
+                    self.classes.insert(
+                        d.name.clone(),
+                        ClassInfo {
+                            name: d.name.clone(),
+                            fields,
+                            methods: meth,
+                            superclass: c.superclass.clone(),
+                            impls: c.impls.clone(),
+                        },
+                    );
                     for m in &c.methods {
                         self.emit_func(&m.name, Some(&d.name), &m.fd, None, false);
                     }
@@ -1314,6 +1345,17 @@ impl ModEmitter {
                 if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
                     return self.emit_global_read(fw, &g, gt);
                 }
+                // qualified constructor: lib.Cls(args)
+                if self.classes.contains_key(mname2.as_str())
+                    && self.class_ids.contains_key(mname2.as_str())
+                {
+                    let mut cargv: Vec<(String, TyId)> = Vec::new();
+                    for a in args {
+                        let (v, t) = self.emit_expr(fw, a);
+                        cargv.push((v, t));
+                    }
+                    return self.emit_new_obj(fw, mname2, &cargv, &Vec::new(), pos);
+                }
             }
             let (rv, rt) = self.emit_expr(fw, obj);
             recv = Some((rv.clone(), rt));
@@ -1727,7 +1769,14 @@ impl ModEmitter {
             .get(clsname)
             .and_then(|ci| ci.methods.iter().find(|(n, _)| n == "__init__").map(|(_, f)| f.clone()));
         if let Some(fd) = fdinit {
+            let saved_mod = self.cur_mod.clone();
+            self.cur_mod = self
+                .cls_mod
+                .get(clsname)
+                .cloned()
+                .unwrap_or_else(|| self.name.clone());
             let plan = self.plan_mangled("__init__", Some(clsname), &fd, None);
+            self.cur_mod = saved_mod;
             let vals = [r2.clone()].iter().cloned()
                 .chain(argv.iter().map(|x| x.0.clone()))
                 .collect::<Vec<_>>().join(", ");
@@ -1767,8 +1816,15 @@ impl ModEmitter {
         if mname == "__init__" {
             return self.emit_new_obj(fw, cls, argv, sigargs, pos);
         }
-        // direct method dispatch: obj.method(args) => sloth_main_Cls__method(this, args...)
+        // direct method dispatch: obj.method(args) => sloth_<mod>_Cls__method(this, args...)
+        let saved_mod = self.cur_mod.clone();
+        self.cur_mod = self
+            .cls_mod
+            .get(cls)
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
         let plan = self.plan_mangled(mname, Some(cls), m, None);
+        self.cur_mod = saved_mod;
         let r = fw.v();
         let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
         let tys = sigargs.join(", ");

@@ -327,6 +327,19 @@ mod irgen_p4 {
     }
 
     #[test]
+    fn multimod_foreign_class_works() {
+        let d = std::env::temp_dir().join("sloth_mmc");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(
+            d.join("lib.mm.sl"),
+            "pub class Counter {\n    var n: int;\n    func __init__(a: int) {\n        this.n = a;\n    }\n    func bump(d: int) -> int {\n        this.n = this.n + d;\n        return this.n;\n    }\n}\n",
+        )
+        .unwrap();
+        let src = "import \"lib.mm.sl\" as lib;\nvar c = lib.Counter(1);\nprint(c.bump(4));\nprint(c.n);\n";
+        run_src_multimod(src, &d).unwrap();
+    }
+
+    #[test]
     fn class_method_call_works() {
         let src = r#"
             class Counter {
