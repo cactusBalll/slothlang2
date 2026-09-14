@@ -377,3 +377,255 @@ mod irgen_p4 {
         run_src(src, "main").unwrap();
     }
 }
+
+#[cfg(test)]
+mod irgen_p3c {
+    use super::*;
+
+    /// single inheritance: fields laid out across the chain, inherited
+    /// method called statically, ctor height includes base fields
+    #[test]
+    fn class_inherit_fields_works() {
+        let src = r#"
+            class A {
+                var x: int;
+                func __init__(v: int) {
+                    this.x = v;
+                }
+                func getx() -> int {
+                    return this.x;
+                }
+            }
+            class B: A {
+                var y: int;
+                func __init__() {
+                    super.__init__(5);
+                    this.y = 2;
+                }
+                func total() -> int {
+                    return this.x + this.y;
+                }
+            }
+            var b = B();
+            print(b.x);
+            print(b.y);
+            print(b.getx());
+            print(b.total());
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// method override + super.method() delegation (in this-based dispatch)
+    #[test]
+    fn class_super_method_works() {
+        let src = r#"
+            class Base {
+                var n: int;
+                func __init__(v: int) {
+                    this.n = v;
+                }
+                func v() -> int {
+                    return this.n;
+                }
+            }
+            class Sub: Base {
+                var m: int;
+                func __init__(a: int, b: int) {
+                    super.__init__(a);
+                    this.m = b;
+                }
+                func v() -> int {
+                    return super.v() + this.m;
+                }
+            }
+            var s = Sub(3, 10);
+            print(s.v());
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// super.x = v: write an inherited field slot through this
+    #[test]
+    fn class_super_assign_works() {
+        let src = r#"
+            class P {
+                var x: int;
+                func __init__() {
+                    this.x = 0;
+                }
+            }
+            class C: P {
+                func __init__() {
+                    super.__init__();
+                    super.x = 9;
+                }
+            }
+            var c = C();
+            print(c.x);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// unit-return methods and unit-return locals don't bind call results
+    #[test]
+    fn unit_calls_no_bind_works() {
+        let src = r#"
+            func shout(msg: str) {
+                print(msg);
+            }
+            class K {
+                var n: int;
+                func __init__(v: int) {
+                    this.n = v;
+                }
+                func announce() {
+                    print(this.n);
+                }
+            }
+            shout("hi");
+            var k = K(4);
+            k.announce();
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod irgen_p3d {
+    use super::*;
+
+    /// dyn Trait: runtime dispatch over implementing classes
+    #[test]
+    fn trait_dyn_dispatch_works() {
+        let src = r#"
+            trait Speaker {
+                func say(): unit;
+            }
+            class Fish impl Speaker {
+                func say(): unit {
+                    print("glub");
+                }
+            }
+            class Dog impl Speaker {
+                func say(): unit {
+                    print("woof");
+                }
+            }
+            func announce(s: dyn Speaker) {
+                s.say();
+            }
+            announce(Fish());
+            announce(Dog());
+            var s: dyn Speaker = Dog();
+            s.say();
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// inherited method satisfies a trait impl; trait-typed param position
+    #[test]
+    fn trait_inherited_impl_works() {
+        let src = r#"
+            trait Counter {
+                func bump(d: int): int;
+            }
+            class Base {
+                var n: int;
+                func __init__(n: int) {
+                    this.n = n;
+                }
+                func bump(d: int) -> int {
+                    this.n = this.n + d;
+                    return this.n;
+                }
+            }
+            class Inc: Base impl Counter {
+                var step: int;
+                func __init__(n: int) {
+                    super.__init__(n);
+                    this.step = 1;
+                }
+            }
+            func twosteps(c: dyn Counter) -> int {
+                return c.bump(1) + c.bump(1);
+            }
+            var i = Inc(0);
+            print(twosteps(i));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// vtable entry resolves to the overriding method
+    #[test]
+    fn trait_override_dispatch_works() {
+        let src = r#"
+            trait Shape {
+                func area(): int;
+            }
+            class Base impl Shape {
+                var w: int;
+                func __init__(w: int) {
+                    this.w = w;
+                }
+                func area(): int {
+                    return 0;
+                }
+            }
+            class Sq: Base impl Shape {
+                var h: int;
+                func __init__(w: int, h: int) {
+                    super.__init__(w);
+                    this.h = h;
+                }
+                func area(): int {
+                    return this.w * this.h;
+                }
+            }
+            func show(s: dyn Shape) {
+                print(s.area());
+            }
+            var b = Base(9);
+            var q = Sq(3, 4);
+            show(b);
+            show(q);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// broken impl (missing trait method) reports a codegen diagnostic
+    #[test]
+    fn trait_missing_method_diag() {
+        let src = r#"
+            trait Speaker {
+                func say(): unit;
+            }
+            class Silent impl Speaker {
+            }
+            var s = Silent();
+        "#;
+        let prog = sloth_frontend::parser::parse(src).unwrap();
+        let mut me = ModEmitter::new("main");
+        me.emit_module(&prog);
+        assert!(
+            !me.diags.is_empty(),
+            "expected a diagnostic for missing trait method"
+        );
+    }
+
+    /// unknown trait name in impl reports a codegen diagnostic
+    #[test]
+    fn trait_unknown_impl_diag() {
+        let src = r#"
+            class Ghost impl Nowhere {
+            }
+            var g = Ghost();
+        "#;
+        let prog = sloth_frontend::parser::parse(src).unwrap();
+        let mut me = ModEmitter::new("main");
+        me.emit_module(&prog);
+        assert!(
+            !me.diags.is_empty(),
+            "expected a diagnostic for unknown trait"
+        );
+    }
+}

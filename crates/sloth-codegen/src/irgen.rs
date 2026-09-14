@@ -65,6 +65,14 @@ pub struct ModEmitter {
     pub cls_mod: HashMap<String, String>,
     /// lambda function counter (unique symbols per lambda site)
     pub lamcount: usize,
+    /// registration order of classes (deterministic dyn-dispatch chain)
+    pub class_order: Vec<String>,
+    /// vtable slot assignment: (trait, method) -> (index, ret-float, ret-unit)
+    pub vt_slots: HashMap<(String, String), usize>,
+    /// methods emitted inside llvm.func (vtable-addressable)
+    pub llvm_method: std::collections::HashSet<(String, String)>,
+    /// object bodies carry a fixed vtable capacity (total slots)
+    pub vt_cap: usize,
 }
 
 pub struct ClassInfo {
@@ -100,6 +108,10 @@ impl ModEmitter {
             foreign_cls: std::collections::HashSet::new(),
             cls_mod: HashMap::new(),
             lamcount: 0,
+            class_order: Vec::new(),
+            vt_slots: HashMap::new(),
+            llvm_method: std::collections::HashSet::new(),
+            vt_cap: 0,
         }
     }
 
@@ -111,6 +123,12 @@ impl ModEmitter {
             self.mod_alias.insert(a.to_string(), mname.to_string());
         }
         let qname = alias.unwrap_or(mname).to_string();
+        // foreign traits first (impl checks resolve against them)
+        for d in &prog.decls {
+            if let DeclNode::Trait(t) = &d.node {
+                self.traits.insert(d.name.clone(), t.methods.clone());
+            }
+        }
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
@@ -126,6 +144,9 @@ impl ModEmitter {
                     self.foreign_cls.insert(d.name.clone());
                     self.cls_mod.insert(d.name.clone(), mname.to_string());
                     self.class_ids.insert(d.name.clone(), cid);
+                    if !self.class_order.contains(&d.name) {
+                        self.class_order.push(d.name.clone());
+                    }
                     // register info for ctor + method dispatch
                     let fields = c
                         .fields
@@ -192,6 +213,7 @@ impl ModEmitter {
         ));
         self.init_mods.push(mname.to_string());
         self.cur_mod = self.name.clone();
+        self.finalize_vt();
     }
 
     /// snapshot-capturing lambda: value = frame obj; symbol = clo function
@@ -298,6 +320,8 @@ struct FnWalk {
     term: bool,
     /// shared return/end block label for this function
     end_label: String,
+    /// class this function/method body belongs to (for this/super resolution)
+    cur_cls: Option<String>,
 }
 
 impl FnWalk {
@@ -457,7 +481,13 @@ impl ModEmitter {
                 let v = it.next().unwrap_or_else(|| self.r.mk(Ty::Unit));
                 self.r.mk(Ty::Map(k, v))
             }
-            _ => self.r.mk(Ty::Named(n.to_string(), a)),
+            _ => {
+                // trait name as a type position: an interface reference
+                if a.is_empty() && self.traits.contains_key(n) {
+                    return self.r.mk(Ty::Dyn(n.to_string()));
+                }
+                self.r.mk(Ty::Named(n.to_string(), a))
+            }
         }
     }
 
@@ -504,6 +534,12 @@ impl ModEmitter {
     }
 
     pub fn collect(&mut self, prog: &Program) {
+        // traits first: type positions may resolve `T`/`dyn T` while collecting
+        for d in &prog.decls {
+            if let DeclNode::Trait(t) = &d.node {
+                self.traits.insert(d.name.clone(), t.methods.clone());
+            }
+        }
         let mut class_id = 0i64;
         for d in &prog.decls {
             match &d.node {
@@ -520,6 +556,9 @@ impl ModEmitter {
                 }
                 DeclNode::Class(c) => {
                     self.class_ids.insert(d.name.clone(), class_id);
+                    if !self.class_order.contains(&d.name) {
+                        self.class_order.push(d.name.clone());
+                    }
                     class_id += 1;
                     let fields = c
                         .fields
@@ -543,12 +582,109 @@ impl ModEmitter {
                     );
                 }
                 DeclNode::Trait(t) => {
-                    self.traits.insert(d.name.clone(), t.methods.clone());
+                    let _ = t;
+                    // already registered in the pre-pass
+                }
+            }
+        }
+        // validate `impl` surfaces after all classes are collected
+        for d in &prog.decls {
+            if let DeclNode::Class(c) = &d.node {
+                self.check_impls(&d.name, &c.impls, &d.pos);
+            }
+        }
+    }
+
+    /// check a class's declared traits: known + every method satisfied
+    /// by the class chain with the same arity (this param excluded).
+    /// Also assigns global vtable slots, marks slot-resolved methods
+    /// for llvm.func emission, and checks the call ABI (word kinds).
+    fn check_impls(&mut self, cls: &str, impls: &[String], pos: &Pos) {
+        for tr in impls {
+            let sigs = match self.traits.get(tr) {
+                Some(s) => s.clone(),
+                None => {
+                    self.err(pos, format!("unknown trait `{}` in impl", tr));
+                    continue;
+                }
+            };
+            for m in &sigs {
+                self.vt_slot(tr, &m.name);
+                match self.find_method(cls, &m.name) {
+                    Some((defcls, fd)) => {
+                        if fd.params.len() != m.params.len() {
+                            let want = m.params.len();
+                            let got = fd.params.len();
+                            self.err(
+                                pos,
+                                format!("trait `{}` method `{}` arity: want {}, `{}`.{} has {}",
+                                    tr, m.name, want, defcls, m.name, got),
+                            );
+                        }
+                        // ABI check: word kinds must match the trait signature
+                        for (i, sp) in m.params.iter().enumerate() {
+                            let sfl = self.sig_word_float(sp.ty.clone());
+                            let ft = match fd.params.get(i) {
+                                Some(p) => match &p.ty {
+                                    Some(t) => {
+                                        let it = self.ty_of(t);
+                                        self.is_float(it)
+                                    }
+                                    None => false,
+                                },
+                                None => false,
+                            };
+                            if sfl != ft {
+                                self.err(pos, format!(
+                                    "trait `{}` method `{}` param {}: ABI word mismatch",
+                                    tr, m.name, i + 1));
+                            }
+                        }
+                        let sret = self.sig_word_float(Some(m.ret.clone()));
+                        let fret = match &fd.ret {
+                            Some(t) => {
+                                let it = self.ty_of(t);
+                                self.is_float(it)
+                            }
+                            None => false,
+                        };
+                        if sret != fret {
+                            self.err(pos, format!(
+                                "trait `{}` method `{}` return: ABI word mismatch",
+                                tr, m.name));
+                        }
+                        self.llvm_method
+                            .insert((defcls.clone(), m.name.clone()));
+                    }
+                    None => {
+                        self.err(
+                            pos,
+                            format!("trait `{}` method `{}` not implemented by `{}`", tr, m.name, cls),
+                        );
+                    }
                 }
             }
         }
     }
 
+    /// (trait, method) -> slot; allocates on first sight
+    fn vt_slot(&mut self, tr: &str, m: &str) -> usize {
+        let key = (tr.to_string(), m.to_string());
+        if let Some(&s) = self.vt_slots.get(&key) {
+            return s;
+        }
+        let s = self.vt_slots.len();
+        self.vt_slots.insert(key, s);
+        s
+    }
+
+    /// float word? for a syntactic param/ret type (None / unit -> i64)
+    fn sig_word_float(&self, t: Option<Type>) -> bool {
+        match t {
+            Some(ty) => !matches!(ty, Type::Unit) && matches!(ty, Type::Simple(SimpleType::Float)),
+            None => false,
+        }
+    }
 }
 
 
@@ -601,6 +737,10 @@ impl ModEmitter {
         if self.emitted_names.contains(&plan.mangled) {
             return plan.mangled;
         }
+        // methods addressable by vtable slots are emitted as llvm.func
+        let is_ll = cls
+            .map(|c| self.llvm_method.contains(&(c.to_string(), name.to_string())))
+            .unwrap_or(false);
         self.emitted_names.push(plan.mangled.clone());
         let retf = self.is_float(plan.ret);
         let mut fw = FnWalk {
@@ -614,7 +754,9 @@ impl ModEmitter {
             bb: 0,
             term: false,
             end_label: "^end".to_string(),
+            cur_cls: None,
         };
+        fw.cur_cls = cls.map(|c| c.to_string());
         let rf = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", rf));
         fw.ret_flag = rf;
@@ -656,7 +798,14 @@ impl ModEmitter {
             fw.op(&format!("    {} = memref.load {}[{}] : {}", v, fw.ret_alloca, zi, rty));
             retval = format!(" {}", v);
         }
-        if self.is_unit(plan.ret) {
+        if is_ll {
+            if self.is_unit(plan.ret) {
+                fw.op("    llvm.return");
+            } else {
+                let rt = if retf { "f64" } else { "i64" };
+                fw.op(&format!("    llvm.return {} : {}", retval.trim_start(), rt));
+            }
+        } else if self.is_unit(plan.ret) {
             fw.op("    return");
         } else {
             let rt = if retf { "f64" } else { "i64" };
@@ -675,12 +824,21 @@ impl ModEmitter {
                 sigtxt,
                 mlir_ret_ty(self, plan.ret),
             ));
+        } else if is_ll {
+            self.out.push_str(&format!(
+                "  llvm.func @{}({}) -> {} {{\n",
+                plan.mangled, sigtxt, mlir_ret_ty(self, plan.ret)
+            ));
         } else {
             self.out.push_str(&format!(
                 "  func.func @{}({}) -> {} {{\n",
                 plan.mangled, sigtxt, mlir_ret_ty(self, plan.ret)
             ));
         }
+        // bare `call` is func-dialect sugar valid only in func.func regions;
+        // inside llvm.func bodies it must be spelled func.call
+        let entry_text = if is_ll { entry_text.replace("call @", "func.call @") } else { entry_text };
+        let ret_text = if is_ll { ret_text.replace("call @", "func.call @") } else { ret_text };
         self.out.push_str(&entry_text);
         self.out.push_str(&ret_text);
         self.out.push_str("  }\n");
@@ -722,14 +880,50 @@ impl ModEmitter {
             }
             StmtNode::Let { mutable: _, name, ty, init } => {
                 let (v, t) = self.emit_expr(fw, init);
-                let fl = self.is_float(t);
-                // declared type (if given) must match; MVP: trust inferred
+                // declared `dyn T` / trait positions coerce the binding's type
+                let t = match ty {
+                    Some(te) => {
+                        let dt = self.ty_of(te);
+                        match self.r.get(dt) {
+                            Ty::Dyn(_) => dt,
+                            Ty::Named(n, _) if self.traits.contains_key(n.as_str()) => {
+                                // only coerce actual object values (class instances)
+                                match self.r.get(t) {
+                                    Ty::Named(_, _) => self.r.mk(Ty::Dyn(n.clone())),
+                                    _ => t,
+                                }
+                            }
+                            _ => t,
+                        }
+                    }
+                    None => t,
+                };
                 let _ = ty;
+                let fl = self.is_float(t);
                 fw.declare(name, t, fl);
                 fw.assign(name, &v, fl);
             }
             StmtNode::Assign { target, value } => {
                 let (v, _vt) = self.emit_expr(fw, value);
+                // super.x = v: store into an inherited field slot of this
+                if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) = (target.first(), target.last()) {
+                    if *h == "super" && target.len() == 2 {
+                        match fw.cur_cls.clone() {
+                            Some(cur) => {
+                                let idx = self.field_index(&cur, f);
+                                let (rv, _t) = self.emit_expr(fw, &Expr { pos: s.pos.clone(), node: ExprNode::This });
+                                let zi = fw.v();
+                                fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                                fw.op(&format!(
+                                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                                    rv, zi, v
+                                ));
+                                return;
+                            }
+                            None => self.err(&s.pos, "super.x assignment outside method".to_string()),
+                        }
+                    }
+                }
                 // object-field target: [name, field] where head is a local receiver
                 if target.len() >= 2 {
                     if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) = (target.first(), target.last()) {
@@ -1015,25 +1209,50 @@ fn mlir_word_ty(t: TyId, r: &Reg) -> String {
 impl ModEmitter {
     /// field offsets in words: idx counted from slot 2 (slot 0: cls info, 1: unused?id)
     fn field_index(&self, clsname: &str, field: &str) -> usize {
-        let depths: Vec<&str> = Vec::new();
-        let _ = depths;
+        // layout: base-class fields first; materialize the chain base-first
+        let mut chain: Vec<String> = Vec::new();
         let mut cur = Some(clsname.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    chain.push(c.clone());
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
         let mut out: usize = 0;
-        // superclass fields first
+        for c in chain {
+            let ci = match self.classes.get(&c) {
+                Some(c2) => c2,
+                None => break,
+            };
+            if let Some(pos) = ci.fields.iter().position(|(n, _t, _m)| n == field) {
+                return out + pos;
+            }
+            out += ci.fields.len();
+        }
+        out
+    }
+}
+
+impl ModEmitter {
+    /// walk the superclass chain up from `cls`, returning
+    /// (defining-class name, method def) for the first decl of `name`
+    fn find_method(&self, cls: &str, name: &str) -> Option<(String, FuncDef)> {
+        let mut cur = Some(cls.to_string());
         while let Some(c) = cur {
             if let Some(ci) = self.classes.get(&c) {
-                for (n, _t, _m) in ci.fields.iter() {
-                    if n == field {
-                        return out;
-                    }
-                    out += 1;
+                if let Some((_, f)) = ci.methods.iter().find(|(n, _)| n == name) {
+                    return Some((c, f.clone()));
                 }
                 cur = ci.superclass.clone();
                 continue;
             }
             break;
         }
-        out
+        None
     }
 }
 
@@ -1173,6 +1392,17 @@ impl ModEmitter {
                 }
                 let fl = self.is_float(at) || self.is_float(bt);
                 if fl {
+                    // promote int operands to f64 for float ops
+                    let a = if self.is_float(at) { a } else {
+                        let cv = fw.v();
+                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, a));
+                        cv
+                    };
+                    let b = if self.is_float(bt) { b } else {
+                        let cv = fw.v();
+                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, b));
+                        cv
+                    };
                     let r = fw.v();
                     let ao = match op {
                         ArithOp::Add => "arith.addf",
@@ -1362,7 +1592,7 @@ impl ModEmitter {
                 ));
                 (r, self.r.mk(Ty::Range))
             }
-            ExprNode::This => match fw.scopes.first().and_then(|sc| sc.get("this")).map(|s| (
+            ExprNode::This | ExprNode::Super => match fw.scopes.first().and_then(|sc| sc.get("this")).map(|s| (
                 s.0.clone(), s.1
             )) {
                 Some((a, t)) => {
@@ -1422,6 +1652,13 @@ impl ModEmitter {
                     let r = fw.v();
                     let vals: Vec<String> = cargv.iter().map(|x| x.0.clone()).collect();
                     let rt = mlir_ret_ty(self, fs.1);
+                    if self.is_unit(fs.1) {
+                        fw.op(&format!(
+                            "    call @{}({}) : ({}) -> ()",
+                            fs.0, vals.join(", "), csig.join(", ")
+                        ));
+                        return (String::new(), fs.1);
+                    }
                     fw.op(&format!(
                         "    {} = call @{}({}) : ({}) -> {}",
                         r, fs.0, vals.join(", "), csig.join(", "), rt
@@ -1443,10 +1680,14 @@ impl ModEmitter {
                     return self.emit_new_obj(fw, mname2, &cargv, &Vec::new(), pos);
                 }
             }
+            let is_super = matches!(&obj.node, ExprNode::Super);
+            if is_super && fw.cur_cls.is_none() {
+                self.err(pos, "super outside method".to_string());
+            }
             let (rv, rt) = self.emit_expr(fw, obj);
-            recv = Some((rv.clone(), rt));
-            argv.insert(0, (rv, rt));
+            argv.insert(0, (rv.clone(), rt));
             sigargs.insert(0, "i64".to_string());
+            recv = Some((rv, rt));
             name = match &callee.node {
                 ExprNode::Field { name: fname, .. } => fname.clone(),
                 _ => name.clone(),
@@ -1463,21 +1704,33 @@ impl ModEmitter {
                 return self.emit_new_obj(fw, &name, &argv, &sigargs, pos);
             }
         }
-        // method call inside classes
-        if let Some((rv, rt)) = recv.clone() {
-            if let Ty::Named(cls, _) = self.r.get(rt) {
-                let clsname = cls.to_string();
-                let fd = self
-                    .classes
-                    .get(&clsname)
-                    .and_then(|ci| ci.methods.iter().find(|(n, _)| *n == name).map(|(_, f)| f.clone()));
-                if let Some(m) = fd {
-                    return self.emit_method_call(fw, &clsname, &name, &m, &argv, &sigargs, pos);
-                }
-                let _ = rv;
+        // method call inside classes (chain-walks for inherited methods)
+        if let Some((recvv, rt)) = recv.clone() {
+            if let Ty::Dyn(tname) = self.r.get(rt) {
+                let tname = tname.clone();
+                // dynamic dispatch on the trait surface
+                return self.emit_dyn_call(fw, &tname, &name, &recvv, &argv, &sigargs, pos);
             }
-        }
-        // direct function call
+            if let Ty::Named(cls, _) = self.r.get(rt) {
+                // super.m(...) dispatches at the superclass, skipping own overrides
+                let is_super = matches!(&callee.node, ExprNode::Field { obj, .. } if matches!(&obj.node, ExprNode::Super));
+                let start = if is_super {
+                    match self.classes.get(cls).and_then(|ci| ci.superclass.clone()) {
+                        Some(s) => Some(s),
+                        None => {
+                            self.err(pos, format!("class `{}` has no superclass", cls));
+                            None
+                        }
+                    }
+                } else {
+                    Some(cls.to_string())
+                };
+                let m = start.and_then(|sc: String| self.find_method(&sc, &name));
+                if let Some((defcls, fd)) = m {
+                    return self.emit_method_call(fw, &defcls, &name, &fd, is_super, &argv, &sigargs, pos);
+                }
+            }
+        }        // direct function call
         if let Some(fd) = self.funcs.get(&name).cloned() {
             let plan = self.plan_func(&name, None, &fd, None);
             let r = fw.v();
@@ -1485,6 +1738,13 @@ impl ModEmitter {
             let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
             let tys = sigargs.join(", ");
             let rt = mlir_ret_ty(self, plan.ret);
+            if self.is_unit(plan.ret) {
+                fw.op(&format!(
+                    "    call @{}({}) : ({}) -> ()",
+                    sym, vals.join(", "), tys
+                ));
+                return (String::new(), plan.ret);
+            }
             fw.op(&format!(
                 "    {} = call @{}({}) : ({}) -> {}",
                 r, sym, vals.join(", "), tys, rt
@@ -1643,6 +1903,7 @@ fn emit_str_globals(me: &ModEmitter) -> String {
 impl ModEmitter {
     pub fn emit_module(&mut self, prog: &Program) -> Vec<Diag> {
         self.collect(prog);
+        self.finalize_vt();
         // 1) top-level funcs
         for d in &prog.decls {
             if let DeclNode::Func(f) = &d.node {
@@ -1669,10 +1930,11 @@ impl ModEmitter {
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),
                 ret_flag: String::new(),
-                bb: 0,
-                term: false,
-                end_label: "^smt".to_string(),
-            };
+            bb: 0,
+            term: false,
+            end_label: "^smt".to_string(),
+            cur_cls: None,
+        };
             let rf = fw.v();
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", rf));
             fw.ret_flag = rf;
@@ -1884,13 +2146,14 @@ fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         cur: String::new(),
         vcount: 1000,
         scopes: vec![HashMap::new()],
-        loops: Vec::new(),
-        ret: me.r.mk(Ty::Unit),
-        ret_alloca: String::new(),
-        ret_flag: String::new(),
-        bb: 0,
-        term: false,
-        end_label: "^ginit".to_string(),
+    loops: Vec::new(),
+    ret: me.r.mk(Ty::Unit),
+    ret_alloca: String::new(),
+    ret_flag: String::new(),
+    bb: 0,
+    term: false,
+    end_label: "^ginit".to_string(),
+    cur_cls: None,
     }
 }
 
@@ -1900,7 +2163,8 @@ pub fn normalize_indices(src: &str) -> String {
     let mut out = String::new();
     let mut chunk: Vec<String> = Vec::new();
     for line in src.lines() {
-        let starts_fn = line.trim_start().starts_with("func.func");
+        let t2 = line.trim_start();
+        let starts_fn = t2.starts_with("func.func") || t2.starts_with("llvm.func");
         if starts_fn && !chunk.is_empty() {
             out.push_str(&normalize_chunk(&chunk));
             chunk = Vec::new();
@@ -1961,15 +2225,30 @@ pub fn obj_rt_decls() -> String {
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_set_field_f64(i64, i64, f64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_cls_id(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_vt_new(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_vt_set(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_vt_get(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_set_vtable(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_vtable(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_panic_noimpl(i64) -> i64\n");
     s
 }
 
 fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
-    me.classes
-        .get(clsname)
-        .map(|ci| ci.fields.len())
-        .unwrap_or(0)
-    + 2
+    let mut n = 0usize;
+    let mut cur = Some(clsname.to_string());
+    while let Some(c) = cur {
+        match me.classes.get(&c) {
+            Some(ci) => {
+                n += ci.fields.len();
+                cur = ci.superclass.clone();
+                continue;
+            }
+            None => break,
+        }
+    }
+    n + 2
 }
 
 impl ModEmitter {
@@ -2012,18 +2291,16 @@ impl ModEmitter {
             "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             r2, cid, nfw
         ));
-        let fdinit = self
-            .classes
-            .get(clsname)
-            .and_then(|ci| ci.methods.iter().find(|(n, _)| n == "__init__").map(|(_, f)| f.clone()));
-        if let Some(fd) = fdinit {
+        self.emit_vt_build(fw, clsname, &r2);
+        let fdinit = self.find_method(clsname, "__init__");
+        if let Some((defcls, fd)) = fdinit {
             let saved_mod = self.cur_mod.clone();
             self.cur_mod = self
                 .cls_mod
-                .get(clsname)
+                .get(&defcls)
                 .cloned()
                 .unwrap_or_else(|| self.name.clone());
-            let plan = self.plan_mangled("__init__", Some(clsname), &fd, None);
+            let plan = self.plan_mangled("__init__", Some(&defcls), &fd, None);
             self.cur_mod = saved_mod;
             let vals = [r2.clone()].iter().cloned()
                 .chain(argv.iter().map(|x| x.0.clone()))
@@ -2056,12 +2333,14 @@ impl ModEmitter {
         cls: &str,
         mname: &str,
         m: &FuncDef,
+        is_super: bool,
         argv: &Vec<(String, TyId)>,
         sigargs: &Vec<String>,
         pos: &Pos,
     ) -> (String, TyId) {
         // ctor: emit the class ctor wrapper (allocates then runs __init__)
-        if mname == "__init__" {
+        // (skipped for super.__init__: that runs as a plain method on this)
+        if mname == "__init__" && !is_super {
             return self.emit_new_obj(fw, cls, argv, sigargs, pos);
         }
         // direct method dispatch: obj.method(args) => sloth_<mod>_Cls__method(this, args...)
@@ -2073,15 +2352,280 @@ impl ModEmitter {
             .unwrap_or_else(|| self.name.clone());
         let plan = self.plan_mangled(mname, Some(cls), m, None);
         self.cur_mod = saved_mod;
-        let r = fw.v();
+        let is_ll = self.llvm_method.contains(&(cls.to_string(), mname.to_string()));
         let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
         let tys = sigargs.join(", ");
-        let rt = mlir_ret_ty(self, plan.ret);
+        let ret = mlir_ret_ty(self, plan.ret);
+        let callkw = if is_ll { "llvm.call" } else { "call" };
+        if self.is_unit(plan.ret) {
+            fw.op(&format!(
+                "    {} @{}({}) : ({}) -> ()",
+                callkw, plan.mangled, vals.join(", "), tys
+            ));
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, plan.ret);
+        }
+        let r = fw.v();
         fw.op(&format!(
-            "    {} = call @{}({}) : ({}) -> {}",
-            r, plan.mangled, vals.join(", "), tys, rt
+            "    {} = {} @{}({}) : ({}) -> {}",
+            r, callkw, plan.mangled, vals.join(", "), tys, ret
         ));
         (r, plan.ret)
+    }
+}
+
+impl ModEmitter {
+    /// resolve a method plan against a class, honoring its owning module
+    fn plan_for_class(
+        &mut self,
+        mname: &str,
+        cls: &str,
+        m: &FuncDef,
+    ) -> FuncPlan {
+        let saved_mod = self.cur_mod.clone();
+        self.cur_mod = self
+            .cls_mod
+            .get(&cls.to_string())
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
+        let plan = self.plan_mangled(mname, Some(cls), m, None);
+        self.cur_mod = saved_mod;
+        plan
+    }
+
+    /// stable slot capacity: cover every declared trait surface; called
+    /// after registration/collect and before any emission
+    fn finalize_vt(&mut self) {
+        let surfaces: Vec<(String, Vec<String>)> = self
+            .traits
+            .iter()
+            .map(|(t, ms)| (t.clone(), ms.iter().map(|m| m.name.clone()).collect()))
+            .collect();
+        for (t, ms) in surfaces {
+            for m in ms {
+                self.vt_slot(&t, &m);
+            }
+        }
+        self.vt_cap = self.vt_slots.len();
+    }
+
+    /// attach the class vtable to a fresh object (header word 1). Slot value =
+    /// raw fn pointer (llvm.mlir.addressof + llvm.ptrtoint) of the resolved
+    /// method emitting (llvm.func-marked).
+    fn emit_vt_build(&mut self, fw: &mut FnWalk, clsname: &str, obj: &str) {
+        // effective impls: union over the superclass chain
+        let mut impls: Vec<String> = Vec::new();
+        let mut cur = Some(clsname.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    for t in &ci.impls {
+                        if !impls.contains(t) {
+                            impls.push(t.clone());
+                        }
+                    }
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        if impls.is_empty() || self.vt_cap == 0 {
+            return;
+        }
+        let ncap = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", ncap, self.vt_cap));
+        let vt = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_vt_new({}) : (i64) -> i64",
+            vt, ncap
+        ));
+        let mut slots: Vec<(usize, String, String)> = self
+            .vt_slots
+            .iter()
+            .map(|((t, m), &s)| (s, t.clone(), m.clone()))
+            .collect();
+        slots.sort_by_key(|x| x.0);
+        for (slot, tr, m) in slots {
+            if !impls.contains(&tr) {
+                continue;
+            }
+            let (defcls, fd) = match self.find_method(clsname, &m) {
+                Some(x) => x,
+                None => continue,
+            };
+            let plan = self.plan_for_class(&m, &defcls, &fd);
+            let fpa = fw.v();
+            fw.op(&format!(
+                "    {} = llvm.mlir.addressof @{} : !llvm.ptr",
+                fpa, plan.mangled
+            ));
+            let fp = fw.v();
+            fw.op(&format!(
+                "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
+                fp, fpa
+            ));
+            let slotc = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", slotc, slot));
+            fw.op(&format!(
+                "    call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                vt, slotc, fp
+            ));
+        }
+        fw.op(&format!(
+            "    call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
+            obj, vt
+        ));
+    }
+
+    /// `dyn T` receiver: vtable dispatch. Object word 1 holds the class
+    /// vt pointer; slot = (trait, method) index; slot value = raw fn-pointer
+    /// word of the llvm.func-emitted resolved method.
+    fn emit_dyn_call(
+        &mut self,
+        fw: &mut FnWalk,
+        tname: &str,
+        mname: &str,
+        recv: &str,
+        argv: &[(String, TyId)],
+        _sigargs: &Vec<String>,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        // dispatch ABI from the trait method signature
+        let ms = match self
+            .traits
+            .get(tname)
+            .and_then(|ts| ts.iter().find(|x| x.name == mname))
+            .cloned()
+        {
+            Some(ms) => ms,
+            None => {
+                self.err(pos, format!("unknown trait `{}` for method `{}`", tname, mname));
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                return (z, self.r.mk(Ty::Unit));
+            }
+        };
+        let ret_flt = self.sig_word_float(Some(ms.ret.clone()));
+        let ret_unit = matches!(ms.ret, Type::Unit);
+        let slot = self.vt_slot(tname, mname);
+        let mut tys: Vec<String> = vec!["i64".to_string()];
+        for sp in &ms.params {
+            tys.push(if self.sig_word_float(sp.ty.clone()) {
+                "f64".to_string()
+            } else {
+                "i64".to_string()
+            });
+        }
+        // result slot: keeps SSA dominance across the two branches
+        let resslot: Option<(String, bool)> = if ret_unit {
+            None
+        } else {
+            let a = fw.v();
+            let mty = if ret_flt { "memref<1xf64>" } else { "memref<1xi64>" };
+            fw.op(&format!("    {} = memref.alloca() : {}", a, mty));
+            Some((a, ret_flt))
+        };
+        // object header word 1 -> class vtable; slot -> fn ptr
+        let vt = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_obj_vtable({}) : (i64) -> i64",
+            vt, recv
+        ));
+        let slotc = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", slotc, slot));
+        let fp = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_vt_get({}, {}) : (i64, i64) -> i64",
+            fp, vt, slotc
+        ));
+        let zero = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zero));
+        let cc = fw.v();
+        fw.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", cc, fp, zero));
+        let ce = fw.v();
+        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", ce, cc));
+        let lbl_call = fw.newlabel("dc");
+        let lbl_panic = fw.newlabel("dp");
+        let lbl_end = fw.newlabel("de");
+        fw.cjump(&ce, &lbl_call, &lbl_panic);
+        // resolved: call through the slot pointer
+        fw.label(&lbl_call);
+        let vp = fw.v();
+        fw.op(&format!("    {} = llvm.inttoptr {} : i64 to !llvm.ptr", vp, fp));
+        let mut vals: Vec<String> = Vec::new();
+        vals.extend(argv.iter().map(|x| x.0.clone()));
+        let sig = tys.join(", ");
+        let ret_ty_txt = if ret_flt { "f64".to_string() } else { "i64".to_string() };
+        if ret_unit {
+            fw.op(&format!(
+                "    llvm.call {}({}) : !llvm.ptr, ({}) -> ()",
+                vp,
+                vals.join(", "),
+                sig
+            ));
+        } else {
+            let rv = fw.v();
+            fw.op(&format!(
+                "    {} = llvm.call {}({}) : !llvm.ptr, ({}) -> {}",
+                rv,
+                vp,
+                vals.join(", "),
+                sig,
+                ret_ty_txt
+            ));
+            if let Some((slot2, fl)) = &resslot {
+                let zi = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", zi));
+                let mty = if *fl { "memref<1xf64>" } else { "memref<1xi64>" };
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : {}",
+                    rv, slot2, zi, mty
+                ));
+            }
+        }
+        fw.jump(&lbl_end);
+        fw.label(&lbl_panic);
+        let pv = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", pv));
+        let pz = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_panic_noimpl({}) : (i64) -> i64",
+            pz, pv
+        ));
+        if let Some((slot2, fl)) = &resslot {
+            let zi = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
+            if *fl {
+                let zf = fw.v();
+                fw.op(&format!("    {} = arith.constant 0.0 : f64", zf));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xf64>",
+                    zf, slot2, zi
+                ));
+            } else {
+                let z2 = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z2));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    z2, slot2, zi
+                ));
+            }
+        }
+        fw.jump(&lbl_end);
+        fw.label(&lbl_end);
+        if let Some((slot2, fl)) = resslot {
+            let zi = fw.v();
+            let v = fw.v();
+            let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
+            fw.op(&format!("    {} = memref.load {}[{}] : {}", v, slot2, zi, mty));
+            let tret = if fl { self.r.mk(Ty::F64) } else { self.r.mk(Ty::I64) };
+            return (v, tret);
+        }
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::Unit))
     }
 }
 

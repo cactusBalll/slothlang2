@@ -838,8 +838,6 @@ impl Parser {
                 }
                 "super" => {
                     self.ptr += 1;
-                    self.expect(Tok::Dot, "'.' after super")?;
-                    let _ = self.ident("member name after super.")?;
                     Ok(Expr { pos, node: ExprNode::Super })
                 }
                 "and" | "or" | "not" | "if" | "else" | "while" | "for" | "return" | "break"
