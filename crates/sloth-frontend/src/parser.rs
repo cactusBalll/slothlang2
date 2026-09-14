@@ -343,7 +343,16 @@ impl Parser {
         let (name, _) = self.ident("function name")?;
         let type_params = self.type_params()?;
         let (params, variadic) = self.params()?;
-        let ret = if self.eat(Tok::Colon) { Some(self.ty()?) } else { None };
+        let ret = if self.eat(Tok::Arrow) || self.eat(Tok::Colon) {
+            if self.eat_kw("var") {
+                // arrow into var decl: ignore type
+                let _ = self.eat(Tok::Colon);
+            }
+            let r = self.ty()?;
+            Some(r)
+        } else {
+            None
+        };
         let body = self.block()?;
         Ok((
             name,

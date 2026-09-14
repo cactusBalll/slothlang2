@@ -92,6 +92,8 @@ struct FnWalk {
     bb: usize,
     /// true if current block already ends with terminator
     term: bool,
+    /// shared return/end block label for this function
+    end_label: String,
 }
 
 impl FnWalk {
@@ -296,9 +298,7 @@ impl ModEmitter {
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
-                    let m = mangle(&self.name, None, &d.name);
                     self.funcs.insert(d.name.clone(), (**f).clone());
-                    self.emitted_names.push(m);
                 }
                 DeclNode::Var { ty, .. } => {
                     let t = match ty {
@@ -397,6 +397,7 @@ impl ModEmitter {
             ret_flag: String::new(),
             bb: 0,
             term: false,
+            end_label: "^end".to_string(),
         };
         let rf = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", rf));
@@ -425,22 +426,33 @@ impl ModEmitter {
         }
         // emit body statements into the entry block
         self.walk_body(&mut fw, &f.body);
-        let retlabel = fw.newlabel("ret");
-        fw.jump(&retlabel);
+        fw.jump(&"^end");
         let entry_text = fw.cur.clone();
         fw.cur = String::new();
         fw.term = false;
-        fw.label(&retlabel);
+        fw.label(&"^end");
+        let mut retval = String::new();
         if !self.is_unit(plan.ret) {
             let zi = fw.v();
             let v = fw.v();
             let rty = if retf { "memref<1xf64>" } else { "memref<1xi64>" };
-            fw.op(&format!("    {} = arith.constant 0 : i64", zi));
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
             fw.op(&format!("    {} = memref.load {}[{}] : {}", v, fw.ret_alloca, zi, rty));
+            retval = format!(" {}", v);
         }
-        fw.op("    return");
+        if self.is_unit(plan.ret) {
+            fw.op("    return");
+        } else {
+            let rt = if retf { "f64" } else { "i64" };
+            fw.op(&format!("    return {} : {}", retval.trim_start(), rt));
+        }
         let ret_text = fw.cur.clone();
-        let sigtxt = argtxts.join(", ");
+        let sigtxt: Vec<String> = argtxts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("%p{}: {}", i, t))
+            .collect();
+        let sigtxt = sigtxt.join(", ");
         if entry {
             self.out.push_str(&format!(
                 "  func.func @sloth_main({}) -> {} attributes {{llvm.emit_c_interface}} {{\n",
@@ -585,7 +597,7 @@ impl ModEmitter {
     }
 
     fn jump_to_ret(&mut self, fw: &mut FnWalk) {
-        let l = fw.newlabel("ret");
+        let l = fw.end_label.clone();
         fw.jump(&l);
     }
 }
@@ -874,6 +886,14 @@ impl ModEmitter {
                 (fin, t)
             }
             ExprNode::Ident(name) => {
+                if name == "true" || name == "false" {
+                    let b = name == "true";
+                    let t = self.r.mk(Ty::Bool);
+                    let r = fw.v();
+                    let bv = if b { 1 } else { 0 };
+                    fw.op(&format!("    {} = arith.constant {} : i64", r, bv));
+                    return (r, t);
+                }
                 if let Some((a, t)) = fw.lookup(name) {
                     let z = fw.v();
                     let v = fw.v();
@@ -1265,6 +1285,7 @@ impl ModEmitter {
                 ret_flag: String::new(),
                 bb: 0,
                 term: false,
+                end_label: "^smt".to_string(),
             };
             let rf = fw.v();
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", rf));

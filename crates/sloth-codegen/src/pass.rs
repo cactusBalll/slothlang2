@@ -157,3 +157,57 @@ mod irgen_more {
         run_src(src, "main").unwrap();
     }
 }
+
+#[cfg(test)]
+mod irgen_p3 {
+    use super::*;
+
+    #[test]
+    fn break_continue_work() {
+        let src = r#"
+            var i: int = 0;
+            while true {
+                i = i + 1;
+                if i > 5 {
+                    break;
+                }
+                if i % 2 == 0 {
+                    continue;
+                }
+                print(i);
+            }
+            print(i);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn float_arith_works() {
+        let src = r#"
+            var x: float = 1.5;
+            var y: float = 2.5;
+            print(x + y);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn str_len_works() {
+        let src = r#"
+            var a: str = "abcde";
+            print(len(a));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn fn_call_works() {
+        let src = r#"
+            func add(a: int, b: int) -> int {
+                return a + b;
+            }
+            print(add(1, 2));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
