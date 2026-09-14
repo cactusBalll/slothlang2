@@ -517,9 +517,18 @@ impl Parser {
     fn if_stmt(&mut self) -> PResult<Stmt> {
         let pos = self.pos();
         self.expect_kw("if")?;
-        self.expect(Tok::LParen, "'('")?;
+        if self.eat(Tok::LParen) {
+            let cond = self.expr(0)?;
+            self.expect(Tok::RParen, "')'")?;
+            let then_ = Box::new(self.stmt()?);
+            let else_ = if self.eat_kw("else") {
+                Some(Box::new(self.stmt()?))
+            } else {
+                None
+            };
+            return Ok(Stmt { node: StmtNode::If { cond, then_, else_ }, pos });
+        }
         let cond = self.expr(0)?;
-        self.expect(Tok::RParen, "')'")?;
         let then_ = Box::new(self.stmt()?);
         let else_ = if self.eat_kw("else") {
             Some(Box::new(self.stmt()?))
@@ -532,9 +541,14 @@ impl Parser {
     fn while_stmt(&mut self) -> PResult<Stmt> {
         let pos = self.pos();
         self.expect_kw("while")?;
-        self.expect(Tok::LParen, "'('")?;
+        if let Some(Tok::LParen) = self.peek() {
+            let _ = self.eat(Tok::LParen);
+            let cond = self.expr(0)?;
+            self.expect(Tok::RParen, "')'")?;
+            let body = Box::new(self.stmt()?);
+            return Ok(Stmt { node: StmtNode::While { cond, body }, pos });
+        }
         let cond = self.expr(0)?;
-        self.expect(Tok::RParen, "')'")?;
         let body = Box::new(self.stmt()?);
         Ok(Stmt { node: StmtNode::While { cond, body }, pos })
     }
@@ -542,12 +556,20 @@ impl Parser {
     fn for_stmt(&mut self) -> PResult<Stmt> {
         let pos = self.pos();
         self.expect_kw("for")?;
-        self.expect(Tok::LParen, "'('")?;
-        self.expect_kw("var")?;
+        // form A: for (var x: T in it) {...}
+        if self.eat(Tok::LParen) {
+            self.expect_kw("var")?;
+            let (var, _) = self.ident("iterator variable")?;
+            self.expect(Tok::Colon, "':' after for variable")?;
+            let iter = self.expr(0)?;
+            self.expect(Tok::RParen, "')'")?;
+            let body = Box::new(self.stmt()?);
+            return Ok(Stmt { node: StmtNode::For { var, iter, body }, pos });
+        }
+        // form B: for x in it {...}
         let (var, _) = self.ident("iterator variable")?;
-        self.expect(Tok::Colon, "':' after for variable")?;
+        self.expect_kw("in")?;
         let iter = self.expr(0)?;
-        self.expect(Tok::RParen, "')'")?;
         let body = Box::new(self.stmt()?);
         Ok(Stmt { node: StmtNode::For { var, iter, body }, pos })
     }

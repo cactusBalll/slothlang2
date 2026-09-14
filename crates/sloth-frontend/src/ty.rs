@@ -37,11 +37,6 @@ pub struct Diag {
     pub msg: String,
 }
 
-impl Diag {
-    pub fn at(file: &crate::ast::Pos2, msg: String) -> Diag {
-        Diag { line: file.line, col: file.col, msg }
-    }
-}
 
 #[derive(Default)]
 pub struct Reg {
@@ -71,42 +66,66 @@ impl Reg {
     }
 
     /// structural substitution of type params `Tp(name)` by `rep`
-    pub fn subst(&self, id: TyId, map: &std::collections::HashMap<String, TyId>) -> TyId {
-        match self.get(id) {
-            Ty::Tp(n) => *map.get(n).unwrap_or(&id),
-            Ty::Array(e) => self.mk(Ty::Array(self.subst(*e, map))),
-            Ty::Map(k, v) => self.mk(Ty::Map(self.subst(*k, map), self.subst(*v, map))),
+    pub fn subst(&mut self, id: TyId, map: &std::collections::HashMap<String, TyId>) -> TyId {
+        match self.get(id).clone() {
+            Ty::Tp(n) => *map.get(&n).unwrap_or(&id),
+            Ty::Array(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Array(ne))
+            }
+            Ty::Map(k, v) => {
+                let nk = self.subst(k, map);
+                let nv = self.subst(v, map);
+                self.mk(Ty::Map(nk, nv))
+            }
             Ty::Fn(f) => {
-                let ps: Vec<TyId> = f.params.iter().map(|p| self.subst(*p, map)).collect();
-                self.mk(Ty::Fn(FnTy { params: ps, ret: self.subst(f.ret, map) }))
+                let params = FnTy { params: f.params.clone(), ret: f.ret };
+                let ps: Vec<TyId> = params
+                    .params
+                    .iter()
+                    .map(|p| self.subst(*p, map))
+                    .collect();
+                let nr = self.subst(params.ret, map);
+                self.mk(Ty::Fn(FnTy { params: ps, ret: nr }))
             }
             Ty::Named(n, args) => {
                 let a2: Vec<TyId> = args.iter().map(|a| self.subst(*a, map)).collect();
                 self.mk(Ty::Named(n.clone(), a2))
             }
-            Ty::Opt(e) => self.mk(Ty::Opt(self.subst(*e, map))),
-            other => {
-                let nt: Ty = match self.get(id).clone() {
-                    Ty::Unit => Ty::Unit,
-                    Ty::Bool => Ty::Bool,
-                    Ty::I64 => Ty::I64,
-                    Ty::F64 => Ty::F64,
-                    Ty::Str => Ty::Str,
-                    Ty::Range => Ty::Range,
-                    Ty::Map(..) => unreachable!(),
-                    Ty::Array(..) | Ty::Fn(..) | Ty::Named(..) | Ty::Opt(..) => unreachable!(),
-                    Ty::Dyn(n) => Ty::Dyn(n),
-                    Ty::Tp(n) => Ty::Tp(n),
-                };
-                let _ = nt;
-                self.mk(other.clone())
+            Ty::Opt(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Opt(ne))
             }
+            other => self.mk(other.clone()),
         }
     }
 }
 
-
 /// Printable structural name of a Ty (also backend cache key).
+fn fmt_ty(t: &Ty) -> String {
+    match t {
+        Ty::Unit => "unit".to_string(),
+        Ty::Bool => "bool".to_string(),
+        Ty::I64 => "i64".to_string(),
+        Ty::F64 => "f64".to_string(),
+        Ty::Str => "str".to_string(),
+        Ty::Range => "range".to_string(),
+        Ty::Array(e) => format!("arr:{}", e.0),
+        Ty::Map(k, v) => format!("map:{}:{}", k.0, v.0),
+        Ty::Fn(f) => {
+            let ps: Vec<String> = f.params.iter().map(|p| p.0.to_string()).collect();
+            format!("fn:{}:{}", ps.join(","), f.ret.0)
+        }
+        Ty::Named(n, a) => {
+            let args: Vec<String> = a.iter().map(|x| x.0.to_string()).collect();
+            format!("named:{}:{}", n, args.join(","))
+        }
+        Ty::Opt(e) => format!("opt:{}", e.0),
+        Ty::Dyn(n) => format!("dyn:{}", n),
+        Ty::Tp(n) => format!("tp:{}", n),
+    }
+}
+
 pub fn ty_name(t: &Ty) -> String {
     match t {
         Ty::Unit => "unit".to_string(),

@@ -54,11 +54,42 @@ impl Engine {
                 sys::mlirStringRefCreateFromCString(cn.as_ptr()),
                 args.as_mut_ptr(),
             );
-            if r.value == 0 {
-                Err(format!("invoke {} failed", name))
-            } else {
+            if r.value == 1 {
                 Ok(())
+            } else {
+                // look up address (panic indicator)
+                let lookup = sys::mlirExecutionEngineLookupPacked(
+                    self.raw,
+                    sys::mlirStringRefCreateFromCString(cn.as_ptr()),
+                );
+                Err(format!(
+                    "invoke {} failed (packed ptr {:?})",
+                    name, lookup
+                ))
             }
+        }
+    }
+}
+
+/// run canonicalize/cse then the func-to-llvm conversion pipeline
+pub fn run_llvm_pipeline(ctx: sys::MlirContext, op: sys::MlirOperation) -> Result<(), String> {
+    unsafe {
+        let pm = sys::mlirPassManagerCreate(ctx);
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateTransformsCanonicalizer());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateTransformsCSE());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertFuncToLLVMPass());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionArithToLLVMConversionPass());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertIndexToLLVMPass());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertControlFlowToLLVMPass());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionFinalizeMemRefToLLVMConversionPass());
+        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionReconcileUnrealizedCastsPass());
+        let r = sys::mlirPassManagerRunOnOp(pm, op);
+        let ok = r.value == 1;
+        sys::mlirPassManagerDestroy(pm);
+        if ok {
+            Ok(())
+        } else {
+            Err("pass pipeline failed".to_string())
         }
     }
 }
