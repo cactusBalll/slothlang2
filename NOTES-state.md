@@ -17,7 +17,7 @@
 | P1 前端 | **基本完成（弱化版）** | lexer/parser/AST 完整，20 个 parse 测试；§4.2 的名称解析、两遍类型检查、trait 约束求解、is 收窄、单态化均**未实现**——仅 `ty.rs` 局部 Reg 类型缓存与 irgen 内失败即报 `Diag{line,col,msg}`（fail-fast 于 codegen 阶段） |
 | P2 MLIR 端到端 MVP | **完成** | 算术/控制流/函数/字符串 JIT + AOT 全通（commit 7280a77 → d4921f3）；偏差：无 sloth dialect 中间层，直接出 func/arith/memref/cf 文本 |
 | P3 对象与闭包 | **基本完成** | class（单模块 + 跨模块）字段/方法/ctor 可跑（63e0413、a358058）；闭包快照捕获完成（cecfab7）；字符串池/插值完成；继承 `class A: B` + `super.__init__`/`super.x`(读写)/`super.m()` 静态直调完成（patch #2，字段槽基类优先布局，方法沿链解析到定义类符号）；**trait MVP + dyn 虚表分派完成**（patch #4，用户要求从 cls_id 链升级为真虚表）：`impl` known-trait/方法存在/arity/ABI 校验、(trait,method) 全局槽位全局编址、对象头 word1 存 vt 指针、vt=[cap, slot0..] 为 i64 fn ptr 数组、槽值 = `llvm.mlir.addressof`+`llvm.ptrtoint`、分派 = `sloth_vt_get` + `llvm.inttoptr` + 间接 `llvm.call`（形如 `llvm.call %vp(args): !llvm.ptr, (i64) ret`）、`llvm.func` 混合 func 方言体方法直接成为 vt 项（无 thunk 层）、静态调用点对 llvm 标记方法发 `llvm.call`、无满足槽时 `sloth_vt_get`=0 → `sloth_panic_noimpl`；测试 47 全绿，JIT/AOT 双路一致。**未做**：`is` 类型测试、trait 默认方法体、异构容器 `Array<dyn T>`、vtable 全局缓存（每对象重建） |
-| P4 泛型与单态化 | **未开始** | parser 支持 `type_params`，codegen 全面无单态化；`Iterable`/`Iterator` 协议、`Array<T>`/`Map<K,V>` 仅 `list`/`@(k: v)` 字面量解析（irgen 无容器运行时） |
+| P4 泛型与单态化 | **部分推进** | parser 支持 `type_params`；**容器运行时（Array MVP）完成**（patch #5）：`sloth_arr_new/get(_f64)/set(_f64)/len`（rt [len, e0..] 布局 + 越界 panic）、`[...]` 字面量发射（元素统一：均匀取元素类型 / 混浮点归一为 Array(f64)/对象字为词）、`a[i]` 读、`a[i] = v` 单层索引赋值、`len(a)` 数组长度、`for x in arr` 迭代（槽式计数器 + FeTy 元素取词）；`Array<dyn T>` 元素走 dyn 分派 ✓。**未做**：Map 运行时（仅 `@(k: v)` 解析）、数组 push/append（字面量定长 MVP）、`Iterator`/`Iterable` trait 协议、泛型单态化 |
 | P5 模块与标准库 | **核心完成** | 编译期 `import`（递归、canonicalize 去重、`as` 别名、`mod.fn()`/`mod.g` 限定调用/读取，ec5a2c7 + a7a8b0d）；`pub var` 全局单元格 `memref.global @{mod}_g_{name} {mutable}` + 每模块 `__ginit` 启动时调用；类跨模块可见。**缺**：`pub` 可见性未强制（非 pub 也导出）、循环依赖检测、标准库（无 Array/Map 运行时方法，仅 print/len 等 builtin 白名单） |
 | P6 精确 GC | **未开始 / 替代路径** | 采用自研 `sloth_gc_alloc`（sloth-rt 内标记-清理式 stub，非 Boehm、非 statepoint）；`O = [info_ptr, cls_id, fields...]` 布局，`sloth_obj_field/set_field` 手工寻址（偏移 +2） |
 
@@ -47,13 +47,14 @@
 6. 修掉两个潜在病理：field_index 基类优先布局（旧版子类字段先匹配导致索引错位）；`-> ()` 的 func.call 不得绑定结果（method/本地 fn/跨模块 fn 三处已改为无绑定语句形式）。
 7. **trait/dyn 分派**（§4.3.2 虚表已落地）：对象头 word1 = vt 指针（rt `sloth_obj_set_vtable`/`sloth_obj_vtable`）；vt 是 rt 分配的 `[cap, slotN...]` fn ptr 词数组（`sloth_vt_new/set/get`，越界-slot 返回 0；vt==0 安全 → panic 路径）。槽位全局唯一 (trait, method)→slot，在 check_impls + finalize_vt（emit_module 开头，`declared traits × 方法`）预分配，vt 容量 `vt_cap` 在发射前冻结。**关键机制**：参与 impl 链的方法 emit 为 `llvm.func`（体允许混合 arith/memref/cf + 尾部 `llvm.return`，且体内 `call @` 必须 `func.call @` 显式化）；ctor 发射 `emit_vt_build`（addressof/ptrtoint 存槽），`emit_dyn_call` 用 `llvm.call 间接形（`!llvm.ptr, (tyN) -> ret` 2-tail type 语法）`。每对象重建 vt（投入小，优化待做）。trait 方法默认实现未实现。跨模块：foreign traits/class 参与同一 vt（register_import 里 finalize）。ABI 校验：impl 的参数/返回 float 词宽与 trait 签名不匹配 → codegen 错误。
 8. `fw.cjump` 接收 i64 条件（内部 trunci），cmpi 结果需先 `extsi i1→i64` 送入；`llvm.mlir.addressof` 要求目标为 `llvm.func`/global（不能 func.func）；不可绑定零结果 ops 的 `func.call`；AOT（mlir-opt 直解析）与 JIT 一致性对上述均敏感，两边验证过（glub/woof、override 0/12、float trait 12/7.2、panic 路径）。
-9. arith 浮点提升：混合 i64/f64 操作数补 `arith.sitofp`（此前 expr_arith 直接混用 i64 与 f64 操作数会在 llvm-mapping 报错）。normalize_indices 现在按 `func.func` **与 `llvm.func`** 分块（后者此前被并块，index 改写跨函数失效）。
+9. arith 浮点提升：混合 i64/f64 操作数补 `arith.sitofp`（此前 expr_arith 直接混用 i64 与 f64 操作数会在 llvm mapping 报错）；normalize_indices 按 `func.func` **与 `llvm.func`** 分块（后者此前被并块，index 改写跨函数失效）。
+10. **Array MVP 偏差**：无 push（字面量定长）；异构元素数组静态类型归一为 `Array(i64)`（元素上的方法分派需依赖声明 `Array<dyn T>` 的参数/变量类型）；嵌套索引赋值 `a[1][2]=..` 未支持；别名语义（共享可变数组）受 rt 定长布局限制；越界 = rt `eprintln + exit`（无 sloth 异常）。
 
 ## 建议下一步顺序（与文档 §8 对齐）
 
 1. ~~收 P3 尾：`class A: B` 单继承 + `super.__init__`/`super.x`~~ **已完成**（测试 irgen_p3c：inherit/super_method/super_assign + unit_calls 回归）。
 2. ~~trait MVP：`impl` 校验 + 静态 trait 方法直调 + `dyn Trait`~~ **已完成**（patch #3 cls_id 链 MVP → patch #4 真虚表（用户指令）：`llvm.func` 方法 + addressof/ptrtoint 槽值 + 间接 `llvm.call`；测试 irgen_p3d：dispatch/inherited/override/missing_diag/unknown_diag）。
-3. 容器运行时：`sloth_array_new/push/get/set`（带边界检查）+ 迭代协议 inline。
+3. ~~容器运行时：`sloth_array_new/push/get/set`（带边界检查）+ 迭代协议 inline~~ **Array MVP 已完成**（_rt arr get/set/len/越界 panic、字面量、a[i]读写、len、for-in；无 push/Map/迭代 trait 协议，见债 10）。
 4. `pub` 可见性强制 + 循环依赖诊断 + `is`/`nil`/`?:`。
 5. 用 example（§9.1/9.2 改写版）做回归金标。
 

@@ -592,6 +592,65 @@ mod irgen_p3d {
         run_src(src, "main").unwrap();
     }
 
+    /// array literals, index read/write, len builtin
+    #[test]
+    fn array_literal_index_works() {
+        let src = r#"
+            var a = [1, 2, 3];
+            var s = 0;
+            for i in 0..len(a) {
+                s = s + a[i];
+            }
+            print(s);
+            a[1] = 20;
+            print(a[0] + a[1] + a[2]);
+            print(len(a));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float array with promotion + f64 indexing
+    #[test]
+    fn array_float_works() {
+        let src = r#"
+            var f: Array<float> = [1, 2.5, 3];
+            f[0] = 0.5;
+            print(f[0] + f[1]);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// object array with dyn element iteration (trait surface on elem)
+    #[test]
+    fn array_of_dyn_works() {
+        let src = r#"
+            trait Speaker {
+                func say(): unit;
+            }
+            class Fish impl Speaker {
+                func say(): unit {
+                    print("glub");
+                }
+            }
+            class Dog impl Speaker {
+                func say(): unit {
+                    print("woof");
+                }
+            }
+            func chorus(sp: Array<dyn Speaker>) {
+                var s = 0;
+                for x in sp {
+                    x.say();
+                    s = s + 1;
+                }
+                print(s);
+            }
+            var zoo = [Fish(), Dog(), Fish()];
+            chorus(zoo);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
     /// broken impl (missing trait method) reports a codegen diagnostic
     #[test]
     fn trait_missing_method_diag() {

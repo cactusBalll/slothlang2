@@ -157,7 +157,63 @@ pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
     }
 }
 
-// ---------------- objects/classes ----------------
+// ---------------- arrays ----------------
+// layout: [len, e0, e1, ...] (i64 words; f64 words routed via _f64 ops)
+
+fn arr_index(a: i64, i: i64) -> *mut i64 {
+    unsafe {
+        let p = a as *mut i64;
+        let len = *p;
+        if i < 0 || i >= len {
+            eprintln!("sloth panic: array index {} out of bounds (len {})", i, len);
+            std::process::exit(1);
+        }
+        p.offset(i as isize + 1)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_new(len: i64) -> i64 {
+    unsafe {
+        let n = len.max(0) as libc::size_t;
+        let o = sloth_gc_alloc((n + 1) * 8) as *mut i64;
+        *o = len;
+        o as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_len(a: i64) -> i64 {
+    unsafe { *(a as *mut i64) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_get(a: i64, i: i64) -> i64 {
+    unsafe { *arr_index(a, i) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_get_f64(a: i64, i: i64) -> f64 {
+    unsafe { *(arr_index(a, i) as *mut f64) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_set(a: i64, i: i64, v: i64) -> i64 {
+    unsafe {
+        *arr_index(a, i) = v;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_arr_set_f64(a: i64, i: i64, v: f64) -> i64 {
+    unsafe {
+        *(arr_index(a, i) as *mut f64) = v;
+        0
+    }
+}
+
+/// dynamic trait dispatch: vtable primitives.
 
 #[repr(C)]
 struct ObjInfo {

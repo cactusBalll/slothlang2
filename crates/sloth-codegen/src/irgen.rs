@@ -955,6 +955,48 @@ impl ModEmitter {
                         };
                         fw.assign(n, &v, fl);
                     }
+                    Some(PathSeg::Index(ix)) => {
+                        // a[i] = v (single-index MVP)
+                        if target.len() != 2 {
+                            self.err(&s.pos, "nested index assignment unsupported".to_string());
+                            return;
+                        }
+                        if let Some(PathSeg::Name(h)) = target.first() {
+                            match fw.lookup(h) {
+                                Some((aa, at)) => {
+                                    let el = match self.r.get(at) {
+                                        Ty::Array(el) => *el,
+                                        _ => {
+                                            self.err(&s.pos, "index assignment on non-array".to_string());
+                                            return;
+                                        }
+                                    };
+                                    let z = fw.v();
+                                    fw.op(&format!("    {} = arith.constant 0 : index", z));
+                                    let av = fw.v();
+                                    fw.op(&format!(
+                                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                                        av, aa, z
+                                    ));
+                                    let (iv, _it) = self.emit_expr(fw, ix);
+                                    if self.is_float(el) {
+                                        fw.op(&format!(
+                                            "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
+                                            av, iv, v
+                                        ));
+                                    } else {
+                                        fw.op(&format!(
+                                            "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                                            av, iv, v
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    self.err(&s.pos, format!("unknown array `{}`", h));
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         self.err(&s.pos, "unsupported assignment target".to_string());
                     }
@@ -1166,8 +1208,100 @@ impl ModEmitter {
                 fw.pop_scope();
             }
             _ => {
-                // array iteration: desugar via len/push runtime below (MVP: error)
-                self.err(pos, "iterate over arrays not yet supported".to_string());
+                // array iteration: for x in arr { ... } with a slotted counter
+                let (av, at) = self.emit_expr(fw, iter);
+                let el = match self.r.get(at) {
+                    Ty::Array(e) => *e,
+                    _ => {
+                        self.err(pos, "for-iteration requires a range or array".to_string());
+                        return;
+                    }
+                };
+                let lenv = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_arr_len({}) : (i64) -> i64",
+                    lenv, av
+                ));
+                fw.push_scope();
+                let islot = fw.v();
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
+                let zi2 = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", zi2));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    zi2, islot, z
+                ));
+                let head = fw.newlabel("af");
+                let doo = fw.newlabel("ab");
+                let done = fw.newlabel("ae");
+                fw.jump(&head);
+                fw.label(&head);
+                let iv = fw.v();
+                fw.op(&format!(
+                    "    {} = memref.load {}[{}] : memref<1xi64>",
+                    iv, islot, z
+                ));
+                let c = fw.v();
+                fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, lenv));
+                let c1 = fw.v();
+                fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+                fw.cjump(&c1, &doo, &done);
+                fw.label(&doo);
+                fw.loops.push((done.clone(), head.clone()));
+                // loop var = arr[i]
+                let gtv: String;
+                let gety;
+                if self.is_float(el) {
+                    let f = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_arr_get_f64({}, {}) : (i64, i64) -> f64",
+                        f, av, iv
+                    ));
+                    gtv = f;
+                    gety = el;
+                } else {
+                    let f = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                        f, av, iv
+                    ));
+                    gtv = f;
+                    gety = el;
+                }
+                let vs = fw.v();
+                if self.is_float(gety) {
+                    fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
+                    fw.op(&format!(
+                        "    memref.store {}, {}[{}] : memref<1xf64>",
+                        gtv, vs, z
+                    ));
+                } else {
+                    fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+                    fw.op(&format!(
+                        "    memref.store {}, {}[{}] : memref<1xi64>",
+                        gtv, vs, z
+                    ));
+                }
+                fw.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(var.to_string(), (vs, gety));
+                self.walk_body(fw, body);
+                fw.loops.pop();
+                // idx += 1
+                let one2 = fw.v();
+                fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+                let nx = fw.v();
+                fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    nx, islot, z
+                ));
+                fw.jump(&head);
+                fw.label(&done);
+                fw.pop_scope();
             }
         }
     }
@@ -1592,6 +1726,90 @@ impl ModEmitter {
                 ));
                 (r, self.r.mk(Ty::Range))
             }
+            ExprNode::List(xs) => {
+                // array literal: fixed-length gc allocation of i64/f64 words
+                let mut evs: Vec<String> = Vec::new();
+                let mut ets: Vec<TyId> = Vec::new();
+                for x in xs {
+                    let (v, t) = self.emit_expr(fw, x);
+                    evs.push(v);
+                    ets.push(t);
+                }
+                let anyf = ets.iter().any(|t| self.is_float(*t));
+                if anyf {
+                    for (v, t) in evs.iter_mut().zip(ets.iter_mut()) {
+                        if !self.is_float(*t) {
+                            let cv = fw.v();
+                            fw.op(&format!(
+                                "    {} = arith.sitofp {} : i64 to f64",
+                                cv, v.clone()
+                            ));
+                            *v = cv;
+                            *t = self.r.mk(Ty::F64);
+                        }
+                    }
+                }
+                let n = fw.v();
+                fw.op(&format!("    {} = arith.constant {} : i64", n, evs.len()));
+                let arr = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_arr_new({}) : (i64) -> i64",
+                    arr, n
+                ));
+                for (i, v) in evs.iter().enumerate() {
+                    let zi = fw.v();
+                    fw.op(&format!("    {} = arith.constant {} : i64", zi, i));
+                    if anyf {
+                        fw.op(&format!(
+                            "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
+                            arr, zi, v
+                        ));
+                    } else {
+                        fw.op(&format!(
+                            "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                            arr, zi, v
+                        ));
+                    }
+                }
+                let ty = if !ets.is_empty() && {
+                    let first = *ets.first().unwrap();
+                    ets.iter().all(|t| self.r.get(*t) == self.r.get(first))
+                } {
+                    self.r.mk(Ty::Array(ets[0]))
+                } else if anyf {
+                    let ef = self.r.mk(Ty::F64);
+                    self.r.mk(Ty::Array(ef))
+                } else {
+                    let ei = self.r.mk(Ty::I64);
+                    self.r.mk(Ty::Array(ei))
+                };
+                (arr, ty)
+            }
+            ExprNode::Index { obj, idx } => {
+                let (av, at) = self.emit_expr(fw, obj);
+                let (iv, _it) = self.emit_expr(fw, idx);
+                let el = match self.r.get(at) {
+                    Ty::Array(e) => *e,
+                    _ => {
+                        self.err(&e.pos, format!("indexing non-array"));
+                        (String::new(), self.r.mk(Ty::Unit)).1
+                    }
+                };
+                if self.is_float(el) {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_arr_get_f64({}, {}) : (i64, i64) -> f64",
+                        r, av, iv
+                    ));
+                    return (r, el);
+                }
+                let r = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                    r, av, iv
+                ));
+                (r, el)
+            }
             ExprNode::This | ExprNode::Super => match fw.scopes.first().and_then(|sc| sc.get("this")).map(|s| (
                 s.0.clone(), s.1
             )) {
@@ -1836,7 +2054,7 @@ impl ModEmitter {
                 let ts = self.r.get(t).clone();
                 let sym = match &ts {
                     Ty::Str => "sloth_str_len",
-                    Ty::Array(_) => "sloth_array_len",
+                    Ty::Array(_) => "sloth_arr_len",
                     _ => "sloth_str_len",
                 };
                 fw.op(&format!(
@@ -1870,6 +2088,12 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_finish(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_len(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_get(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_get_f64(i64, i64) -> f64\n");
+    s.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_set_f64(i64, i64, f64) -> i64\n");
     s
 }
 
