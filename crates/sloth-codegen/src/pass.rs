@@ -771,6 +771,81 @@ mod irgen_p3d {
 }
 
 
+
+// patch #9: array push/pop, let immutability, declared-kind coercion
+mod irgen_p9 {
+    use super::*;
+
+    /// push appends; pop removes and returns last elem; mixed growth
+    #[test]
+    fn array_push_pop_works() {
+        let src = r#"
+            var a: Array<int> = [];
+            a.push(1);
+            a.push(2);
+            a.push(3);
+            print(a.len());
+            print(a.pop());
+            print(a.len());
+            var f2: Array<float> = [1.5];
+            f2.push(2);
+            print(f2[1]);
+            print(f2 .len());
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// let binding rejects reassignment
+    #[test]
+    fn let_immutable_rejected() {
+        let src = r#"
+            let a = 1;
+            a = 2;
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("let rebinding accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("cannot assign to immutable"), "unexpected: {}", e);
+    }
+
+    /// var still mutable
+    #[test]
+    fn var_mutable_still_works() {
+        let src = r#"
+            var a = 1;
+            a = 2;
+            print(a);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// declared type conflicts with initializer kind
+    #[test]
+    fn declared_kind_mismatch_diag() {
+        for src in [
+            "var x: int = 2.5;\nprint(x);\n",
+            "var y: int = 1.0;\n",
+        ] {
+            let e = match run_src(src, "main") {
+                Ok(()) => panic!("kind mismatch accepted: {:?}", src),
+                Err(e) => e,
+            };
+            assert!(e.contains("initializer is float"), "unexpected: {}", e);
+        }
+    }
+
+    /// declared float coerces int initializer words
+    #[test]
+    fn declared_float_coerces() {
+        let src = r#"
+            var x: float = 2;
+            print(x + 0.5);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

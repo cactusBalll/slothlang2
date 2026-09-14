@@ -370,6 +370,8 @@ struct FnWalk {
     cur: String,
     vcount: usize,
     scopes: Vec<HashMap<String, (String, TyId)>>,
+    /// per-scope bindovable map: value true = immutable (let)
+    imms: Vec<HashMap<String, bool>>,
     /// loop label stack for break/continue: (break_target, continue_target)
     loops: Vec<(String, String)>,
     ret: TyId,
@@ -433,11 +435,21 @@ impl FnWalk {
     }
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.imms.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.imms.pop();
     }
-    fn declare(&mut self, name: &str, t: TyId, fl: bool) -> String {
+    fn declare(&mut self, name: &str, t: TyId, fl: bool, mutable: bool) -> String {
+        let a = self.declare_raw(name, t, fl);
+        self.imms
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), !mutable);
+        a
+    }
+    fn declare_raw(&mut self, name: &str, t: TyId, fl: bool) -> String {
         let a = self.v();
         let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
         self.op(&format!("    {} = memref.alloca() : {}", a, mty));
@@ -828,6 +840,7 @@ impl ModEmitter {
             cur: String::new(),
             vcount: 1000,
             scopes: vec![HashMap::new()],
+            imms: vec![HashMap::new()],
             loops: Vec::new(),
             ret: plan.ret,
             ret_alloca: String::new(),
@@ -959,7 +972,7 @@ impl ModEmitter {
             StmtNode::Expr(e) => {
                 let _ = self.emit_expr(fw, e);
             }
-            StmtNode::Let { mutable: _, name, ty, init } => {
+            StmtNode::Let { mutable, name, ty, init } => {
                 let (v, t) = self.emit_expr(fw, init);
                 // declared `dyn T` / trait positions coerce the binding's type
                 let t = match ty {
@@ -988,8 +1001,28 @@ impl ModEmitter {
                     None => t,
                 };
                 let _ = ty;
+                // declared scalar-kind conflict check (MVP: word-family match)
+                let (v, t) = match ty {
+                    Some(te) => {
+                        let dt = self.ty_of(te);
+                        let df = self.is_float(dt);
+                        let vf = self.is_float(t);
+                        if df && !vf {
+                            // promote the int word to f64 spelling
+                            let cv = fw.v();
+                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                            (cv, dt)
+                        } else if !df && vf {
+                            self.err(&s.pos, "type mismatch: initializer is float but declared type is not".to_string());
+                            (v, t)
+                        } else {
+                            (v, t)
+                        }
+                    }
+                    None => (v, t),
+                };
                 let fl = self.is_float(t);
-                fw.declare(name, t, fl);
+                fw.declare(name, t, fl, *mutable);
                 fw.assign(name, &v, fl);
             }
             StmtNode::Assign { target, value } => {
@@ -1038,6 +1071,9 @@ impl ModEmitter {
                 }
                 match target.last() {
                     Some(PathSeg::Name(n)) => {
+                        if fw.imm_of(n) {
+                            self.err(&s.pos, format!("cannot assign to immutable `{}` (declared with `let`)", n));
+                        }
                         let fl = match fw.lookup(n) {
                             Some((_, t)) => self.is_float(t),
                             None => false,
@@ -2222,6 +2258,67 @@ impl ModEmitter {
                 return self.emit_new_obj(fw, &name, &argv, &sigargs, pos);
             }
         }
+        // builtin container methods: a.push(v) / a.pop() / a.len()
+        if let Some((recvv, rt)) = recv.clone() {
+            if let Ty::Array(el) = self.r.get(rt) {
+                let fel = self.is_float(*el);
+                match name.as_str() {
+                    "push" => {
+                        let (mut v, at) = match argv.get(1).cloned() {
+                            Some(x) => (x.0, x.1),
+                            None => {
+                                self.err(pos, "push requires one argument".to_string());
+                                return (String::new(), self.r.mk(Ty::Unit));
+                            }
+                        };
+                        if fel && !self.is_float(at) {
+                            let cv = fw.v();
+                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                            v = cv;
+                        }
+                        let callv = fw.v();
+                        if fel {
+                            fw.op(&format!(
+                                "    {} = call @sloth_arr_push_f64({}, {}) : (i64, f64) -> i64",
+                                callv, recvv, v
+                            ));
+                        } else {
+                            fw.op(&format!(
+                                "    {} = call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
+                                callv, recvv, v
+                            ));
+                        }
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        return (z, self.r.mk(Ty::Unit));
+                    }
+                    "pop" => {
+                        let r = fw.v();
+                        if fel {
+                            fw.op(&format!(
+                                "    {} = call @sloth_arr_pop_f64({}) : (i64) -> f64",
+                                r, recvv
+                            ));
+                        } else {
+                            fw.op(&format!(
+                                "    {} = call @sloth_arr_pop({}) : (i64) -> i64",
+                                r, recvv
+                            ));
+                        }
+                        return (r, *el);
+                    }
+                    "len" => {
+                        let r = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_arr_len({}) : (i64) -> i64",
+                            r, recvv
+                        ));
+                        return (r, self.r.mk(Ty::I64));
+                    }
+                    _ => {}
+                }
+            }
+        }
         // method call inside classes (chain-walks for inherited methods)
         if let Some((recvv, rt)) = recv.clone() {
             if let Ty::Dyn(tname) = self.r.get(rt) {
@@ -2385,7 +2482,11 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_range_pack(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_finish(i64) -> i64
+    s.push_str("  func.func private @sloth_arr_push(i64, i64) -> i64
+  func.func private @sloth_arr_push_f64(i64, f64) -> i64
+  func.func private @sloth_arr_pop(i64) -> i64
+  func.func private @sloth_arr_pop_f64(i64) -> f64
+  func.func private @sloth_str_finish(i64) -> i64
   func.func private @sloth_str_pushp(i64, i64) -> i64
   func.func private @sloth_str_push_i(i64, i64) -> i64
   func.func private @sloth_str_push_f(i64, f64) -> i64
@@ -2449,11 +2550,12 @@ impl ModEmitter {
         }
         // 2) script statements run in entry if no main() was declared
         let has_main = prog.decls.iter().any(|d| d.name == "main" && matches!(d.node, DeclNode::Func(_)));
-        if !has_main && !prog.stmts.is_empty() {
+        if !has_main {
             let mut fw = FnWalk {
                 cur: String::new(),
                 vcount: 1000,
                 scopes: vec![HashMap::new()],
+            imms: vec![HashMap::new()],
                 loops: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),
@@ -2674,6 +2776,7 @@ fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         cur: String::new(),
         vcount: 1000,
         scopes: vec![HashMap::new()],
+        imms: vec![HashMap::new()],
     loops: Vec::new(),
     ret: me.r.mk(Ty::Unit),
     ret_alloca: String::new(),
@@ -3332,5 +3435,17 @@ impl ModEmitter {
                 obj, idx, v
             ));
         }
+    }
+}
+
+impl FnWalk {
+    /// true when the outermost binding of `name` is immutable (let)
+    fn imm_of(&self, name: &str) -> bool {
+        for m in self.imms.iter().rev() {
+            if let Some(v) = m.get(name) {
+                return *v;
+            }
+        }
+        false
     }
 }
