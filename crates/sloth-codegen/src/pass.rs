@@ -314,6 +314,19 @@ mod irgen_p4 {
     }
 
     #[test]
+    fn multimod_qualified_global_works() {
+        let d = std::env::temp_dir().join("sloth_mmq");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(
+            d.join("cfg.mm.sl"),
+            "pub var counter = 20;\nfunc twice(v: int) -> int {\n    return v + v;\n}\n",
+        )
+        .unwrap();
+        let src = "import \"cfg.mm.sl\" as cfg;\nprint(cfg.twice(3));\nprint(cfg.counter);\n";
+        run_src_multimod(src, &d).unwrap();
+    }
+
+    #[test]
     fn class_method_call_works() {
         let src = r#"
             class Counter {

@@ -32,8 +32,8 @@ pub struct ModEmitter {
     pub classes: HashMap<String, ClassInfo>,
     /// trait surface: simple name -> methods
     pub traits: HashMap<String, Vec<MethodSig>>,
-    /// module-level globals: name -> (type id, mutable)
-    pub globals: HashMap<String, (TyId, bool)>,
+    /// module-level globals: name -> (mangled symbol, type id, mutable)
+    pub globals: HashMap<String, (String, TyId, bool)>,
     pub diags: Vec<Diag>,
     /// module text to parse (html-safe)
     pub out: String,
@@ -49,6 +49,16 @@ pub struct ModEmitter {
     pub cross_funcs: HashMap<String, (String, TyId)>,
     /// satisfied import paths (file canonical)
     pub imported_paths: Vec<String>,
+    /// foreign globals: "mod.name" or "alias.name" -> (mangled global symbol, ty)
+    pub fglobals: HashMap<String, (String, TyId)>,
+    /// global symbol declarations to prepend to the module IR
+    pub global_decls: Vec<String>,
+    /// global symbols already declared (dedupe)
+    pub declared_syms: std::collections::HashSet<String>,
+    /// imported modules whose init func runs before @sloth_main body
+    pub init_mods: Vec<String>,
+    /// import aliases: alias -> module name
+    pub mod_alias: HashMap<String, String>,
 }
 
 pub struct ClassInfo {
@@ -76,19 +86,30 @@ impl ModEmitter {
             cur_mod: name.to_string(),
             cross_funcs: HashMap::new(),
             imported_paths: Vec::new(),
+            fglobals: HashMap::new(),
+            global_decls: Vec::new(),
+            declared_syms: std::collections::HashSet::new(),
+            init_mods: Vec::new(),
+            mod_alias: HashMap::new(),
         }
     }
 
     /// adopt the surface of a foreign module (emits its funcs/classes under that
     /// module's name and registers them for cross-module calls)
-    pub fn register_import(&mut self, mname: &str, prog: &Program) {
+    pub fn register_import(&mut self, mname: &str, alias: Option<&str>, prog: &Program) {
         self.cur_mod = mname.to_string();
+        if let Some(a) = alias {
+            self.mod_alias.insert(a.to_string(), mname.to_string());
+        }
+        let qname = alias.unwrap_or(mname).to_string();
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
                     let mangled = mangle(mname, None, &d.name);
                     let plan = self.plan_func(&d.name, None, f, None);
-                    self.cross_funcs.insert(d.name.clone(), (mangled, plan.ret));
+                    self.cross_funcs.insert(d.name.clone(), (mangled.clone(), plan.ret));
+                    self.cross_funcs
+                        .insert(format!("{}.{}", qname, d.name), (mangled, plan.ret));
                     self.emit_func(&d.name, None, f, None, false);
                 }
                 DeclNode::Class(c) => {
@@ -99,6 +120,43 @@ impl ModEmitter {
                 _ => {}
             }
         }
+        // foreign global cells (declared lazily; inits run in modinit)
+        for d in &prog.decls {
+            if let DeclNode::Var { ty, init } = &d.node {
+                let t = match ty {
+                    Some(t) => self.ty_of(t),
+                    None => self.r.mk(Ty::Unit),
+                };
+                let sym = self.declare_global(mname, &d.name, t);
+                self.fglobals.insert(format!("{}.{}", qname, d.name), (sym.clone(), t));
+                self.fglobals.insert(format!("{}.{}", mname, d.name), (sym.clone(), t));
+            }
+        }
+        // module init func: runs this module's var inits at startup
+        let mut gbody = String::new();
+        let mut fw = fresh_walk(self);
+        for d in &prog.decls {
+            if let DeclNode::Var { init, .. } = &d.node {
+                let key = format!("{}.{}", qname, d.name);
+                let (sym, t) = match self.fglobals.get(&key).cloned() {
+                    Some(x) => x,
+                    None => continue,
+                };
+                let (v, _vt) = self.emit_expr(&mut fw, &init);
+                let mty = memref_cell_ty(self, t);
+                let g = fw.v();
+                fw.op(&format!("    {} = memref.get_global @{} : {}", g, sym, mty));
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", z));
+                fw.op(&format!("    memref.store {}, {}[{}] : {}", v, g, z, mty));
+            }
+        }
+        gbody.push_str(&fw.cur);
+        self.out.push_str(&format!(
+            "  func.func @sloth_{}__ginit() -> () {{\n{}    return\n  }}\n",
+            mname, gbody
+        ));
+        self.init_mods.push(mname.to_string());
         self.cur_mod = self.name.clone();
     }
 
@@ -343,7 +401,8 @@ impl ModEmitter {
                         Some(t) => self.ty_of(t),
                         None => self.r.mk(Ty::Unit),
                     };
-                    self.globals.insert(d.name.clone(), (t, d.kind == DeclKind::Var));
+                    let sym = self.declare_global(&self.name.clone(), &d.name, t);
+                    self.globals.insert(d.name.clone(), (sym, t, d.kind == DeclKind::Var));
                 }
                 DeclNode::Class(c) => {
                     self.class_ids.insert(d.name.clone(), class_id);
@@ -968,11 +1027,9 @@ impl ModEmitter {
                     fw.op(&format!("    {} = arith.constant 0 : i64", z));
                     fw.op(&format!("    {} = memref.load {}[{}] : {}", v, a, z, mty));
                     (v, t)
-                } else if let Some(_t) = self.globals.get(name).map(|x| x.0) {
-                    // module-level globals loaded lazily via runtime symbols
-                    // MVP placeholders: unsupported
-                    self.err(&e.pos, format!("global {} not supported yet", name));
-                    (String::new(), self.r.mk(Ty::Unit))
+                } else if let Some((gsym, t, _)) = self.globals.get(name).cloned() {
+                    let (v, _vt) = self.emit_global_read(fw, &gsym, t);
+                    (v, t)
                 } else {
                     self.err(&e.pos, format!("unknown identifier `{}`", name));
                     (String::new(), self.r.mk(Ty::Unit))
@@ -1149,6 +1206,13 @@ impl ModEmitter {
                 return self.emit_call(fw, callee, args, &e.pos);
             }
             ExprNode::Field { obj, name } => {
+                // qualified foreign-global read: lib.g / lib.Cls.f handled in arith path only for globals
+                if let ExprNode::Ident(m) = &obj.node {
+                    let key = format!("{}.{}", m, name);
+                    if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
+                        return self.emit_global_read(fw, &g, gt);
+                    }
+                }
                 let (recv, rt) = self.emit_expr(fw, obj);
                 if let Ty::Named(c, _) = self.r.get(rt) {
                     let idx = self.field_index(c, name);
@@ -1226,13 +1290,37 @@ impl ModEmitter {
         let mut sigargs: Vec<String> = Vec::new();
         // method call: receiver becomes first argument
         let mut recv: Option<(String, TyId)> = None;
-        if let ExprNode::Field { obj, name: _ } = &callee.node {
+        if let ExprNode::Field { obj, name: mname2 } = &callee.node {
+            // qualified cross-module call: lib.fn(...) or alias.fn(...)
+            if let ExprNode::Ident(m) = &obj.node {
+                let key = format!("{}.{}", m, mname2);
+                if let Some(fs) = self.cross_funcs.get(&key).cloned() {
+                    let mut cargv: Vec<(String, TyId)> = Vec::new();
+                    let mut csig: Vec<String> = Vec::new();
+                    for a in args {
+                        let (v, t) = self.emit_expr(fw, a);
+                        cargv.push((v, t));
+                        csig.push(mlir_word_ty(t, &self.r));
+                    }
+                    let r = fw.v();
+                    let vals: Vec<String> = cargv.iter().map(|x| x.0.clone()).collect();
+                    let rt = mlir_ret_ty(self, fs.1);
+                    fw.op(&format!(
+                        "    {} = call @{}({}) : ({}) -> {}",
+                        r, fs.0, vals.join(", "), csig.join(", "), rt
+                    ));
+                    return (r, fs.1);
+                }
+                if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
+                    return self.emit_global_read(fw, &g, gt);
+                }
+            }
             let (rv, rt) = self.emit_expr(fw, obj);
             recv = Some((rv.clone(), rt));
             argv.insert(0, (rv, rt));
             sigargs.insert(0, "i64".to_string());
             name = match &callee.node {
-                ExprNode::Field { name, .. } => name.clone(),
+                ExprNode::Field { name: fname, .. } => fname.clone(),
                 _ => name.clone(),
             };
         }
@@ -1410,6 +1498,10 @@ impl ModEmitter {
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", rf));
             fw.ret_flag = rf;
             fw.push_scope();
+            // run imported modules' variable initializers first
+            for m in &self.init_mods {
+                fw.op(&format!("    call @sloth_{}__ginit() : () -> ()", m));
+            }
             // top-level var/let decls become prelude statements
             for d in &prog.decls {
                 if let DeclNode::Var { ty, init } = &d.node {
@@ -1451,18 +1543,64 @@ impl ModEmitter {
         ));
     }
 
+    /// reserve a mangled global symbol and register its decl line (deduped)
+    fn declare_global(&mut self, modname: &str, name: &str, t: TyId) -> String {
+        let sym = format!("sloth_{}_g_{}", modname, name);
+        if self.declared_syms.insert(sym.clone()) {
+            let mty = memref_cell_ty(self, t);
+            let init = if mty == "memref<1xf64>" { "dense<0.0>" } else { "dense<0>" };
+            self.global_decls
+                .push(format!("  memref.global @{} : {} = {} {{mutable}}\n", sym, mty, init));
+        }
+        sym
+    }
+
+    /// emit get_global + load for a global cell reference
+    fn emit_global_read(&mut self, fw: &mut FnWalk, sym: &str, t: TyId) -> (String, TyId) {
+        let mty = memref_cell_ty(self, t);
+        let g = fw.v();
+        fw.op(&format!("    {} = memref.get_global @{} : {}", g, sym, mty));
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        let v = fw.v();
+        fw.op(&format!("    {} = memref.load {}[{}] : {}", v, g, z, mty));
+        (v, t)
+    }
+
     /// full MLIR text of the module
     pub fn take_ir(me: &mut ModEmitter) -> String {
         let mut m = format!("module @{} {{\n", me.name);
         m.push_str(&emit_str_globals(me));
         m.push_str(&rt_decls());
         m.push_str(&obj_rt_decls());
+        for gd in &me.global_decls {
+            m.push_str(gd);
+        }
         m.push_str("\n");
         m.push_str(&me.out);
         // now the out is func bodies only; globals were prepended
         // (we already integrated globals above; emit closing brace)
         m.push_str("}\n");
         m
+    }
+}
+
+fn memref_cell_ty(me: &ModEmitter, t: TyId) -> &'static str {
+    if me.is_float(t) { "memref<1xf64>" } else { "memref<1xi64>" }
+}
+
+fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
+    FnWalk {
+        cur: String::new(),
+        vcount: 1000,
+        scopes: vec![HashMap::new()],
+        loops: Vec::new(),
+        ret: me.r.mk(Ty::Unit),
+        ret_alloca: String::new(),
+        ret_flag: String::new(),
+        bb: 0,
+        term: false,
+        end_label: "^ginit".to_string(),
     }
 }
 
@@ -1661,8 +1799,8 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
 pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
     let (root, mods) = resolve_program(root_src, base_dir, &mut Vec::new())?;
     let mut me = ModEmitter::new("main");
-    for (mname, prog) in &mods {
-        me.register_import(mname, prog);
+    for (mname, prog, alias) in &mods {
+        me.register_import(mname, alias.as_deref(), prog);
     }
     // hmm: root module runs under @sloth_main through emit_module
     me.emit_module(&root);
@@ -1674,9 +1812,9 @@ fn resolve_program(
     src: &str,
     dir: &std::path::Path,
     seen: &mut Vec<std::path::PathBuf>,
-) -> Result<(Program, Vec<(String, Program)>), String> {
+) -> Result<(Program, Vec<(String, Program, Option<String>)>), String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
-    let mut mods: Vec<(String, Program)> = Vec::new();
+    let mut mods: Vec<(String, Program, Option<String>)> = Vec::new();
     _ = seen;
     for imp in &prog.imports {
         let pb = dir.join(&imp.path);
@@ -1695,7 +1833,7 @@ fn resolve_program(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "mod".to_string());
-        mods.push((stem, prog2_of(&_p2)));
+        mods.push((stem, prog2_of(&_p2), imp.alias.clone()));
         mods.append(&mut m2);
     }
     Ok((prog, mods))

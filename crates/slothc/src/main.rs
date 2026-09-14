@@ -55,7 +55,14 @@ fn dispatch(args: &Vec<String>) -> Result<String, String> {
                     }
                     Ok(String::new())
                 }
-                "build" => build_mode(&src, if out_path.is_empty() { "sloth_app" } else { &out_path }),
+                "build" => {
+                    let ir0 = if imports {
+                        sloth_codegen::irgen::compile_multimod(&src, &base)?
+                    } else {
+                        sloth_codegen::irgen::compile_to_ir(&src, "main")?
+                    };
+                    build_mode_r(&src, &ir0, if out_path.is_empty() { "sloth_app" } else { &out_path })
+                }
                 _ => unreachable!(),
             }
         }
@@ -79,8 +86,7 @@ fn print_out(args: &Vec<String>) {
     }
 }
 
-fn build_mode(src: &str, out_path: &str) -> Result<String, String> {
-    let ir = sloth_codegen::irgen::compile_to_ir(src, "main")?;
+fn build_mode_r(src: &str, ir: &str, out_path: &str) -> Result<String, String> {
     let wrapper = "  func.func @main() -> i32 attributes {llvm.emit_c_interface} {\n    call @sloth_main() : () -> ()\n    %z = arith.constant 0 : i32\n    return %z : i32\n  }\n";
     let closed = ir.strip_suffix("}\n").unwrap_or(&ir);
     let full = format!("{}\n{}\n}}\n", closed, wrapper);
