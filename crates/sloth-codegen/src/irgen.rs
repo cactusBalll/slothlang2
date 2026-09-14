@@ -525,6 +525,29 @@ impl ModEmitter {
             }
             StmtNode::Assign { target, value } => {
                 let (v, _vt) = self.emit_expr(fw, value);
+                // object-field target: [name, field] where head is a local receiver
+                if target.len() >= 2 {
+                    if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) = (target.first(), target.last()) {
+                        if let Some((at, rty)) = fw.lookup(&h.clone()) {
+                            if let Ty::Named(c, _) = self.r.get(rty) {
+                                // receiver word: alloca stores the object pointer word
+                                let z = fw.v();
+                                let recv = fw.v();
+                                let mty = if self.is_float(rty) { "memref<1xf64>" } else { "memref<1xi64>" };
+                                fw.op(&format!("    {} = arith.constant 0 : index", z));
+                                fw.op(&format!("    {} = memref.load {}[{}] : {}", recv, at, z, mty));
+                                let idx = self.field_index(&c, &f.clone());
+                                let zi = fw.v();
+                                fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                                fw.op(&format!(
+                                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                                    recv, zi, v
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
                 match target.last() {
                     Some(PathSeg::Name(n)) => {
                         let fl = match fw.lookup(n) {
@@ -1484,18 +1507,16 @@ impl ModEmitter {
             self.err(pos, format!("unknown class `{}`", clsname));
             return (String::new(), self.r.mk(Ty::Unit));
         }
-        // construct cls info on the fly (MVP: fresh per call)
-        let niln = fw.v();
-        fw.op(&format!("    {} = arith.constant 0 : i64", niln));
-        let cid = fw.v();
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
         let clsid = *self.class_ids.get(clsname).unwrap_or(&0);
         let ids = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", ids, clsid));
+        let cid = fw.v();
         fw.op(&format!(
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
-            cid, niln, ids
+            cid, z, ids
         ));
-        let obj = fw.v();
         let nfw = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", nfw, nf));
         let r2 = fw.v();
@@ -1503,10 +1524,35 @@ impl ModEmitter {
             "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             r2, cid, nfw
         ));
+        let fdinit = self
+            .classes
+            .get(clsname)
+            .and_then(|ci| ci.methods.iter().find(|(n, _)| n == "__init__").map(|(_, f)| f.clone()));
+        if let Some(fd) = fdinit {
+            let plan = self.plan_mangled("__init__", Some(clsname), &fd, None);
+            let vals = [r2.clone()].iter().cloned()
+                .chain(argv.iter().map(|x| x.0.clone()))
+                .collect::<Vec<_>>().join(", ");
+            let tys = plan.params.iter()
+                .map(|(_n, t, fl)| if self.is_float(*t) { "f64".to_string() } else { "i64".to_string() })
+                .collect::<Vec<_>>().join(", ");
+            let rt = mlir_ret_ty(self, plan.ret);
+            if self.is_unit(plan.ret) {
+                fw.op(&format!(
+                    "    call @{}({}) : ({}) -> ()",
+                    plan.mangled, vals, tys
+                ));
+            } else {
+                let rr = fw.v();
+                fw.op(&format!(
+                    "    {} = call @{}({}) : ({}) -> {}",
+                    rr, plan.mangled, vals, tys, rt
+                ));
+            }
+        }
         (r2, self.r.mk(Ty::Named(clsname.to_string(), vec![])))
     }
 }
-
 impl ModEmitter {
     /// call the ctor to build the object body, then return it
     fn emit_method_call(

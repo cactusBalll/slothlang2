@@ -273,13 +273,11 @@ mod irgen_p4 {
         let src = r#"
             class Pt {
                 var x: int;
-                var y: int;
-                func new2(a: int, b: int) {
+                func __init__(a: int) {
                     this.x = a;
-                    this.y = b;
                 }
             }
-            var p = Pt(1, 2);
+            var p = Pt(7);
             print(p.x);
         "#;
         run_src(src, "main").unwrap();
