@@ -1,0 +1,6 @@
+[package]
+name = "sloth-frontend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,14 @@
+[package]
+name = "slothc"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "slothc"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
+mlir-sys = { workspace = true }
+sloth-frontend = { path = "../sloth-frontend" }
+sloth-codegen = { path = "../sloth-codegen" }

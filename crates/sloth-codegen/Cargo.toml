@@ -1,0 +1,11 @@
+[package]
+name = "sloth-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mlir-sys = { workspace = true }
+libc = { workspace = true }
+sloth-frontend = { path = "../sloth-frontend" }
+
+[dev-dependencies]
