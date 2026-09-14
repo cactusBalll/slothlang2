@@ -43,6 +43,12 @@ pub struct ModEmitter {
     pub class_ids: HashMap<String, i64>,
     /// mangled function names already emitted
     pub emitted_names: Vec<String>,
+    /// module name used for mangling the next emit (settable for foreign imports)
+    pub cur_mod: String,
+    /// foreign module surface: simple name -> (mangled symbol, ret ty)
+    pub cross_funcs: HashMap<String, (String, TyId)>,
+    /// satisfied import paths (file canonical)
+    pub imported_paths: Vec<String>,
 }
 
 pub struct ClassInfo {
@@ -67,7 +73,33 @@ impl ModEmitter {
             strpool: Vec::new(),
             class_ids: HashMap::new(),
             emitted_names: Vec::new(),
+            cur_mod: name.to_string(),
+            cross_funcs: HashMap::new(),
+            imported_paths: Vec::new(),
         }
+    }
+
+    /// adopt the surface of a foreign module (emits its funcs/classes under that
+    /// module's name and registers them for cross-module calls)
+    pub fn register_import(&mut self, mname: &str, prog: &Program) {
+        self.cur_mod = mname.to_string();
+        for d in &prog.decls {
+            match &d.node {
+                DeclNode::Func(f) => {
+                    let mangled = mangle(mname, None, &d.name);
+                    let plan = self.plan_func(&d.name, None, f, None);
+                    self.cross_funcs.insert(d.name.clone(), (mangled, plan.ret));
+                    self.emit_func(&d.name, None, f, None, false);
+                }
+                DeclNode::Class(c) => {
+                    for m in &c.methods {
+                        self.emit_func(&m.name, Some(&d.name), &m.fd, None, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.cur_mod = self.name.clone();
     }
 
     fn err(&mut self, pos: &Pos, msg: String) {
@@ -294,7 +326,7 @@ fn mangle_t(args: &[TyId], r: &Reg) -> String {
 
 impl ModEmitter {
     fn plan_mangled(&mut self, name: &str, cls: Option<&str>, f: &FuncDef, variadic: Option<&Variadic>) -> FuncPlan {
-        let mangled = mangle(&self.name, cls, name);
+        let mangled = mangle(&self.cur_mod.clone(), cls, name);
         let plan = self.plan_func(name, cls, f, variadic);
         FuncPlan { mangled, params: plan.params, ret: plan.ret }
     }
@@ -378,7 +410,7 @@ impl ModEmitter {
             Some(t) => self.ty_of(t),
             None => self.r.mk(Ty::Unit),
         };
-        FuncPlan { mangled: mangle(&self.name, cls, name).into(), params, ret }
+        FuncPlan { mangled: mangle(&self.cur_mod.clone(), cls, name).into(), params, ret }
     }
 }
 
@@ -1243,6 +1275,17 @@ impl ModEmitter {
             ));
             return (r, plan.ret);
         }
+        // foreign-module function: symbol was pre-mangled at import time
+        if let Some(fs) = self.cross_funcs.get(&name).cloned() {
+            let r = fw.v();
+            let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
+            let rt = mlir_ret_ty(self, fs.1);
+            fw.op(&format!(
+                "    {} = call @{}({}) : ({}) -> {}",
+                r, fs.0, vals.join(", "), sigargs.join(", "), rt
+            ));
+            return (r, fs.1);
+        }
         // builtins
         let r = fw.v();
         match name.as_str() {
@@ -1610,4 +1653,58 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     }
     let ir0 = ModEmitter::take_ir(&mut me);
     Ok(normalize_indices(&ir0))
+}
+
+/// multi-module driver: resolves `import "x.sl"` recursively (dedupe by
+/// canonical path), emits each imported module's surface first, then runs the
+/// root module's entry statements under @main
+pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
+    let (root, mods) = resolve_program(root_src, base_dir, &mut Vec::new())?;
+    let mut me = ModEmitter::new("main");
+    for (mname, prog) in &mods {
+        me.register_import(mname, prog);
+    }
+    // hmm: root module runs under @sloth_main through emit_module
+    me.emit_module(&root);
+    let ir0 = ModEmitter::take_ir(&mut me);
+    Ok(normalize_indices(&ir0))
+}
+
+fn resolve_program(
+    src: &str,
+    dir: &std::path::Path,
+    seen: &mut Vec<std::path::PathBuf>,
+) -> Result<(Program, Vec<(String, Program)>), String> {
+    let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
+    let mut mods: Vec<(String, Program)> = Vec::new();
+    _ = seen;
+    for imp in &prog.imports {
+        let pb = dir.join(&imp.path);
+        let pb2 = match std::fs::canonicalize(&pb) {
+            Ok(p) => p,
+            Err(_) => pb.clone(),
+        };
+        if seen.iter().any(|x| x == &pb2) {
+            continue;
+        }
+        seen.push(pb2.clone());
+        let src2 = std::fs::read_to_string(&pb2).map_err(|e| format!("read {:?}: {}", pb2, e))?;
+        let dir2 = pb2.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let (_p2, mut m2) = resolve_program(&src2, &dir2, seen)?;
+        let stem = pb2
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mod".to_string());
+        mods.push((stem, prog2_of(&_p2)));
+        mods.append(&mut m2);
+    }
+    Ok((prog, mods))
+}
+
+fn prog2_of(prog: &Program) -> Program {
+    Program {
+        imports: Vec::new(),
+        decls: prog.decls.clone(),
+        stmts: Vec::new(),
+    }
 }

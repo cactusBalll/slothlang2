@@ -33,6 +33,7 @@ pub fn smoke_all() -> Result<(), String> {
 // -------- irgen driver: build hello program and run --------
 
 use crate::irgen::ModEmitter;
+use crate::jit::Engine;
 use sloth_frontend::parser::parse;
 
 pub fn sloth_main_hello() -> Result<(), String> {
@@ -104,6 +105,26 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
     let r = e.invoke("sloth_main", &mut []);
     let _ = std::fs::write(format!("/tmp/opencode/{}/llvm-after.mlir", mod_name), op.print());
+    r?;
+    Ok(())
+}
+
+/// compile+run a multi-module program through the JIT
+pub fn run_src_multimod(src: &str, base: &std::path::Path) -> Result<(), String> {
+    let ir0 = crate::irgen::compile_multimod(src, base).map_err(|e| format!("lower: {}", e))?;
+    let ctx = Context::new();
+    let op = match Op::parse(ctx.raw, &ir0, "prog.mlir") {
+        Ok(op2) => op2,
+        Err(e) => {
+            let _ = std::fs::write("/tmp/opencode/main/dump.mlir", &ir0);
+            return Err(format!("MLIR parse: {}", e));
+        }
+    };
+    crate::jit::run_llvm_pipeline(ctx.raw, op.raw)
+        .map_err(|e| format!("pipeline: {}", e))?;
+    let e = Engine::new(&op, 2, &[lib_path()]);
+    eprintln!("invokePacked target=sloth_main lib={}", lib_path());
+    let r = e.invoke("sloth_main", &mut []);
     r?;
     Ok(())
 }
@@ -281,6 +302,15 @@ mod irgen_p4 {
             print(p.x);
         "#;
         run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn multimodb_works() {
+        let d = std::env::temp_dir().join("sloth_mm");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(d.join("lib.mm.sl"), "func twofold(a: int) -> int {\n    return a + a;\n}").unwrap();
+        let src = "import \"lib.mm.sl\";\nvar x = twofold(6);\nprint(x);\n";
+        run_src_multimod(src, &d).unwrap();
     }
 
     #[test]

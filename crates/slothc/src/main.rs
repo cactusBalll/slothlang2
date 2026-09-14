@@ -3,6 +3,8 @@ fn main() {
     if let Err(e) = dispatch(&args) {
         eprintln!("err: {}", e);
         std::process::exit(1);
+    } else {
+        print_out(&args);
     }
 }
 
@@ -23,14 +25,34 @@ fn dispatch(args: &Vec<String>) -> Result<String, String> {
                 String::new()
             };
             let src = std::fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+            let imports = src.contains("import");
+            let base = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
             match mode.as_str() {
                 "check" => {
-                    sloth_codegen::irgen::compile_to_ir(&src, "main")?;
+                    if imports {
+                        sloth_codegen::irgen::compile_multimod(&src, &base)?;
+                    } else {
+                        sloth_codegen::irgen::compile_to_ir(&src, "main")?;
+                    }
                     Ok("check ok".to_string())
                 }
-                "ir" => sloth_codegen::irgen::compile_to_ir(&src, "main"),
+                "ir" => {
+                    if imports {
+                        let mm = sloth_codegen::irgen::compile_multimod(&src, &base)?;
+                        Ok(mm)
+                    } else {
+                        sloth_codegen::irgen::compile_to_ir(&src, "main")
+                    }
+                }
                 "run" => {
-                    sloth_codegen::pass::run_src(&src, "main")?;
+                    if imports {
+                        sloth_codegen::pass::run_src_multimod(&src, &base)?;
+                    } else {
+                        sloth_codegen::pass::run_src(&src, "main")?;
+                    }
                     Ok(String::new())
                 }
                 "build" => build_mode(&src, if out_path.is_empty() { "sloth_app" } else { &out_path }),
@@ -41,6 +63,18 @@ fn dispatch(args: &Vec<String>) -> Result<String, String> {
             let src = std::fs::read_to_string(&args[1]).map_err(|e| format!("read: {}", e))?;
             let p = sloth_codegen::parse_print_raw(&src, "probe.mlir")?;
             Ok(p)
+        }
+    }
+}
+
+fn print_out(args: &Vec<String>) {
+    if let Some(mode) = args.get(1) {
+        if mode == "ir" || mode == "check" {
+            if let Ok(out) = dispatch(args) {
+                if !out.is_empty() {
+                    println!("{}", out);
+                }
+            }
         }
     }
 }
