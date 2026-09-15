@@ -2894,3 +2894,46 @@ mod irgen_p35 {
         );
     }
 }
+
+// ---------------- patch #36: str == value semantics ----------------
+mod irgen_p36 {
+    use super::*;
+
+    /// concatenated strs compare by content against interned literals
+    #[test]
+    fn str_eq_value_semantics() {
+        let src = r#"
+            func main(): unit {
+                print("a" + "b" == "ab");   // expect: true
+                print("ab" == "a" + "b");   // expect: true
+                print("ab" != "a" + "b");   // expect: false
+                print("" == "a" + "");      // expect: false
+                print(("" + "") == "");     // expect: true
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// str equality drives control flow
+    #[test]
+    fn str_eq_control_flow() {
+        let src = r#"
+            func greet(n: str): str {
+                if n == "world" {
+                    return "hello world";
+                }
+                return "hi " + n;
+            }
+            func main(): unit {
+                print(greet("wor" + "ld"));   // expect: hello world
+                print(greet("x"));            // expect: hi x
+                var m = @("k" + "1": 7);
+                print(m["k1"]);               // expect: 7
+                print(m.len());               // expect: 1
+                m["k1"] = 8;                  // content-equal key hits the slot
+                print(m.len());               // expect: 1
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}

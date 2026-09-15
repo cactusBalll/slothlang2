@@ -643,6 +643,25 @@ impl ModEmitter {
             }
             }
         }
+        // str value equality (patch #36): ==/!= route to the content
+        // comparison instead of handle identity
+        if matches!(op, BinOp::EqEq | BinOp::NotEq) && self.is_str(at) && self.is_str(bt) {
+            let r = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_str_eq({}, {}) : (i64, i64) -> i64",
+                r, a, b
+            ));
+            let rv = if op == &BinOp::NotEq {
+                let one = fw.v();
+                let o = fw.v();
+                fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                fw.op(&format!("    {} = arith.xori {}, {} : i64", o, r, one));
+                o
+            } else {
+                r
+            };
+            return (rv, cmp_ty_id);
+        }
         let fl = self.is_float(at) || self.is_float(bt);
         if fl {
             let pred = match op {

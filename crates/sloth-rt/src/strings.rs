@@ -184,24 +184,39 @@ pub extern "C" fn sloth_str_finish(b: i64) -> i64 {
     }
 }
 
-/// concatenate two pooled strings
+/// concatenate two pooled strings; the result is interned by content so
+/// equal-content handles are identical (patch #36 intern-unification)
 #[no_mangle]
 pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
     unsafe {
-        let ta = a as *mut StrT;
-        let tb = b as *mut StrT;
+        let ta = a as *const StrT;
+        let tb = b as *const StrT;
         let la = (*ta).len;
         let lb = (*tb).len;
-        let h = sloth_gc_alloc(la + lb + 1 + std::mem::size_of::<StrT>()) as *mut libc::c_void;
-        let td = h as *mut StrT;
-        let dat = (h as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
-        libc::memcpy(dat, (*ta).data, la);
-        libc::memcpy((dat as *mut libc::c_char).offset(la as isize) as *mut libc::c_void,
-                     (*tb).data, lb);
-        libc::memset((dat as *mut libc::c_char).offset((la + lb) as isize) as *mut libc::c_void, 0, 1);
-        (*td).len = la + lb;
-        (*td).data = dat;
-        h as i64
+        let n = la + lb;
+        let buf = libc::malloc((n + 1) as libc::size_t) as *mut libc::c_char;
+        libc::memcpy(buf as *mut libc::c_void, (*ta).data, la);
+        libc::memcpy(
+            (buf as *mut libc::c_void).offset(la as isize),
+            (*tb).data,
+            lb,
+        );
+        *(buf.offset(n as isize)) = 0;
+        let h = sloth_str_intern(buf as i64, n as i64);
+        libc::free(buf as *mut libc::c_void);
+        h
+    }
+}
+
+/// content equality of two pooled str words (patch #36): len + memcmp
+#[no_mangle]
+pub extern "C" fn sloth_str_eq(a: i64, b: i64) -> i64 {
+    unsafe {
+        let ta = a as *const StrT;
+        let tb = b as *const StrT;
+        ((*ta).len == (*tb).len
+            && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0)
+            as i64
     }
 }
 

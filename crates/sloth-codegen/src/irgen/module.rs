@@ -195,6 +195,7 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_char(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_str_eq(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_len(i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_get(i64, i64) -> i64\n");
