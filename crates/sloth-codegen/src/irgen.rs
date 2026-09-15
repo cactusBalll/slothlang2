@@ -1911,6 +1911,29 @@ impl ModEmitter {
                 fw.op(&format!("    {} = {} {}, {} : i64", r, ao, a, b));
                 (r, self.r.mk(Ty::I64))
             }
+            ExprNode::Pipe { lhs, rhs } => {
+                // x |> f  ≡ f(x); x |> f(a, b) ≡ f(a, b, x) — x goes last
+                match &rhs.node {
+                    ExprNode::Ident(_) | ExprNode::Call { .. } => {
+                        let mut args2: Vec<Expr> = Vec::new();
+                        let callee: Box<Expr> = match &rhs.node {
+                            ExprNode::Call { callee, args } => {
+                                args2.extend(args.iter().cloned());
+                                callee.as_ref().clone().into()
+                            }
+                            _ => (**rhs).clone().into(),
+                        };
+                        args2.push((**lhs).clone());
+                        self.emit_call(fw, &callee, &args2, &e.pos)
+                    }
+                    _ => {
+                        self.err(&e.pos, "pipe rhs must be a function or call".to_string());
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        (z, self.r.mk(Ty::Unit))
+                    }
+                }
+            }
             _ => self.emit_expr_rest2(fw, e),
         }
     }

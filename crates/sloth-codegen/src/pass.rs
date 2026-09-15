@@ -991,6 +991,50 @@ mod irgen_p11 {
     }
 }
 
+// ---------------- patch #12: pipe |> ----------------
+mod irgen_p12 {
+    use super::*;
+
+    /// x |> f ≡ f(x); x |> f(a, b) ≡ f(a, b, x) — pipe value goes last
+    #[test]
+    fn pipe_single_and_two_arg() {
+        let src = r#"
+            func twice(x: int): int {
+                return x * 2;
+            }
+            func pick(a: int, b: int): int {
+                return a * 10 + b;
+            }
+            print(5 |> twice);
+            print(3 |> twice |> twice);
+            print(1 |> pick(7));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// chained pipes thread the value through successive calls
+    #[test]
+    fn pipe_chained() {
+        let src = r#"
+            func inc(x: int): int { return x + 1; }
+            func dbl(x: int): int { return x * 2; }
+            print((1 |> inc |> inc |> dbl));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// non-call pipe rhs is a diagnostic
+    #[test]
+    fn pipe_rhs_must_be_callable() {
+        let src = "func twice(x: int): int { return x * 2; }\nlet y = 3 |> 4;\nprint(1);\n";
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("pipe to non-call accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("pipe rhs must be a function or call"), "unexpected: {}", e);
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

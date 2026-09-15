@@ -716,7 +716,12 @@ impl Parser {
         } {
             let is_elvis = matches!(self.peek(), Some(Tok::Elvis));
             self.ptr += 1;
-            let rhs = self.expr(0)?;
+            // pipe rhs binds left: chain groups as (a |> f) |> g, never f |> (g)
+            let rhs = if is_elvis {
+                self.expr(0)?
+            } else {
+                self.expr(P_PIPE + 1)?
+            };
             lhs = if is_elvis {
                 Expr { pos, node: ExprNode::Elvis { lhs: Box::new(lhs), rhs: Box::new(rhs) } }
             } else {
