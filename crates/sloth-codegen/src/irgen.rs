@@ -75,6 +75,8 @@ pub struct ModEmitter {
     pub native_cls_id: i64,
     /// Result<T,E> instances (builtins `ok(v)`/`err(e)` target them)
     pub result_insts: std::collections::HashSet<String>,
+    /// `extern type` declared opaque surfaces (no ctor/fields/methods)
+    pub extern_types: std::collections::HashSet<String>,
     /// generic base T-frame per registered instance (plan-time T resolution)
     pub class_frames: HashMap<String, HashMap<String, TyId>>,
     /// devirt/inline observation counters (patch #18c; SLOTH_STATS=1 prints)
@@ -151,6 +153,7 @@ impl ModEmitter {
             pending_insts: Vec::new(),
             native_cls_id: 0,
             result_insts: std::collections::HashSet::new(),
+            extern_types: std::collections::HashSet::new(),
             class_frames: HashMap::new(),
             class_order: Vec::new(),
             vt_slots: HashMap::new(),
@@ -1061,6 +1064,9 @@ impl ModEmitter {
                 DeclNode::Trait(t) => {
                     let _ = t;
                     // already registered in the pre-pass
+                }
+                DeclNode::ExternType => {
+                    self.extern_types.insert(d.name.clone());
                 }
             }
         }
@@ -2925,6 +2931,13 @@ impl ModEmitter {
                 }
                 let (recv, rt) = self.emit_expr(fw, obj);
                 if let Ty::Named(c, _) = self.r.get(rt) {
+                    if self.extern_types.contains(c.as_str()) {
+                        self.err(
+                            &e.pos,
+                            format!("extern type `{}` is opaque (cannot access fields)", c),
+                        );
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
                     let idx = self.field_index(c, name);
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));

@@ -34,6 +34,7 @@ pub enum DeclKind {
     Func,
     Class,
     Trait,
+    ExternType,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,8 @@ pub enum DeclNode {
     Func(Box<FuncDef>),
     Class(Box<ClassDef>),
     Trait(Box<TraitDef>),
+    /// extern type: opaque C-ABI reference word (no ctor/fields/methods)
+    ExternType,
 }
 
 #[derive(Debug, Clone)]

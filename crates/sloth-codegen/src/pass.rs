@@ -2075,6 +2075,82 @@ mod irgen_p23 {
     }
 }
 
+// ---------------- patch #24: extern type (opaque C-ABI reference) ----------------
+mod irgen_p24 {
+    use super::*;
+
+    /// extern type round-trip: opaque token created/used through extern
+    /// funcs only (word-transparent ABI)
+    #[test]
+    fn extern_type_roundtrip() {
+        let src = r#"
+            extern type Tok;
+            extern func sloth_extern_tok_new(): Tok;
+            extern func sloth_extern_tok_val(t: Tok): int;
+            func main(): unit {
+                let t = sloth_extern_tok_new();
+                print(sloth_extern_tok_val(t));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// extern type is opaque: field access diagnosed
+    #[test]
+    fn extern_type_field_diag() {
+        let src = r#"
+            extern type Tok;
+            extern func sloth_extern_tok_new(): Tok;
+            func main(): unit {
+                let t = sloth_extern_tok_new();
+                print(t.x);
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("opaque extern type field access accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("extern type `Tok` is opaque"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// extern type cannot be constructed or `is`-narrowed in sloth
+    #[test]
+    fn extern_type_ctor_diag() {
+        let src = r#"
+            extern type Tok;
+            func main(): unit {
+                let t = Tok();
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("extern type construction accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("unknown `Tok`"), "unexpected: {}", e);
+    }
+
+    /// extern type word passes multi-hop: new → val → val again (alias-safe)
+    #[test]
+    fn extern_type_multihop() {
+        let src = r#"
+            extern type Tok;
+            extern func sloth_extern_tok_new(): Tok;
+            extern func sloth_extern_tok_val(t: Tok): int;
+            func main(): unit {
+                let t = sloth_extern_tok_new();
+                var u = t;
+                u = sloth_extern_tok_new();
+                let s = sloth_extern_tok_val(t) + sloth_extern_tok_val(u);
+                print(s);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

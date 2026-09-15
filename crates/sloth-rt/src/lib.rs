@@ -780,6 +780,25 @@ pub extern "C" fn sloth_panic_unwrap() -> i64 {
     std::process::exit(1);
 }
 
+/// extern-type opaque token example: allocate a boxed int (op *mut c_void)
+#[no_mangle]
+pub extern "C" fn sloth_extern_tok_new() -> *mut libc::c_void {
+    unsafe {
+        let p = libc::malloc(8) as *mut i64;
+        *p = 99;
+        p as *mut libc::c_void
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_extern_tok_val(t: *const libc::c_void) -> i64 {
+    if t.is_null() {
+        eprintln!("sloth panic: unreachable opaque token");
+        std::process::exit(1);
+    }
+    unsafe { *(t as *const i64) }
+}
+
 #[cfg(test)]
 mod str_tests {
     #[test]

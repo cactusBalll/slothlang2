@@ -176,6 +176,9 @@ impl Parser {
             Some(Tok::Ident(s)) if s == "extern" => {
                 let pos = self.pos();
                 self.ptr += 1;
+                if self.is_kw("type") {
+                    return self.extern_type(pos);
+                }
                 self.extern_func(pos)
             }
             Some(Tok::Ident(s)) if s == "var" || s == "let" => self.var_let_decl(visible),
@@ -364,6 +367,20 @@ impl Parser {
             pos,
             FuncDef { type_params, params, variadic, ret, body: Box::new(body), is_extern: false },
         ))
+    }
+
+    /// extern type declaration: `extern type Name;` — opaque C-ABI reference
+    fn extern_type(&mut self, pos: Pos) -> PResult<Decl> {
+        self.expect_kw("type")?;
+        let (name, _) = self.ident("extern type name")?;
+        self.expect(Tok::Semi, "';' after extern type")?;
+        Ok(Decl {
+            kind: DeclKind::ExternType,
+            name,
+            pos,
+            visible: true,
+            node: DeclNode::ExternType,
+        })
     }
 
     /// extern func declaration: `extern func name(params): ret;`
