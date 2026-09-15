@@ -232,7 +232,8 @@ pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
 // header layout: [cap, used, kkind, buckets_ptr] — the header stays put across
 // growth, only the bucket array is reallocated, so stored map handles remain
 // valid. Each bucket slot = 3 words [used, key, value].
-// kkind: 0 = i64 keys, 1 = str keys (interned str handles compared by content)
+// kkind: 0 = i64 keys, 1 = str keys (interned str handles compared by content),
+// 2 = object keys (pointer identity + hashed pointer; MVP wp for Hashable)
 
 const MAP_HDR_W: i64 = 4;
 const MAP_SLOT_W: i64 = 3;
@@ -276,6 +277,8 @@ fn map_hash_s(h: i64) -> u64 {
 fn map_key_hash(kkind: i64, key: i64) -> u64 {
     if kkind == 1 {
         map_hash_s(key)
+    } else if kkind == 2 {
+        mix64(key as u64)
     } else {
         map_hash_i(key)
     }
@@ -293,6 +296,8 @@ fn map_streq(a: i64, b: i64) -> bool {
 fn map_key_eq(kkind: i64, ka: i64, kb: i64) -> bool {
     if kkind == 1 {
         map_streq(ka, kb)
+    } else if kkind == 2 {
+        ka == kb
     } else {
         ka == kb
     }

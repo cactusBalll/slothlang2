@@ -1163,6 +1163,130 @@ mod irgen_p14 {
     }
 }
 
+// ---------------- patch #15: operator overloads + trait bounds ----------------
+mod irgen_p15 {
+    use super::*;
+
+    /// Vec2 + Vec2 dispatches __add__ (new-object return + f64 fields worded)
+    #[test]
+    fn operator_overload_add() {
+        let src = r#"
+            class Vec2 {
+                var x: float = 0;
+                var y: float = 0;
+                func __init__(x: float, y: float): unit {
+                    this.x = x;
+                    this.y = y;
+                    return;
+                }
+                func __add__(r: Vec2): Vec2 {
+                    return Vec2(this.x + r.x, this.y + r.y);
+                }
+            }
+            func main(): unit {
+                var a = Vec2(1, 2);
+                var b = Vec2(3, 4);
+                var c = a + b;
+                print(c.x);
+                print(c.y);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// class without the overload still refuses numeric fallback
+    #[test]
+    fn operator_overload_missing_diag() {
+        let src = "class Pt { func __init__(): unit { return; } }\nfunc main(): unit {\n    var a = Pt();\n    var b = a + a;\n}\n";
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("operator without overload accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a `__add__` overload"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// Hashable-keyed maps: object keys route through pointer identity
+    #[test]
+    fn map_object_keys_work() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            class Point impl Hashable {
+                var x: int;
+                var y: int;
+                func __init__(x: int, y: int): unit {
+                    this.x = x;
+                    this.y = y;
+                    return;
+                }
+                func hashKey(): int {
+                    return this.x + 1000 * this.y;
+                }
+            }
+            func main(): unit {
+                let a = Point(1, 2);
+                let b = Point(3, 4);
+                let m: Map<Point, int> = @(a: 10, b: 20);
+                print(m[a]);
+                print(m[b]);
+                m[a] = 99;
+                print(m[a]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// generic trait bounds: builtin kinds satisfy predefined traits; classes
+    /// go through the impl chain
+    #[test]
+    fn generic_bound_check() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            class Point impl Hashable {
+                func __init__(): unit { return; }
+                func hashKey(): int { return 7; }
+            }
+            func pick<T: Hashable>(k: T): T {
+                var q = k;
+                return q;
+            }
+            func main(): unit {
+                print(pick(7));
+                print(pick(Point()));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// classes lacking the trait violate the bound diagnostically
+    #[test]
+    fn generic_bound_violation_diag() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            class Plain {
+                func __init__(): unit { return; }
+            }
+            func pick<T: Hashable>(k: T): T {
+                var q = k;
+                return q;
+            }
+            func main(): unit {
+                print(pick(Plain()));
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("bound violation accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("does not satisfy trait bound `Hashable`"),
+            "unexpected: {}", e
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

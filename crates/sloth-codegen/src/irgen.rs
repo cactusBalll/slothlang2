@@ -596,6 +596,44 @@ impl ModEmitter {
             Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) | Ty::Named(_, _) | Ty::Dyn(_)
         )
     }
+
+    /// does a class chain (cls + superclasses) implement trait `tr`?
+    fn impl_chain_has(&self, cls: &str, tr: &str) -> bool {
+        let mut cur = Some(cls.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    if ci.impls.iter().any(|x| x == tr) {
+                        return true;
+                    }
+                    cur = ci.superclass.clone();
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// predefined trait surface: builtin kinds satisfy these without declares
+    fn is_predef_trait(bound: &str) -> bool {
+        matches!(
+            bound,
+            "Hashable" | "Equatable" | "Comparable" | "Display"
+        )
+    }
+
+    /// does a type satisfy the trait bound? (builtin kinds cover predefined
+    /// traits; user classes need the impl chain; Opt looks through)
+    fn satisfies_bound(&self, t: TyId, bound: &str) -> bool {
+        match self.r.get(t).clone() {
+            Ty::I64 | Ty::F64 | Ty::Str | Ty::Bool | Ty::Range | Ty::Array(_) | Ty::Map(_, _) => {
+                Self::is_predef_trait(bound)
+            }
+            Ty::Named(cls, _) => self.impl_chain_has(&cls, bound),
+            Ty::Opt(e) => self.satisfies_bound(e, bound),
+            _ => false,
+        }
+    }
 }
 
 /// mangle: module_scope_name for top-level, class method _Class_method
@@ -1081,10 +1119,22 @@ impl ModEmitter {
                                 let idx = self.field_index(&c, &f.clone());
                                 let zi = fw.v();
                                 fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                                fw.op(&format!(
-                                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-                                    recv, zi, v
-                                ));
+                                // f64 field route: int words promote; float->i64 rejects
+                                let fty = self
+                                    .classes
+                                    .get(c)
+                                    .and_then(|ci| ci.fields.iter().find(|fd| fd.0 == *f))
+                                    .map(|fd| fd.1)
+                                    .unwrap_or_else(|| self.r.mk(Ty::I64));
+                                let mut vc = v.clone();
+                                if self.is_float(fty) && !self.is_float(vty) {
+                                    let cv = fw.v();
+                                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                                    vc = cv;
+                                } else if !self.is_float(fty) && self.is_float(vty) {
+                                    self.err(&s.pos, "type mismatch: cannot assign float to non-float field".to_string());
+                                }
+                                self.op_set_field(fw, &recv, &zi, &vc, fty, s.pos.clone());
                                 return;
                             }
                         }
@@ -1942,6 +1992,30 @@ impl ModEmitter {
             ExprNode::Arith { op, lhs, rhs } => {
                 let (a, at) = self.emit_expr(fw, lhs);
                 let (b, bt) = self.emit_expr(fw, rhs);
+                // operator overload: class receiver dispatches __add__ etc;
+                // carry the rhs word as payload (a + b ≡ a.__op__(b))
+                if let Ty::Named(cls, _) = self.r.get(at).clone() {
+                    let oname = match op {
+                        ArithOp::Add => "__add__",
+                        ArithOp::Sub => "__sub__",
+                        ArithOp::Mul => "__mul__",
+                        ArithOp::Div => "__div__",
+                        ArithOp::Mod => "__mod__",
+                    };
+                    if let Some((defcls, fd)) = self.find_method(&cls, oname) {
+                        let oargv = vec![(a.clone(), at), (b.clone(), bt)];
+                        let osig = vec![
+                            mlir_word_ty(at, &self.r),
+                            mlir_word_ty(bt, &self.r),
+                        ];
+                        return self.emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, &e.pos);
+                    }
+                    self.err(
+                        &e.pos,
+                        format!("operator `{:?}` on class `{}` requires a `{}` overload", op, cls, oname),
+                    );
+                    return (String::new(), self.r.mk(Ty::Unit));
+                }
                 if *op == ArithOp::Add && self.is_str(at) && self.is_str(bt) {
                     let r = fw.v();
                     fw.op(&format!(
@@ -2164,6 +2238,14 @@ impl ModEmitter {
                             ));
                             return (r, self.r.mk(Ty::Str));
                         }
+                        Ty::F64 => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field_f64({}, {}) : (i64, i64) -> f64",
+                                r, recv, zi
+                            ));
+                            return (r, fty2);
+                        }
                         Ty::Named(_, _) | Ty::Dyn(_) => {
                             let r = fw.v();
                             fw.op(&format!(
@@ -2274,14 +2356,37 @@ impl ModEmitter {
                 // key kind: str handles vs i64 words (uniform family check)
                 let kvm: Vec<TyId> = kevs.iter().map(|x| x.1).collect();
                 let anyk_str = kvm.iter().any(|t| self.is_str(*t));
+                let anyk_obj = if anyk_str {
+                    false
+                } else {
+                    kvm.iter()
+                        .any(|t| matches!(self.r.get(*t).clone(), Ty::Named(_, _)))
+                };
                 if kvm.iter().any(|t| self.is_float(*t)) {
-                    self.err(&e.pos, "map keys must be int or str".to_string());
+                    self.err(&e.pos, "map keys must be int, str or Hashable".to_string());
                 }
                 if anyk_str && kvm.iter().any(|t| !self.is_str(*t)) {
                     self.err(&e.pos, "mixed map key types".to_string());
                 }
+                if anyk_obj && kvm.iter().any(|t| !matches!(self.r.get(*t).clone(), Ty::Named(_, _))) {
+                    self.err(&e.pos, "mixed map key types".to_string());
+                }
+                if anyk_obj {
+                    for t in kvm.iter() {
+                        match self.r.get(*t).clone() {
+                            Ty::Named(cls, _) => {
+                                if !self.impl_chain_has(&cls, "Hashable") {
+                                    self.err(&e.pos, format!("map key `{}` does not implement Hashable", cls));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let kty = if anyk_str {
                     self.r.mk(Ty::Str)
+                } else if anyk_obj {
+                    kvm[0]
                 } else {
                     self.r.mk(Ty::I64)
                 };
@@ -2307,7 +2412,7 @@ impl ModEmitter {
                         }
                     }
                 };
-                let kk = if anyk_str { 1i64 } else { 0i64 };
+                let kk = if anyk_str { 1i64 } else if anyk_obj { 2i64 } else { 0i64 };
                 let kv0 = fw.v();
                 fw.op(&format!("    {} = arith.constant {} : i64", kv0, kk));
                 let m = fw.v();
@@ -2856,6 +2961,22 @@ impl ModEmitter {
                 return (z, self.r.mk(Ty::Unit));
             }
         }
+        // trait constraint validation (§2.3): bound checks before instantiation
+        for tp in &fd.type_params {
+            if let Some(bound) = &tp.bound {
+                let t = map[&tp.name];
+                if !self.satisfies_bound(t, bound) {
+                    self.err(
+                        pos,
+                        format!(
+                            "type argument `{}` does not satisfy trait bound `{}`",
+                            sloth_frontend::ty::ty_name(self.r.get(t)),
+                            bound
+                        ),
+                    );
+                }
+            }
+        }
         if self.insts.len() > 64 {
             self.err(pos, "generic instantiation too deep (recursion?)".to_string());
             let z = fw.v();
@@ -2866,16 +2987,18 @@ impl ModEmitter {
         let base = mangle(&self.cur_mod.clone(), None, name);
         let mangled = format!("{}{}", base, mangle_t(&keys, &self.r));
         if !self.emitted_names.contains(&mangled) {
-            self.tp_subst.push(map);
+            self.tp_subst.push(map.clone());
             self.tp_mangled.push(mangled.clone());
             self.emit_func(name, None, fd, None, false);
             self.tp_subst.pop();
             self.tp_mangled.pop();
         }
-        // instance plan: frame trick yields the substituted signature
+        // instance plan: substitution frame active so T resolves to the bound type
         let plan = {
+            self.tp_subst.push(map);
             self.tp_mangled.push(mangled.clone());
             let p = self.plan_func(name, None, fd, None);
+            self.tp_subst.pop();
             self.tp_mangled.pop();
             p
         };
@@ -3431,7 +3554,15 @@ impl ModEmitter {
             for (fname, iopt, fty) in defs {
                 if let Some(ix) = &iopt {
                     let idx = self.field_index(clsname, &fname);
-                    let (iv, _it) = self.emit_expr(fw, ix);
+                    let (mut iv, iit) = self.emit_expr(fw, ix);
+                    // float field route: int init words get promoted first
+                    let ftt = self.ty_of(&fty);
+                    let ftf = self.is_float(ftt);
+                    if ftf && !self.is_float(iit) {
+                        let cv = fw.v();
+                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, iv));
+                        iv = cv;
+                    }
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
                     let ft2 = self.ty_of(&fty);
@@ -3449,8 +3580,19 @@ impl ModEmitter {
                 .unwrap_or_else(|| self.name.clone());
             let plan = self.plan_mangled("__init__", Some(&defcls), &fd, None);
             self.cur_mod = saved_mod;
+            // ctor args words: int values sitofp-promote to f64 params
+            let mut argvals: Vec<String> = Vec::new();
+            for ((v, t), (_n, pt, pfl)) in argv.iter().zip(plan.params.iter().skip(1)) {
+                if *pfl && !self.is_float(*t) {
+                    let cv = fw.v();
+                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                    argvals.push(cv);
+                } else {
+                    argvals.push(v.clone());
+                }
+            }
             let vals = [r2.clone()].iter().cloned()
-                .chain(argv.iter().map(|x| x.0.clone()))
+                .chain(argvals.iter().cloned())
                 .collect::<Vec<_>>().join(", ");
             let tys = plan.params.iter()
                 .map(|(_n, t, fl)| if self.is_float(*t) { "f64".to_string() } else { "i64".to_string() })
