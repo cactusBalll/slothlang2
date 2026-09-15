@@ -228,6 +228,12 @@ pub enum ExprNode {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    /// explicit generic call `f<A,B>(args)`
+    GenCall {
+        callee: Box<Expr>,
+        targs: Vec<Type>,
+        args: Vec<Expr>,
+    },
     Index {
         obj: Box<Expr>,
         idx: Box<Expr>,

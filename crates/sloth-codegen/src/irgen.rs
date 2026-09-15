@@ -69,6 +69,14 @@ pub struct ModEmitter {
     pub cls_mod: HashMap<String, String>,
     /// lambda function counter (unique symbols per lambda site)
     pub lamcount: usize,
+    /// generic-class instances registered during typing: (inst name, T-frame)
+    pub pending_insts: Vec<(String, HashMap<String, TyId>)>,
+    /// next fresh native class id for synthesized instances
+    pub native_cls_id: i64,
+    /// Result<T,E> instances (builtins `ok(v)`/`err(e)` target them)
+    pub result_insts: std::collections::HashSet<String>,
+    /// generic base T-frame per registered instance (plan-time T resolution)
+    pub class_frames: HashMap<String, HashMap<String, TyId>>,
     /// devirt/inline observation counters (patch #18c; SLOTH_STATS=1 prints)
     pub stat_dcalls: usize,
     pub stat_dyncalls: usize,
@@ -91,6 +99,7 @@ pub struct ModEmitter {
     insts: std::collections::HashMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ClassInfo {
     pub name: String,
     pub fields: Vec<(String, TyId, bool)>, // (name, ty, mutable)
@@ -139,6 +148,10 @@ impl ModEmitter {
             stat_dyncalls: 0,
             stat_ginsts: 0,
             stat_extdecls: 0,
+            pending_insts: Vec::new(),
+            native_cls_id: 0,
+            result_insts: std::collections::HashSet::new(),
+            class_frames: HashMap::new(),
             class_order: Vec::new(),
             vt_slots: HashMap::new(),
             llvm_method: std::collections::HashSet::new(),
@@ -594,11 +607,194 @@ impl ModEmitter {
                 if a.is_empty() && self.traits.contains_key(n) {
                     return self.r.mk(Ty::Dyn(n.to_string()));
                 }
+                // generic class instance: C<A1,A2> -> monomorphic C_<A>_...
+                if !a.is_empty() {
+                    if let Some((_, cdef)) = self.class_defs.get(n).cloned() {
+                        if !cdef.type_params.is_empty() {
+                            return self.declare_class_inst(n, &a);
+                        }
+                    }
+                }
                 self.r.mk(Ty::Named(n.to_string(), a))
             }
         }
     }
 
+
+    /// register (or fetch) the monomorphic instance of generic class `n`
+    /// with text args `a`; fields are typed under the substitution frame
+    fn declare_class_inst(&mut self, n: &str, a: &[TyId]) -> TyId {
+        let inst = format!("{}{}", n, mangle_t(a, &self.r));
+        if self.class_ids.contains_key(&inst) {
+            return self.r.mk(Ty::Named(inst.clone(), a.to_vec()));
+        }
+        let (defmod, cdef) = match self.class_defs.get(n).cloned() {
+            Some(x) => x,
+            None => return self.r.mk(Ty::Named(n.to_string(), a.to_vec())),
+        };
+        let mut frame: HashMap<String, TyId> = HashMap::new();
+        for (tp, ty) in cdef.type_params.iter().zip(a.iter()) {
+            frame.insert(tp.name.clone(), *ty);
+        }
+        let fields: Vec<(String, TyId, bool)> = {
+            self.tp_subst.push(frame.clone());
+            let f = cdef
+                .fields
+                .iter()
+                .map(|fd| (fd.name.clone(), self.ty_of(&fd.ty), fd.mutable))
+                .collect();
+            self.tp_subst.pop();
+            f
+        };
+        if !self.class_order.contains(&inst) {
+            self.class_order.push(inst.clone());
+        }
+        self.native_cls_id += 1;
+        let mut nid = self.native_cls_id;
+        while self.class_ids.values().any(|&v| v == nid) {
+            nid += 1;
+        }
+        self.class_ids.insert(inst.clone(), nid);
+        self.cls_mod.insert(inst.clone(), defmod.clone());
+        self.class_defs
+            .insert(inst.clone(), (defmod.clone(), cdef.clone()));
+        let meth: Vec<(String, FuncDef)> = cdef
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.fd.clone()))
+            .collect();
+        self.classes.insert(
+            inst.clone(),
+            ClassInfo {
+                name: inst.clone(),
+                fields,
+                methods: meth,
+                superclass: cdef.superclass.clone(),
+                impls: cdef.impls.clone(),
+            },
+        );
+        if n == "Result" {
+            self.result_insts.insert(inst.clone());
+        }
+        self.class_frames.insert(inst.clone(), frame.clone());
+        self.pending_insts.push((inst.clone(), frame));
+        self.r.mk(Ty::Named(inst.clone(), a.to_vec()))
+    }
+
+    /// Result ctor synth for `let r: Result<T,E> = ok(v) / err(e)`
+    fn emit_result_ctor(
+        &mut self,
+        fw: &mut FnWalk,
+        inst: &str,
+        arg: &Expr,
+        is_ok: bool,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let ity = self.r.mk(Ty::Named(inst.to_string(), vec![]));
+        let ci = match self.classes.get(inst).cloned() {
+            Some(c) => c,
+            None => return (String::new(), self.r.mk(Ty::Unit)),
+        };
+        let fvy = ci
+            .fields
+            .iter()
+            .find(|f| f.0 == "v")
+            .map(|f| f.1)
+            .unwrap_or_else(|| self.r.mk(Ty::Unit));
+        let fey = ci
+            .fields
+            .iter()
+            .find(|f| f.0 == "e")
+            .map(|f| f.1)
+            .unwrap_or_else(|| self.r.mk(Ty::Unit));
+        let fok = ci
+            .fields
+            .iter()
+            .find(|f| f.0 == "ok")
+            .map(|f| f.1)
+            .unwrap_or_else(|| self.r.mk(Ty::Unit));
+        let (mut v, vt) = self.emit_expr(fw, arg);
+        // slot route: float field promotes int words; refuse float into ints
+        let slot = if is_ok { fvy } else { fey };
+        if self.is_float(slot) && !self.is_float(vt) {
+            let cv = fw.v();
+            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+            v = cv;
+        } else if !self.is_float(slot) && self.is_float(vt) {
+            self.err(pos, "type mismatch: Result slot is a word but a float value was passed".to_string());
+        }
+        // object + default zero fields
+        let (obj, _ot) = self.emit_new_obj(fw, inst, &Vec::new(), &Vec::new(), pos);
+        // ok flag & payload / err pair
+        let zi = fw.v();
+        let zc = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zi));
+
+
+        let okv = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", okv, if is_ok { 1 } else { 0 }));
+        let okidx = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            okidx,
+            self.field_index(inst, "ok")
+        ));
+        self.op_set_field(fw, &obj, &okidx, &okv, fok, pos.clone());
+        if is_ok {
+            let vidx = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                vidx,
+                self.field_index(inst, "v")
+            ));
+            self.op_set_field(fw, &obj, &vidx, &v, fvy, pos.clone());
+            // zero the err slot by its word spelling
+            let ez = fw.v();
+            if self.is_float(fey) {
+                fw.op(&format!("    {} = arith.constant 0.0 : f64", ez));
+            } else {
+                fw.op(&format!("    {} = arith.constant 0 : i64", ez));
+            }
+            let eidx = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                eidx,
+                self.field_index(inst, "e")
+            ));
+            self.op_set_field(fw, &obj, &eidx, &ez, fey, pos.clone());
+        } else {
+            // zero the v slot
+            let vz = fw.v();
+            if self.is_float(fvy) {
+                fw.op(&format!("    {} = arith.constant 0.0 : f64", vz));
+            } else {
+                fw.op(&format!("    {} = arith.constant 0 : i64", vz));
+            }
+            let vidx = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                vidx,
+                self.field_index(inst, "v")
+            ));
+            self.op_set_field(fw, &obj, &vidx, &vz, fvy, pos.clone());
+            let eidx = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                eidx,
+                self.field_index(inst, "e")
+            ));
+            self.op_set_field(fw, &obj, &eidx, &v, fey, pos.clone());
+        }
+        (obj, ity)
+    }
+
+    /// stmt text of the callee Identifier for diagnostics
+    fn init_str2(callee: &Expr) -> String {
+        match &callee.node {
+            ExprNode::Ident(id) => id.clone(),
+            _ => String::new(),
+        }
+    }
 
     pub fn is_float(&self, t: TyId) -> bool {
         matches!(self.r.get(t), Ty::F64)
@@ -1106,7 +1302,53 @@ impl ModEmitter {
                 let _ = self.emit_expr(fw, e);
             }
             StmtNode::Let { mutable, name, ty, init } => {
-                let (v, t) = self.emit_expr(fw, init);
+                // typed(s) ok()/err() ctor fast-path: declared Result init
+                let pre: Option<(String, TyId)> = match (&ty, &init.node) {
+                    (
+                        Some(te),
+                        ExprNode::Call { callee, args },
+                    ) if args.len() == 1
+                        && matches!(
+                            callee.node,
+                            ExprNode::Ident(ref id) if id == "ok" || id == "err",
+                        ) =>
+                    {
+                        let dt = self.ty_of(te);
+                        let inst = match self.r.get(dt).clone() {
+                            Ty::Named(nm, _) if self.result_insts.contains(&nm) => Some(nm),
+                            _ => None,
+                        };
+                        match inst {
+                            Some(inst) => {
+                                let is_ok = matches!(
+                                    &callee.node,
+                                    ExprNode::Ident(ref id) if id == "ok"
+                                );
+                                Some(self.emit_result_ctor(fw, &inst, &args[0], is_ok, &init.pos))
+                            }
+                            None => {
+                                if matches!(
+                                    &callee.node,
+                                    ExprNode::Ident(ref id) if id == "ok" || id == "err",
+                                ) {
+                                    self.err(
+                                        &init.pos,
+                                        format!(
+                                            "ctor `{}` requires a declared Result target (let/var with Result<_, _>)",
+                                            if Self::init_str2(callee) == "err" { "err" } else { "ok" }
+                                        ),
+                                    );
+                                }
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let (v, t) = match &pre {
+                    Some((w, tt)) => (w.clone(), *tt),
+                    None => self.emit_expr(fw, init),
+                };
                 // declared `dyn T` / trait positions coerce the binding's type
                 let t = match ty {
                     Some(te) => {
@@ -2258,7 +2500,7 @@ impl ModEmitter {
                             _ => (**rhs).clone().into(),
                         };
                         args2.push((**lhs).clone());
-                        self.emit_call(fw, &callee, &args2, &e.pos)
+                        self.emit_call(fw, &callee, &args2, &e.pos, None)
                     }
                     _ => {
                         self.err(&e.pos, "pipe rhs must be a function or call".to_string());
@@ -2393,7 +2635,10 @@ impl ModEmitter {
     fn emit_expr_leaf_codes(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         match &e.node {
             ExprNode::Call { callee, args } => {
-                return self.emit_call(fw, callee, args, &e.pos);
+                return self.emit_call(fw, callee, args, &e.pos, None);
+            }
+            ExprNode::GenCall { callee, targs, args } => {
+                return self.emit_call(fw, callee, args, &e.pos, Some(targs));
             }
             ExprNode::Field { obj, name } => {
                 // qualified foreign-global read: lib.g / lib.Cls.f handled in arith path only for globals
@@ -2687,8 +2932,49 @@ impl ModEmitter {
         callee: &Expr,
         args: &Vec<Expr>,
         pos: &Pos,
+        targs_in: Option<&Vec<sloth_frontend::ast::Type>>,
     ) -> (String, TyId) {
-        // resolve name
+        // explicit type args on a bare-name callee: generic class Ctor or
+        // fully general monomorphized function call (patch #19)
+        if let Some(ta) = targs_in {
+            if let ExprNode::Ident(base) = &callee.node {
+                let cdef = self.class_defs.get(base).cloned();
+                let fd = self.funcs.get(base).cloned();
+                let ty_len = cdef.as_ref().map(|(_, c)| c.type_params.len());
+                let fd_len = fd.as_ref().map(|f| f.type_params.len());
+                if ty_len == Some(ta.len()) {
+                    // generic class ctor: register/fetch instance, then default ctor
+                    let tys: Vec<TyId> = ta.iter().map(|t| self.ty_of(t)).collect();
+                    let it = self.declare_class_inst(base, &tys);
+                    let iname = match self.r.get(it) { Ty::Named(n, _) => n.clone(), _ => String::new() };
+                    if !iname.is_empty() {
+                        let cargs: Vec<(String, TyId)> = args
+                            .iter()
+                            .map(|a| self.emit_expr(fw, a))
+                            .collect();
+                        return self.emit_new_obj(fw, &iname, &cargs, &Vec::new(), pos);
+                    }
+                }
+                // generic function call with explicit type args
+                if let Some(fd) = &fd {
+                    if fd_len == Some(ta.len()) && fd.type_params.len() == ta.len() {
+                        let tnames: Vec<String> =
+                            fd.type_params.iter().map(|p| p.name.clone()).collect();
+                        let mut map: std::collections::HashMap<String, TyId> =
+                            std::collections::HashMap::new();
+                        for (tp, tt) in fd.type_params.iter().zip(ta.iter()) {
+                            map.insert(tp.name.clone(), self.ty_of(tt));
+                        }
+                        let _ = tnames;
+                        let argv: Vec<(String, TyId)> = args
+                            .iter()
+                            .map(|a| self.emit_expr(fw, a))
+                            .collect();
+                        return self.emit_ginst_call(fw, base, fd, &argv, pos, map);
+                    }
+                }
+            }
+        }
         let mut name = match &callee.node {
             ExprNode::Ident(n) => n.clone(),
             ExprNode::Field { obj: _, name } => name.clone(),
@@ -3165,6 +3451,20 @@ impl ModEmitter {
                 self.unify_tp(&fd.type_params, pat, *at, &mut map);
             }
         }
+        self.emit_ginst_call(fw, name, fd, argv, pos, map)
+    }
+
+    /// monomorphize + emit an instance call for a fully-bound substitution
+    fn emit_ginst_call(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        fd: &FuncDef,
+        argv: &[(String, TyId)],
+        pos: &Pos,
+        mut map: std::collections::HashMap<String, TyId>,
+    ) -> (String, TyId) {
+        let tnames: Vec<String> = fd.type_params.iter().map(|p| p.name.clone()).collect();
         for tn in &tnames {
             if !map.contains_key(tn) {
                 self.err(pos, format!("cannot infer type parameter `{}`", tn));
@@ -3360,6 +3660,41 @@ fn emit_str_globals(me: &ModEmitter) -> String {
 
 impl ModEmitter {
     pub fn emit_module(&mut self, prog: &Program) -> Vec<Diag> {
+        // stdlib Result<T,E> prelude (only injected once)
+        let mut decls2: Vec<Decl> = prog.decls.clone();
+        if !decls2
+            .iter()
+            .any(|d| d.name == "Result" && matches!(d.node, DeclNode::Class(_)))
+        {
+            match sloth_frontend::parser::parse(
+                "class Result<T, E> {\n\
+                 var ok: bool = false;\n\
+                 var v: T;\n\
+                 var e: E;\n\
+                 func is_ok(): bool {\n\
+                 return this.ok;\n\
+                 }\n\
+                 func unwrap(): T {\n\
+                 return this.v;\n\
+                 }\n\
+                 func err(): E {\n\
+                 return this.e;\n\
+                 }\n\
+                 }\n",
+            ) {
+                Ok(stdp) => {
+                    for d in stdp.decls.into_iter().rev() {
+                        decls2.insert(0, d);
+                    }
+                }
+                Err(_) => {
+                    // parser unreachable for a fixed literal; keep going
+                }
+            }
+        }
+        let mut stmts2 = prog.stmts.clone();
+        let mut imps2 = prog.imports.clone();
+        let prog = &mut Program { decls: decls2, stmts: stmts2, imports: imps2 };
         self.collect(prog);
         self.finalize_vt();
         // 1) top-level funcs
@@ -3369,9 +3704,13 @@ impl ModEmitter {
                 self.emit_func(&d.name, None, f, f.variadic.as_ref(), entry);
             }
         }
-        // 1b) classes: emit methods + ctor (incl. trait-synthesized defaults)
+        // 1b) classes: emit methods + ctor (incl. trait-synthesized defaults);
+        // generic base defs are skipped (their instances emit below)
         for d in &prog.decls {
-            if let DeclNode::Class(_) = &d.node {
+            if let DeclNode::Class(c) = &d.node {
+                if !c.type_params.is_empty() {
+                    continue;
+                }
                 let meths = match self.classes.get(&d.name) {
                     Some(ci) => ci.methods.clone(),
                     None => Vec::new(),
@@ -3379,6 +3718,21 @@ impl ModEmitter {
                 for (mname, fd) in meths {
                     self.emit_func(&mname, Some(&d.name), &fd, None, false);
                 }
+            }
+        }
+        // 1c) generic-class instances: methods emitted under the T-frame
+        {
+            let insts = self.pending_insts.clone();
+            for (inst, frame) in insts {
+                let meths = match self.classes.get(&inst) {
+                    Some(ci) => ci.methods.clone(),
+                    None => Vec::new(),
+                };
+                self.tp_subst.push(frame);
+                for (mname, fd) in meths {
+                    self.emit_func(&mname, Some(&inst), &fd, None, false);
+                }
+                self.tp_subst.pop();
             }
         }
         // 2) script statements run in entry if no main() was declared
@@ -3859,6 +4213,11 @@ impl ModEmitter {
         self.stat_dcalls += 1;
         // direct method dispatch: obj.method(args) => sloth_<mod>_Cls__method(this, args...)
         let saved_mod = self.cur_mod.clone();
+        // instance frames: generic-class instance methods resolve T via their base
+        let instf = self.class_frames.get(cls).cloned();
+        if let Some(fr) = instf.clone() {
+            self.tp_subst.push(fr);
+        }
         self.cur_mod = self
             .cls_mod
             .get(cls)
@@ -3866,6 +4225,9 @@ impl ModEmitter {
             .unwrap_or_else(|| self.name.clone());
         let plan = self.plan_mangled(mname, Some(cls), m, None);
         self.cur_mod = saved_mod;
+        if instf.is_some() {
+            self.tp_subst.pop();
+        }
         let is_ll = self.llvm_method.contains(&(cls.to_string(), mname.to_string()));
         let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
         let tys = sigargs.join(", ");

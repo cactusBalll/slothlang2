@@ -1542,6 +1542,64 @@ mod irgen_p18b {
     }
 }
 
+// ---------------- patch #19: generic class monomorphization + Result<T,E> ----------------
+mod irgen_p19 {
+    use super::*;
+
+    /// Result<int,str>: ok/err ctors, is_ok/unwrap/err methods on instances
+    #[test]
+    fn result_builtin() {
+        let src = r#"
+            func main(): unit {
+                let r: Result<int, str> = ok(5);
+                print(r.is_ok());
+                print(r.unwrap());
+                let r2: Result<int, str> = err("boom");
+                print(r2.is_ok());
+                print(r2.err());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float payload instance slots route words correctly
+    #[test]
+    fn result_float_payload() {
+        let src = r#"
+            func main(): unit {
+                let r: Result<float, str> = ok(2.5);
+                print(r.unwrap() + 1.0);
+                let z: Result<float, int> = err(9);
+                print(z.err());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// generic-class annotation requires type args; instance typing sticks
+    #[test]
+    fn generic_class_typing() {
+        let src = r#"
+            class Box<T> {
+                var v: T;
+                func unwrap(): T {
+                    return this.v;
+                }
+            }
+            func main(): unit {
+                let b = Box<int>();
+                b.v = 12;
+                print(b.unwrap());
+                print(b.v);
+                let f = Box<float>();
+                f.v = 1.5;
+                print(f.unwrap());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

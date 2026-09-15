@@ -845,6 +845,12 @@ impl Parser {
                         },
                     };
                 }
+                Some(Tok::Lt) => {
+                    // generic type args: C<A,B>(...) — only when an explicit
+                    // `(args)` call follows the closing `>`; backtrack otherwise
+                    let Some(e2) = self.try_parse_gen_call(&e) else { break; };
+                    e = e2;
+                }
                 Some(Tok::LBracket) => {
                     self.ptr += 1;
                     let idx = self.expr(0)?;
@@ -872,6 +878,70 @@ impl Parser {
             }
         }
         Ok(e)
+    }
+
+    /// `f<A,B>(args)` — parse tentative type args + `(args)`; None → backtrack
+    fn try_parse_gen_call(&mut self, callee: &Expr) -> Option<Expr> {
+        let save = self.ptr;
+        let pos = self.pos();
+        self.ptr += 1; // eat <
+        let mut targs = Vec::new();
+        loop {
+            if self.peek().is_none() {
+                self.ptr = save;
+                return None;
+            }
+            match self.ty() {
+                Ok(t) => targs.push(t),
+                Err(_) => {
+                    self.ptr = save;
+                    return None;
+                }
+            }
+            if self.peek() == Some(&Tok::Gt) {
+                break;
+            }
+            if self.peek() != Some(&Tok::Comma) {
+                self.ptr = save;
+                return None;
+            }
+            self.ptr += 1;
+        }
+        self.ptr += 1; // eat >
+        if self.peek() != Some(&Tok::LParen) {
+            self.ptr = save;
+            return None;
+        }
+        self.ptr += 1;
+        let mut args = Vec::new();
+        while !matches!(self.peek(), Some(Tok::RParen)) {
+            if self.peek().is_none() {
+                self.ptr = save;
+                return None;
+            }
+            match self.expr(0) {
+                Ok(a) => args.push(a),
+                Err(_) => {
+                    self.ptr = save;
+                    return None;
+                }
+            }
+            if !self.eat(Tok::Comma) {
+                break;
+            }
+        }
+        if self.expect(Tok::RParen, "')'").is_err() {
+            self.ptr = save;
+            return None;
+        }
+        Some(Expr {
+            pos,
+            node: ExprNode::GenCall {
+                callee: Box::new(callee.clone()),
+                targs,
+                args,
+            },
+        })
     }
 
     fn primary(&mut self) -> PResult<Expr> {
