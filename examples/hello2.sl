@@ -9,4 +9,11 @@ pub func main(): unit {
         }
         print("\n");
     }
+    // §2.1/§5.3 map runtime: literal, read/write, len, for-in-keys (patch #10)
+    let scores: Map<str, int> = @("Curry": 6, "Dijkstra": 5, "Hitori": 4);
+    scores["foo"] = 8;
+    print(len(scores));
+    for (var k: scores) {
+        print("${k} = ${scores[k]}\n");
+    }
 }

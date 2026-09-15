@@ -1026,7 +1026,7 @@ impl ModEmitter {
                 fw.assign(name, &v, fl);
             }
             StmtNode::Assign { target, value } => {
-                let (v, _vt) = self.emit_expr(fw, value);
+                let (mut v, vty) = self.emit_expr(fw, value);
                 // super.x = v: store into an inherited field slot of this
                 if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) = (target.first(), target.last()) {
                     if *h == "super" && target.len() == 2 {
@@ -1081,7 +1081,7 @@ impl ModEmitter {
                         fw.assign(n, &v, fl);
                     }
                     Some(PathSeg::Index(ix)) => {
-                        // a[i] = v (single-index MVP)
+                        // a[i] = v / m[k] = v (single-index MVP)
                         if target.len() != 2 {
                             self.err(&s.pos, "nested index assignment unsupported".to_string());
                             return;
@@ -1089,13 +1089,7 @@ impl ModEmitter {
                         if let Some(PathSeg::Name(h)) = target.first() {
                             match fw.lookup(h) {
                                 Some((aa, at)) => {
-                                    let el = match self.r.get(at) {
-                                        Ty::Array(el) => *el,
-                                        _ => {
-                                            self.err(&s.pos, "index assignment on non-array".to_string());
-                                            return;
-                                        }
-                                    };
+                                    let ats = self.r.get(at).clone();
                                     let z = fw.v();
                                     fw.op(&format!("    {} = arith.constant 0 : index", z));
                                     let av = fw.v();
@@ -1104,16 +1098,49 @@ impl ModEmitter {
                                         av, aa, z
                                     ));
                                     let (iv, _it) = self.emit_expr(fw, ix);
-                                    if self.is_float(el) {
-                                        fw.op(&format!(
-                                            "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
-                                            av, iv, v
-                                        ));
-                                    } else {
-                                        fw.op(&format!(
-                                            "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                                            av, iv, v
-                                        ));
+                                    match ats {
+                                        Ty::Array(el) => {
+                                            if self.is_float(el) {
+                                                if !self.is_float(vty) {
+                                                    let cv = fw.v();
+                                                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                                                    v = cv;
+                                                }
+                                                fw.op(&format!(
+                                                    "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
+                                                    av, iv, v
+                                                ));
+                                            } else {
+                                                fw.op(&format!(
+                                                    "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                                                    av, iv, v
+                                                ));
+                                            }
+                                        }
+                                        Ty::Map(k, v2) => {
+                                            let kkind = matches!(self.r.get(k), Ty::Str);
+                                            let vf = self.is_float(v2);
+                                            let sym = match (kkind, vf) {
+                                                (true, true) => "sloth_map_str_set_f64",
+                                                (true, false) => "sloth_map_str_set",
+                                                (false, true) => "sloth_map_set_f64",
+                                                (false, false) => "sloth_map_set",
+                                            };
+                                            let vsig = if vf { "f64" } else { "i64" };
+                                            if vf && !self.is_float(vty) {
+                                                let cv = fw.v();
+                                                fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                                                v = cv;
+                                            }
+                                            fw.op(&format!(
+                                                "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
+                                                sym, av, iv, v, vsig
+                                            ));
+                                        }
+                                        _ => {
+                                            self.err(&s.pos, "index assignment on non-array".to_string());
+                                            return;
+                                        }
                                     }
                                 }
                                 None => {
@@ -1333,12 +1360,27 @@ impl ModEmitter {
                 fw.pop_scope();
             }
             _ => {
-                // array iteration: for x in arr { ... } with a slotted counter
-                let (av, at) = self.emit_expr(fw, iter);
-                let el = match self.r.get(at) {
-                    Ty::Array(e) => *e,
+                // array/map iteration: for x in arr|map { ... } with a slotted counter
+                let (mav, at) = self.emit_expr(fw, iter);
+                let ats = self.r.get(at).clone();
+                let av;
+                let el = match &ats {
+                    Ty::Array(e) => {
+                        av = mav;
+                        *e
+                    }
+                    // map iteration MVP: for-in yields the key set (Array<K> route)
+                    Ty::Map(k, _v) => {
+                        let ks = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_map_keys({}) : (i64) -> i64",
+                            ks, mav
+                        ));
+                        av = ks;
+                        *k
+                    }
                     _ => {
-                        self.err(pos, "for-iteration requires a range or array".to_string());
+                        self.err(pos, "for-iteration requires a range, array or map".to_string());
                         return;
                     }
                 };
@@ -2119,28 +2161,107 @@ impl ModEmitter {
                 };
                 (arr, ty)
             }
-            ExprNode::Index { obj, idx } => {
-                let (av, at) = self.emit_expr(fw, obj);
-                let (iv, _it) = self.emit_expr(fw, idx);
-                let el = match self.r.get(at) {
-                    Ty::Array(e) => *e,
+            ExprNode::Map(pairs) => {
+                // map literal: reproducible open-addressing rt table
+                let mut kevs: Vec<(String, TyId)> = Vec::new();
+                let mut vevs: Vec<(String, TyId)> = Vec::new();
+                for (k, v) in pairs {
+                    let (kv, kt) = self.emit_expr(fw, k);
+                    let (vv, vt) = self.emit_expr(fw, v);
+                    kevs.push((kv, kt));
+                    vevs.push((vv, vt));
+                }
+                // key kind: str handles vs i64 words (uniform family check)
+                let kvm: Vec<TyId> = kevs.iter().map(|x| x.1).collect();
+                let anyk_str = kvm.iter().any(|t| self.is_str(*t));
+                if kvm.iter().any(|t| self.is_float(*t)) {
+                    self.err(&e.pos, "map keys must be int or str".to_string());
+                }
+                if anyk_str && kvm.iter().any(|t| !self.is_str(*t)) {
+                    self.err(&e.pos, "mixed map key types".to_string());
+                }
+                let kty = if anyk_str {
+                    self.r.mk(Ty::Str)
+                } else {
+                    self.r.mk(Ty::I64)
+                };
+                // value kind: unify int/float like list literals (float wins)
+                let anyf = vevs.iter().any(|x| self.is_float(x.1));
+                if anyf {
+                    for x in vevs.iter_mut() {
+                        if !self.is_float(x.1) {
+                            let cv = fw.v();
+                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, x.0));
+                            x.0 = cv;
+                            x.1 = self.r.mk(Ty::F64);
+                        }
+                    }
+                }
+                let vty = match vevs.first() {
+                    Some(x) if vevs.iter().all(|y| self.r.get(y.1) == self.r.get(x.1)) => x.1,
                     _ => {
-                        self.err(&e.pos, format!("indexing non-array"));
-                        (String::new(), self.r.mk(Ty::Unit)).1
+                        if anyf {
+                            self.r.mk(Ty::F64)
+                        } else {
+                            self.r.mk(Ty::I64)
+                        }
                     }
                 };
-                if self.is_float(el) {
-                    let r = fw.v();
+                let kk = if anyk_str { 1i64 } else { 0i64 };
+                let kv0 = fw.v();
+                fw.op(&format!("    {} = arith.constant {} : i64", kv0, kk));
+                let m = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_map_new({}) : (i64) -> i64",
+                    m, kv0
+                ));
+                for (kev, vev) in kevs.iter().zip(vevs.iter()) {
+                    let (setsym, vsig) = match (anyk_str, anyf) {
+                        (true, true) => ("sloth_map_str_set_f64", "f64"),
+                        (true, false) => ("sloth_map_str_set", "i64"),
+                        (false, true) => ("sloth_map_set_f64", "f64"),
+                        (false, false) => ("sloth_map_set", "i64"),
+                    };
                     fw.op(&format!(
-                        "    {} = call @sloth_arr_get_f64({}, {}) : (i64, i64) -> f64",
-                        r, av, iv
+                        "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
+                        setsym, m, kev.0, vev.0, vsig
                     ));
-                    return (r, el);
                 }
+                (m, self.r.mk(Ty::Map(kty, vty)))
+            }
+            ExprNode::Index { obj, idx } => {
+                let (av, at) = self.emit_expr(fw, obj);
+                let (iv, it) = self.emit_expr(fw, idx);
+                let _ = it;
+                let ats = self.r.get(at).clone();
+                let (el, getsym, retty) = match &ats {
+                    Ty::Array(e) => {
+                        if self.is_float(*e) {
+                            (*e, "sloth_arr_get_f64", "f64")
+                        } else {
+                            (*e, "sloth_arr_get", "i64")
+                        }
+                    }
+                    Ty::Map(k, v) => {
+                        let kkind = matches!(self.r.get(*k), Ty::Str);
+                        let _ = it;
+                        let (sym, retty) = match (kkind, self.is_float(*v)) {
+                            (true, true) => ("sloth_map_str_get_f64", "f64"),
+                            (true, false) => ("sloth_map_str_get", "i64"),
+                            (false, true) => ("sloth_map_get_f64", "f64"),
+                            (false, false) => ("sloth_map_get", "i64"),
+                        };
+                        (*v, sym, retty)
+                    }
+                    _ => {
+                        self.err(&e.pos, format!("indexing non-array"));
+                        (self.r.mk(Ty::Unit), "sloth_arr_get", "i64")
+                    }
+                };
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
-                    r, av, iv
+                    "    {} = call @{}({}, {}) : (i64, i64) -> {}",
+                    r, getsym, av, iv, retty
                 ));
                 (r, el)
             }
@@ -2260,6 +2381,16 @@ impl ModEmitter {
         }
         // builtin container methods: a.push(v) / a.pop() / a.len()
         if let Some((recvv, rt)) = recv.clone() {
+            if let Ty::Map(_k, _v) = self.r.get(rt) {
+                if name == "len" {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_map_len({}) : (i64) -> i64",
+                        r, recvv
+                    ));
+                    return (r, self.r.mk(Ty::I64));
+                }
+            }
             if let Ty::Array(el) = self.r.get(rt) {
                 let fel = self.is_float(*el);
                 match name.as_str() {
@@ -2452,6 +2583,7 @@ impl ModEmitter {
                 let sym = match &ts {
                     Ty::Str => "sloth_str_len",
                     Ty::Array(_) => "sloth_arr_len",
+                    Ty::Map(..) => "sloth_map_len",
                     _ => "sloth_str_len",
                 };
                 fw.op(&format!(
@@ -2459,6 +2591,27 @@ impl ModEmitter {
                     r, sym, v
                 ));
                 (r, self.r.mk(Ty::I64))
+            }
+            "keys" if !argv.is_empty() => {
+                let (v, _t) = argv[0].clone();
+                fw.op(&format!(
+                    "    {} = call @sloth_map_keys({}) : (i64) -> i64",
+                    r, v
+                ));
+                let ei = self.r.mk(Ty::I64);
+                (r, self.r.mk(Ty::Array(ei)))
+            }
+            "values" if !argv.is_empty() => {
+                let (v, t) = argv[0].clone();
+                let vt = match self.r.get(t).clone() {
+                    Ty::Map(_k, v3) => v3,
+                    _ => self.r.mk(Ty::I64),
+                };
+                fw.op(&format!(
+                    "    {} = call @sloth_map_values({}) : (i64) -> i64",
+                    r, v
+                ));
+                (r, self.r.mk(Ty::Array(vt)))
             }
             _ => {
                 self.err(pos, format!("call to unknown `{}`", name));
@@ -2499,6 +2652,18 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_arr_get_f64(i64, i64) -> f64\n");
     s.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_set_f64(i64, i64, f64) -> i64\n");
+    s.push_str("  func.func private @sloth_map_new(i64) -> i64
+  func.func private @sloth_map_len(i64) -> i64
+  func.func private @sloth_map_get(i64, i64) -> i64
+  func.func private @sloth_map_get_f64(i64, i64) -> f64
+  func.func private @sloth_map_set(i64, i64, i64) -> i64
+  func.func private @sloth_map_set_f64(i64, i64, f64) -> i64
+  func.func private @sloth_map_str_get(i64, i64) -> i64
+  func.func private @sloth_map_str_get_f64(i64, i64) -> f64
+  func.func private @sloth_map_str_set(i64, i64, i64) -> i64
+  func.func private @sloth_map_str_set_f64(i64, i64, f64) -> i64
+  func.func private @sloth_map_keys(i64) -> i64
+  func.func private @sloth_map_values(i64) -> i64\n");
     s
 }
 

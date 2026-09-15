@@ -846,6 +846,97 @@ mod irgen_p9 {
     }
 }
 
+// ---------------- patch #10: map runtime ----------------
+mod irgen_p10 {
+    use super::*;
+
+    /// literal, index read/write, len; growth past initial 8 buckets
+    #[test]
+    fn map_i64_keys_work() {
+        let src = r#"
+            var m: Map<int, int> = @(1: 10, 2: 20, 3: 30);
+            print(len(m));
+            print(m[1]);
+            print(m[3]);
+            m[2] = 99;
+            print(m[2]);
+            var i = 0;
+            while i < 20 {
+                m[i] = i * 2;
+                i = i + 1;
+            }
+            print(len(m));
+            print(m[19]);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// str keys route to the content-comparison path
+    #[test]
+    fn map_str_keys_work() {
+        let src = r#"
+            var m: Map<str, int> = @("a": 1, "b": 2);
+            print(m["a"]);
+            print(m["b"]);
+            m["c"] = 7;
+            print(len(m));
+            print(m["c"]);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float values keep the f64 word route
+    #[test]
+    fn map_float_values_work() {
+        let src = r#"
+            var m: Map<int, float> = @(1: 1.5);
+            m[2] = 2;
+            print(m[1] + m[2]);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// for-in over a map iterates keys; keys/values word views
+    #[test]
+    fn map_iteration_yields_keys() {
+        let src = r#"
+            var m: Map<int, int> = @(5: 50, 6: 60);
+            var acc = 0;
+            for (var k: m) {
+                acc = acc + k + m[k];
+            }
+            print(acc);
+            var ks = keys(m);
+            print(len(ks));
+            print(ks[0] + ks[1]);
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// m.len() method form
+    #[test]
+    fn map_len_method() {
+        let src = r#"
+            var m: Map<str, int> = @("x": 1);
+            print(m.len());
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// declarations carry maps (globals + arguments)
+    #[test]
+    fn map_as_global_and_arg() {
+        let src = r#"
+            var g: Map<int, int> = @(1: 11);
+            func bump(t: Map<int, int>, k: int): int {
+                return t[k] + 1;
+            }
+            print(bump(g, 1));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
