@@ -83,18 +83,18 @@ pub enum Tok {
     Gt,
     Le,
     Ge,
-    Arrow,        // ->
-    Range,        // ..
-    RangeInc,     // ..=
-    Variadic,     // ...
-    Pipe,         // |  lambda start
-    PipeOp,       // |>
-    AmpAmp,       // &&
-    PipePipe,     // ||
-    Question,     // ?
-    Elvis,        // ?:
-    QuestionDot,  // ?. (reserved; parser rejects)
-    At,           // @
+    Arrow,       // ->
+    Range,       // ..
+    RangeInc,    // ..=
+    Variadic,    // ...
+    Pipe,        // |  lambda start
+    PipeOp,      // |>
+    AmpAmp,      // &&
+    PipePipe,    // ||
+    Question,    // ?
+    Elvis,       // ?:
+    QuestionDot, // ?. (reserved; parser rejects)
+    At,          // @
     Str(Box<StrParts>),
 }
 
@@ -112,8 +112,6 @@ pub struct LexError {
 
 pub struct Lexer {
     chars: Vec<char>,
-    /// byte offset of chars[i]
-    byte_off: Vec<usize>,
     ptr: usize,
     line: usize,
     col: usize,
@@ -126,15 +124,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
         let mut chars = Vec::new();
-        let mut byte_off = Vec::new();
-        for (i, ch) in src.char_indices() {
-            byte_off.push(i);
+        for (_i, ch) in src.char_indices() {
             chars.push(ch);
         }
-        byte_off.push(src.len());
         Lexer {
             chars,
-            byte_off,
             ptr: 0,
             line: 1,
             col: 1,
@@ -272,7 +266,9 @@ impl Lexer {
             let f: f64 = s.parse().map_err(|_| self.err("invalid float literal"))?;
             Ok(Tok::Float(f))
         } else {
-            let i: i64 = s.parse().map_err(|_| self.err("int literal out of range"))?;
+            let i: i64 = s
+                .parse()
+                .map_err(|_| self.err("int literal out of range"))?;
             Ok(Tok::Int(i))
         }
     }

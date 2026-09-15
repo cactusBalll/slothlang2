@@ -5,7 +5,10 @@ use crate::lexer::{Pos, StrParts};
 pub type TypeId = usize;
 
 pub fn eof_pos() -> Pos {
-    Pos { line: usize::MAX, col: 0 }
+    Pos {
+        line: usize::MAX,
+        col: 0,
+    }
 }
 
 pub fn tok_str(t: &crate::lexer::Tok) -> String {
@@ -214,7 +217,6 @@ pub enum UnOp {
 pub struct Expr {
     pub node: ExprNode,
     pub pos: Pos,
-
 }
 
 #[derive(Debug, Clone)]

@@ -130,7 +130,10 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
         ) || me.funcs.contains_key(&u)
             || me.cross_funcs.contains_key(&u)
             || me.class_defs.contains_key(&u);
-        if !decls.contains(&u) && !me.globals.contains_key(&u) && !callee_like && got.insert(u.clone())
+        if !decls.contains(&u)
+            && !me.globals.contains_key(&u)
+            && !callee_like
+            && got.insert(u.clone())
         {
             out.push(u);
         }

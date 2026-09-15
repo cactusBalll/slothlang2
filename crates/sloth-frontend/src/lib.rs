@@ -7,7 +7,7 @@ pub mod ty;
 
 #[cfg(test)]
 mod lexer_tests {
-    use crate::lexer::{lex, Lexer, StrPart, Tok};
+    use crate::lexer::{lex, StrPart, Tok};
 
     fn toks(src: &str) -> Vec<Tok> {
         lex(src).unwrap().into_iter().map(|t| t.tok).collect()
@@ -57,9 +57,15 @@ mod lexer_tests {
                 let p = &parts.parts;
                 assert_eq!(p.len(), 5);
                 assert_eq!(p[0], StrPart::Lit("hi ".into()));
-                assert_eq!(p[1], StrPart::Expr("x".into(), crate::lexer::Pos { line: 1, col: 15 }));
+                assert_eq!(
+                    p[1],
+                    StrPart::Expr("x".into(), crate::lexer::Pos { line: 1, col: 15 })
+                );
                 assert_eq!(p[2], StrPart::Lit(" / ".into()));
-                assert_eq!(p[3], StrPart::Expr("y".into(), crate::lexer::Pos { line: 1, col: 22 }));
+                assert_eq!(
+                    p[3],
+                    StrPart::Expr("y".into(), crate::lexer::Pos { line: 1, col: 22 })
+                );
                 assert_eq!(p[4], StrPart::Lit("!".into()));
             }
             other => panic!("{:?}", other),
@@ -123,18 +129,21 @@ mod lexer_tests {
 
     #[test]
     fn keywords_arrive_as_ident() {
-        assert_eq!(toks("pub while return"), vec![
-            Tok::Ident("pub".into()),
-            Tok::Ident("while".into()),
-            Tok::Ident("return".into()),
-        ]);
+        assert_eq!(
+            toks("pub while return"),
+            vec![
+                Tok::Ident("pub".into()),
+                Tok::Ident("while".into()),
+                Tok::Ident("return".into()),
+            ]
+        );
     }
 }
 
 #[cfg(test)]
 mod parser_tests {
-    use crate::ast::{ArithOp, BinOp, ExprNode, PathSeg, StmtNode, Type};
-    use crate::parser::{expr_to_path, parse, parse_expr_src};
+    use crate::ast::{ArithOp, ExprNode};
+    use crate::parser::{parse, parse_expr_src};
 
     #[test]
     fn program_globals() {
@@ -146,10 +155,8 @@ mod parser_tests {
 
     #[test]
     fn generics_fn() {
-        let p = parse(
-            "func map<T, R>(arr: Array<T>, f: (T) -> R): Array<R> { return arr; }\n",
-        )
-        .unwrap();
+        let p = parse("func map<T, R>(arr: Array<T>, f: (T) -> R): Array<R> { return arr; }\n")
+            .unwrap();
         match &p.decls[0].node {
             crate::ast::DeclNode::Func(f) => {
                 assert_eq!(f.type_params.len(), 2);
@@ -226,7 +233,7 @@ mod parser_tests {
     #[test]
     fn range_expr() {
         // 0..=5 should parse as Range{inclusive}
-        let p = parse("for (var i: 0..=5) { }").unwrap();
+        let _p = parse("for (var i: 0..=5) { }").unwrap();
         // for iter expr is checked here via body
     }
 
@@ -285,6 +292,6 @@ mod parser_tests {
 
     #[test]
     fn path_of_nested() {
-        let p = parse("this.a[0] = 1;").unwrap();
+        let _p = parse("this.a[0] = 1;").unwrap();
     }
 }

@@ -61,7 +61,7 @@ impl ModEmitter {
         let (obj, _ot) = self.emit_new_obj(fw, inst, &Vec::new(), &Vec::new(), pos);
         // ok flag & payload / err pair
         let zi = fw.v();
-        let zc = fw.v();
+        let _zc = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
 
         let okv = fw.v();
@@ -193,13 +193,6 @@ pub(crate) fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
 }
 
 impl ModEmitter {
-    /// class ctor: named `sloth_main_<Cls>_cls`
-    pub(crate) fn class_ctor_name(&self, cls: &str) -> String {
-        format!("{}_{}", self.name, cls)
-    }
-}
-
-impl ModEmitter {
     /// allocate object with GC; fields set after ctor body
     pub(crate) fn emit_new_obj(
         &mut self,
@@ -280,7 +273,7 @@ impl ModEmitter {
             self.cur_mod = saved_mod;
             // ctor args words: int values sitofp-promote to f64 params
             let mut argvals: Vec<String> = Vec::new();
-            for ((v, t), (_n, pt, pfl)) in argv.iter().zip(plan.params.iter().skip(1)) {
+            for ((v, t), (_n, _pt, pfl)) in argv.iter().zip(plan.params.iter().skip(1)) {
                 if *pfl && !self.is_float(*t) {
                     let cv = fw.v();
                     fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
@@ -298,7 +291,7 @@ impl ModEmitter {
             let tys = plan
                 .params
                 .iter()
-                .map(|(_n, t, fl)| {
+                .map(|(_n, t, _fl)| {
                     if self.is_float(*t) {
                         "f64".to_string()
                     } else {
@@ -454,10 +447,7 @@ impl ModEmitter {
         }
         let builder = self.emit_vt_builder(clsname, &impls);
         let vt = fw.v();
-        fw.op(&format!(
-            "    {} = call @{}() : () -> i64",
-            vt, builder
-        ));
+        fw.op(&format!("    {} = call @{}() : () -> i64", vt, builder));
         fw.op(&format!(
             "    call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt

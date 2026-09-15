@@ -13,13 +13,6 @@ use std::collections::{HashMap, HashSet};
 
 pub const WW: usize = 8;
 
-pub(crate) fn words_scalar(t: &Ty) -> usize {
-    match t {
-        Ty::Unit => 0,
-        _ => 1,
-    }
-}
-
 pub(crate) fn expr_is_super_init(e: &Expr) -> bool {
     match &e.node {
         ExprNode::Field { obj, name } => name == "__init__" && matches!(obj.node, ExprNode::Super),
@@ -99,10 +92,6 @@ pub(crate) fn mlir_word_ty(t: TyId, r: &Reg) -> String {
         Ty::F64 => "f64".to_string(),
         _ => "i64".to_string(),
     }
-}
-
-pub(crate) fn str_slot_len(s: &str) -> usize {
-    s.as_bytes().len() + 1
 }
 
 pub(crate) fn memref_cell_ty(me: &ModEmitter, t: TyId) -> &'static str {

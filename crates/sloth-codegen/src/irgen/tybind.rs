@@ -67,10 +67,6 @@ impl ModEmitter {
                 let a: Vec<TyId> = Vec::new();
                 self.ty_named(n, a)
             }
-            other => {
-                let _ = other;
-                self.r.mk(Ty::Unit)
-            }
         }
     }
 }
@@ -289,12 +285,7 @@ impl ModEmitter {
         }
         if self.is_float(vty) {
             let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
-            self.err_diff(
-                pos,
-                &format!("assignment to `{}`", name),
-                "float",
-                &dtn,
-            );
+            self.err_diff(pos, &format!("assignment to `{}`", name), "float", &dtn);
             // keep IR parseable: store with the value's own float spelling
             fw.assign(name, v, true);
             return;
@@ -349,10 +340,13 @@ impl ModEmitter {
     /// `__hash__` (0 params, int return) per the Hashable contract
     pub(crate) fn find_map_key_hash(&mut self, cls: &str) -> Option<(String, String, FuncDef)> {
         for m in ["hash", "hashKey", "__hash__"] {
-            if let Some((defcls, fd)) =
-                self.find_method(cls, m)
-            {
-                if fd.params.is_empty() && fd.ret.as_ref().map(|t| matches!(t, Type::Simple(SimpleType::Int))).unwrap_or(false)
+            if let Some((defcls, fd)) = self.find_method(cls, m) {
+                if fd.params.is_empty()
+                    && fd
+                        .ret
+                        .as_ref()
+                        .map(|t| matches!(t, Type::Simple(SimpleType::Int)))
+                        .unwrap_or(false)
                 {
                     return Some((m.to_string(), defcls, fd));
                 }

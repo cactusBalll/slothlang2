@@ -24,7 +24,6 @@ use sloth_frontend::ty::{Reg, Ty, TyId};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 
-
 mod class;
 mod collect;
 mod expr;

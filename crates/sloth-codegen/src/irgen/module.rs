@@ -105,7 +105,7 @@ impl ModEmitter {
         }
         // pass 2b: effective trait surfaces (incl. inherited) -> vtable slots
         for d in &prog.decls {
-            if let DeclNode::Class(c) = &d.node {
+            if let DeclNode::Class(_c) = &d.node {
                 let mut eff: Vec<String> = Vec::new();
                 let mut cur = Some(d.name.clone());
                 while let Some(pn) = cur {
@@ -288,8 +288,8 @@ impl ModEmitter {
                 }
             }
         }
-        let mut stmts2 = prog.stmts.clone();
-        let mut imps2 = prog.imports.clone();
+        let stmts2 = prog.stmts.clone();
+        let imps2 = prog.imports.clone();
         let prog = &mut Program {
             decls: decls2,
             stmts: stmts2,

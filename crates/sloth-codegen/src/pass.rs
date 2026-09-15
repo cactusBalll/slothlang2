@@ -34,7 +34,6 @@ pub fn smoke_all() -> Result<(), String> {
 
 use crate::irgen::ModEmitter;
 use crate::jit::Engine;
-use sloth_frontend::parser::parse;
 
 pub fn sloth_main_hello() -> Result<(), String> {
     let src = r#"
@@ -84,7 +83,7 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     let mut me = ModEmitter::new(mod_name);
     me.emit_module(&prog);
-    let mut errs = me.diags.clone();
+    let errs = me.diags.clone();
     if !errs.is_empty() {
         return Err(format!("codegen diags: {:?}", errs));
     }
@@ -815,6 +814,7 @@ mod irgen_p3d {
 }
 
 // patch #9: array push/pop, let immutability, declared-kind coercion
+#[cfg(test)]
 mod irgen_p9 {
     use super::*;
 
@@ -874,7 +874,11 @@ mod irgen_p9 {
                 Ok(()) => panic!("kind mismatch accepted: {:?}", src),
                 Err(e) => e,
             };
-            assert!(e.contains("expected: non-float surface\\n  got: float"), "unexpected: {}", e);
+            assert!(
+                e.contains("expected: non-float surface\\n  got: float"),
+                "unexpected: {}",
+                e
+            );
         }
     }
 
@@ -890,6 +894,7 @@ mod irgen_p9 {
 }
 
 // ---------------- patch #10: map runtime ----------------
+#[cfg(test)]
 mod irgen_p10 {
     use super::*;
 
@@ -981,6 +986,7 @@ mod irgen_p10 {
 }
 
 // ---------------- patch #11: variadic function bodies ----------------
+#[cfg(test)]
 mod irgen_p11 {
     use super::*;
 
@@ -1039,6 +1045,7 @@ mod irgen_p11 {
 }
 
 // ---------------- patch #12: pipe |> ----------------
+#[cfg(test)]
 mod irgen_p12 {
     use super::*;
 
@@ -1087,6 +1094,7 @@ mod irgen_p12 {
 }
 
 // ---------------- patch #13: is narrowing + int()/float() ----------------
+#[cfg(test)]
 mod irgen_p13 {
     use super::*;
 
@@ -1160,6 +1168,7 @@ mod irgen_p13 {
 }
 
 // ---------------- patch #14: generic function monomorphization MVP ----------------
+#[cfg(test)]
 mod irgen_p14 {
     use super::*;
 
@@ -1224,6 +1233,7 @@ mod irgen_p14 {
 }
 
 // ---------------- patch #15: operator overloads + trait bounds ----------------
+#[cfg(test)]
 mod irgen_p15 {
     use super::*;
 
@@ -1357,6 +1367,7 @@ mod irgen_p15 {
 }
 
 // ---------------- patch #16: Iterator/Iterable protocol ----------------
+#[cfg(test)]
 mod irgen_p16 {
     use super::*;
 
@@ -1455,6 +1466,7 @@ mod irgen_p16 {
 }
 
 // ---------------- patch #17: extern func (C ABI) ----------------
+#[cfg(test)]
 mod irgen_p17 {
     use super::*;
 
@@ -1493,6 +1505,7 @@ mod irgen_p17 {
 }
 
 // ---------------- patch #18a: trait default method bodies ----------------
+#[cfg(test)]
 mod irgen_p18a {
     use super::*;
 
@@ -1556,6 +1569,7 @@ mod irgen_p18a {
 }
 
 // ---------------- patch #18b: Display-plumbed print ----------------
+#[cfg(test)]
 mod irgen_p18b {
     use super::*;
 
@@ -1610,6 +1624,7 @@ mod irgen_p18b {
 }
 
 // ---------------- patch #19: generic class monomorphization + Result<T,E> ----------------
+#[cfg(test)]
 mod irgen_p19 {
     use super::*;
 
@@ -1668,6 +1683,7 @@ mod irgen_p19 {
 }
 
 // ---------------- patch #20: operator overload family completion ----------------
+#[cfg(test)]
 mod irgen_p20 {
     use super::*;
 
@@ -1843,6 +1859,7 @@ mod irgen_p20 {
 }
 
 // ---------------- patch #21: interpolation routes through Display ----------------
+#[cfg(test)]
 mod irgen_p21 {
     use super::*;
 
@@ -1921,6 +1938,7 @@ mod irgen_p21 {
 }
 
 // ---------------- patch #22: var/let surface-type assignment checks ----------------
+#[cfg(test)]
 mod irgen_p22 {
     use super::*;
 
@@ -2065,6 +2083,7 @@ mod irgen_p22 {
 }
 
 // ---------------- patch #23: Result<T,E> closure (return ctors + unwrap panic) ----------------
+#[cfg(test)]
 mod irgen_p23 {
     use super::*;
 
@@ -2166,6 +2185,7 @@ mod irgen_p23 {
 }
 
 // ---------------- patch #24: extern type (opaque C-ABI reference) ----------------
+#[cfg(test)]
 mod irgen_p24 {
     use super::*;
 
@@ -2243,6 +2263,7 @@ mod irgen_p24 {
 }
 
 // ---------------- patch #25: ctor discipline + bool conds + is comparability ----------------
+#[cfg(test)]
 mod irgen_p25 {
     use super::*;
 
@@ -2379,6 +2400,7 @@ mod irgen_p25 {
 }
 
 // ---------------- patch #26: Entry<K,V> map record iteration ----------------
+#[cfg(test)]
 mod irgen_p26 {
     use super::*;
 
@@ -2455,6 +2477,7 @@ mod irgen_p26 {
 }
 
 // examples/ regression gold (§9.1/§9.2 adapted versions)
+#[cfg(test)]
 mod irgen_examples {
     use super::*;
 
@@ -2487,6 +2510,7 @@ mod irgen_examples {
 }
 
 // ---------------- patch #31: Hashable⇒Equatable contract ----------------
+#[cfg(test)]
 mod irgen_p31 {
     use super::*;
 
@@ -2558,6 +2582,7 @@ mod irgen_p31 {
 }
 
 // ---------------- patch #32: builtin-type `is` surfaces ----------------
+#[cfg(test)]
 mod irgen_p32 {
     use super::*;
 
@@ -2620,6 +2645,7 @@ mod irgen_p32 {
 }
 
 // ---------------- patch #33: comparison family strictness ----------------
+#[cfg(test)]
 mod irgen_p33 {
     use super::*;
 
@@ -2694,8 +2720,8 @@ mod irgen_p33 {
 }
 
 // ---------------- patch #34: out-of-bounds panic channel ----------------
+#[cfg(test)]
 mod irgen_p34 {
-    use super::*;
 
     /// subprocess helper: run `slothc run`, expect failure + stderr match
     fn run_expect_panic(src: &str, tag: &str, want: &str) {
@@ -2714,10 +2740,7 @@ mod irgen_p34 {
             .output()
             .expect("subprocess");
         let stde = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(
-            !out.status.success(),
-            "out-of-bounds should exit nonzero"
-        );
+        assert!(!out.status.success(), "out-of-bounds should exit nonzero");
         assert!(stde.contains(want), "unexpected stderr: {}", stde);
     }
 
@@ -2783,6 +2806,7 @@ mod irgen_p34 {
 }
 
 // ---------------- patch #35: Map keys via monomorphized hash() ----------------
+#[cfg(test)]
 mod irgen_p35 {
     use super::*;
 
@@ -2896,6 +2920,7 @@ mod irgen_p35 {
 }
 
 // ---------------- patch #36: str == value semantics ----------------
+#[cfg(test)]
 mod irgen_p36 {
     use super::*;
 
@@ -2939,6 +2964,7 @@ mod irgen_p36 {
 }
 
 // ---------------- patch #37: ctor faces with the context frame ----------------
+#[cfg(test)]
 mod irgen_p37 {
     use super::*;
 
@@ -2998,6 +3024,7 @@ mod irgen_p37 {
 }
 
 // ---------------- patch #38: return-driven generic inference ----------------
+#[cfg(test)]
 mod irgen_p38 {
     use super::*;
 
@@ -3059,6 +3086,7 @@ mod irgen_p38 {
 }
 
 // ---------------- patch #39: lambda param faces & free-call captures ----------------
+#[cfg(test)]
 mod irgen_p39 {
     use super::*;
 
@@ -3099,6 +3127,7 @@ mod irgen_p39 {
 }
 
 // ---------------- patch #41: multi-error diag batch ----------------
+#[cfg(test)]
 mod irgen_p41 {
     use super::*;
 
@@ -3142,7 +3171,10 @@ mod irgen_p41 {
         me.emit_module(&prog);
         assert!(
             me.diags.len() >= 2
-                && me.diags.iter().any(|d| d.msg.contains("unknown identifier `nope`"))
+                && me
+                    .diags
+                    .iter()
+                    .any(|d| d.msg.contains("unknown identifier `nope`"))
                 && me.diags.iter().any(|d| d.msg.contains("assignment to `q`")),
             "unexpected: {:?}",
             me.diags

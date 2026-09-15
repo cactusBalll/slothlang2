@@ -106,12 +106,11 @@ impl Parser {
     fn ident(&mut self, what: &str) -> PResult<(String, Pos)> {
         let pos = self.pos();
         match self.advance() {
-            Some(Token { tok: Tok::Ident(s), .. }) => Ok((s, pos)),
+            Some(Token {
+                tok: Tok::Ident(s), ..
+            }) => Ok((s, pos)),
             _ => Err(self.err_want(what)),
         }
-    }
-    fn eof(&self) -> bool {
-        self.ptr >= self.toks.len()
     }
 
     // ---------------- program ----------------
@@ -129,7 +128,11 @@ impl Parser {
                 stmts.push(self.stmt()?);
             }
         }
-        Ok(Program { imports, decls, stmts })
+        Ok(Program {
+            imports,
+            decls,
+            stmts,
+        })
     }
 
     /// heuristic: these keyword starts begin toplevel declarations
@@ -151,7 +154,9 @@ impl Parser {
         let pos = self.pos();
         self.expect_kw("import")?;
         let path = match self.advance() {
-            Some(Token { tok: Tok::Str(s), .. }) => match s.plain() {
+            Some(Token {
+                tok: Tok::Str(s), ..
+            }) => match s.plain() {
                 Some(p) => p.to_string(),
                 None => return Err(self.err("interpolation not allowed in import path")),
             },
@@ -171,7 +176,13 @@ impl Parser {
             Some(Tok::Ident(s)) if s == "func" => {
                 self.ptr += 1;
                 let (name, pos, f) = self.func_after_kw()?;
-                Ok(Decl { kind: DeclKind::Func, name, pos, visible, node: DeclNode::Func(Box::new(f)) })
+                Ok(Decl {
+                    kind: DeclKind::Func,
+                    name,
+                    pos,
+                    visible,
+                    node: DeclNode::Func(Box::new(f)),
+                })
             }
             Some(Tok::Ident(s)) if s == "extern" => {
                 let pos = self.pos();
@@ -198,16 +209,30 @@ impl Parser {
     fn var_let_decl(&mut self, visible: bool) -> PResult<Decl> {
         let pos = self.pos();
         let kind = match self.advance() {
-            Some(Token { tok: Tok::Ident(s), .. }) if s == "var" => DeclKind::Var,
-            Some(Token { tok: Tok::Ident(s), .. }) if s == "let" => DeclKind::Let,
+            Some(Token {
+                tok: Tok::Ident(s), ..
+            }) if s == "var" => DeclKind::Var,
+            Some(Token {
+                tok: Tok::Ident(s), ..
+            }) if s == "let" => DeclKind::Let,
             _ => unreachable!(),
         };
         let (name, _) = self.ident("variable name")?;
-        let ty = if self.eat(Tok::Colon) { Some(self.ty()?) } else { None };
+        let ty = if self.eat(Tok::Colon) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
         self.expect(Tok::Assign, "'=' in declaration")?;
         let init = self.expr(0)?;
         self.expect(Tok::Semi, "';'")?;
-        Ok(Decl { kind, name, pos, visible, node: DeclNode::Var { ty, init } })
+        Ok(Decl {
+            kind,
+            name,
+            pos,
+            visible,
+            node: DeclNode::Var { ty, init },
+        })
     }
 
     fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
@@ -252,7 +277,11 @@ impl Parser {
                 }
                 break;
             }
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()?) } else { None };
+            let ty = if self.eat(Tok::Colon) {
+                Some(self.ty()?)
+            } else {
+                None
+            };
             out.push(Param { name, ty });
             if !self.eat(Tok::Comma) {
                 break;
@@ -290,7 +319,10 @@ impl Parser {
             }
             self.expect(Tok::Arrow, "'->' in function type")?;
             let ret = self.ty()?;
-            return Ok(Type::Simple(SimpleType::Fn(Box::new(FnType { params: ps, ret }))));
+            return Ok(Type::Simple(SimpleType::Fn(Box::new(FnType {
+                params: ps,
+                ret,
+            }))));
         }
         let (name, _) = match self.peek().cloned() {
             Some(Tok::Ident(n)) => {
@@ -362,10 +394,17 @@ impl Parser {
             None
         };
         let body = self.block()?;
-            Ok((
+        Ok((
             name,
             pos,
-            FuncDef { type_params, params, variadic, ret, body: Box::new(body), is_extern: false },
+            FuncDef {
+                type_params,
+                params,
+                variadic,
+                ret,
+                body: Box::new(body),
+                is_extern: false,
+            },
         ))
     }
 
@@ -418,7 +457,10 @@ impl Parser {
                 ret,
                 body: Box::new(Stmt {
                     pos: pos.clone(),
-                    node: StmtNode::Expr(Expr { pos: pos.clone(), node: ExprNode::Int(0) }),
+                    node: StmtNode::Expr(Expr {
+                        pos: pos.clone(),
+                        node: ExprNode::Int(0),
+                    }),
                 }),
                 is_extern: true,
             })),
@@ -464,7 +506,12 @@ impl Parser {
                     None
                 };
                 self.expect(Tok::Semi, "';' after field")?;
-                fields.push(FieldDecl { mutable, name: fname, ty: fty, init: finit });
+                fields.push(FieldDecl {
+                    mutable,
+                    name: fname,
+                    ty: fty,
+                    init: finit,
+                });
             } else if self.is_kw("func") {
                 self.ptr += 1;
                 let (mname, _, f) = self.func_after_kw()?;
@@ -518,12 +565,20 @@ impl Parser {
                 }
                 self.ptr += 1;
                 let bpos = self.pos();
-                Some(Box::new(Stmt { node: StmtNode::Block(out), pos: bpos }))
+                Some(Box::new(Stmt {
+                    node: StmtNode::Block(out),
+                    pos: bpos,
+                }))
             } else {
                 self.expect(Tok::Semi, "';'")?;
                 None
             };
-            methods.push(MethodSig { name: mname, params, ret, body });
+            methods.push(MethodSig {
+                name: mname,
+                params,
+                ret,
+                body,
+            });
         }
         self.ptr += 1; // eat }
         Ok(Decl {
@@ -548,7 +603,10 @@ impl Parser {
             out.push(self.stmt()?);
         }
         self.ptr += 1;
-        Ok(Stmt { node: StmtNode::Block(out), pos })
+        Ok(Stmt {
+            node: StmtNode::Block(out),
+            pos,
+        })
     }
 
     pub fn stmt(&mut self) -> PResult<Stmt> {
@@ -557,11 +615,23 @@ impl Parser {
             let mutable = self.is_kw("var");
             self.ptr += 1;
             let (name, _) = self.ident("variable name")?;
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()?) } else { None };
+            let ty = if self.eat(Tok::Colon) {
+                Some(self.ty()?)
+            } else {
+                None
+            };
             self.expect(Tok::Assign, "'=' in declaration")?;
             let init = self.expr(0)?;
             self.expect(Tok::Semi, "';'")?;
-            return Ok(Stmt { node: StmtNode::Let { mutable, name, ty, init }, pos });
+            return Ok(Stmt {
+                node: StmtNode::Let {
+                    mutable,
+                    name,
+                    ty,
+                    init,
+                },
+                pos,
+            });
         }
         match self.peek().cloned() {
             Some(Tok::LBrace) => self.block(),
@@ -578,17 +648,26 @@ impl Parser {
                 if self.peek().is_some() {
                     self.expect(Tok::Semi, "';'")?;
                 }
-                Ok(Stmt { node: StmtNode::Return(e), pos })
+                Ok(Stmt {
+                    node: StmtNode::Return(e),
+                    pos,
+                })
             }
             Some(Tok::Ident(s)) if s == "break" => {
                 self.ptr += 1;
                 self.expect(Tok::Semi, "';'")?;
-                Ok(Stmt { node: StmtNode::Break, pos })
+                Ok(Stmt {
+                    node: StmtNode::Break,
+                    pos,
+                })
             }
             Some(Tok::Ident(s)) if s == "continue" => {
                 self.ptr += 1;
                 self.expect(Tok::Semi, "';'")?;
-                Ok(Stmt { node: StmtNode::Continue, pos })
+                Ok(Stmt {
+                    node: StmtNode::Continue,
+                    pos,
+                })
             }
             _ => {
                 let e = self.expr(0)?;
@@ -597,10 +676,16 @@ impl Parser {
                     self.expect(Tok::Semi, "';'")?;
                     let target =
                         expr_to_path(&e).ok_or_else(|| self.err("invalid assignment target"))?;
-                    Ok(Stmt { node: StmtNode::Assign { target, value }, pos })
+                    Ok(Stmt {
+                        node: StmtNode::Assign { target, value },
+                        pos,
+                    })
                 } else {
                     self.expect(Tok::Semi, "';'")?;
-                    Ok(Stmt { node: StmtNode::Expr(e), pos })
+                    Ok(Stmt {
+                        node: StmtNode::Expr(e),
+                        pos,
+                    })
                 }
             }
         }
@@ -618,7 +703,10 @@ impl Parser {
             } else {
                 None
             };
-            return Ok(Stmt { node: StmtNode::If { cond, then_, else_ }, pos });
+            return Ok(Stmt {
+                node: StmtNode::If { cond, then_, else_ },
+                pos,
+            });
         }
         let cond = self.expr(0)?;
         let then_ = Box::new(self.stmt()?);
@@ -627,7 +715,10 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt { node: StmtNode::If { cond, then_, else_ }, pos })
+        Ok(Stmt {
+            node: StmtNode::If { cond, then_, else_ },
+            pos,
+        })
     }
 
     fn while_stmt(&mut self) -> PResult<Stmt> {
@@ -638,11 +729,17 @@ impl Parser {
             let cond = self.expr(0)?;
             self.expect(Tok::RParen, "')'")?;
             let body = Box::new(self.stmt()?);
-            return Ok(Stmt { node: StmtNode::While { cond, body }, pos });
+            return Ok(Stmt {
+                node: StmtNode::While { cond, body },
+                pos,
+            });
         }
         let cond = self.expr(0)?;
         let body = Box::new(self.stmt()?);
-        Ok(Stmt { node: StmtNode::While { cond, body }, pos })
+        Ok(Stmt {
+            node: StmtNode::While { cond, body },
+            pos,
+        })
     }
 
     fn for_stmt(&mut self) -> PResult<Stmt> {
@@ -656,14 +753,20 @@ impl Parser {
             let iter = self.expr(0)?;
             self.expect(Tok::RParen, "')'")?;
             let body = Box::new(self.stmt()?);
-            return Ok(Stmt { node: StmtNode::For { var, iter, body }, pos });
+            return Ok(Stmt {
+                node: StmtNode::For { var, iter, body },
+                pos,
+            });
         }
         // form B: for x in it {...}
         let (var, _) = self.ident("iterator variable")?;
         self.expect_kw("in")?;
         let iter = self.expr(0)?;
         let body = Box::new(self.stmt()?);
-        Ok(Stmt { node: StmtNode::For { var, iter, body }, pos })
+        Ok(Stmt {
+            node: StmtNode::For { var, iter, body },
+            pos,
+        })
     }
 
     // ---------------- expressions ----------------
@@ -802,9 +905,21 @@ impl Parser {
                 self.expr(P_PIPE + 1)?
             };
             lhs = if is_elvis {
-                Expr { pos, node: ExprNode::Elvis { lhs: Box::new(lhs), rhs: Box::new(rhs) } }
+                Expr {
+                    pos,
+                    node: ExprNode::Elvis {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                }
             } else {
-                Expr { pos, node: ExprNode::Pipe { lhs: Box::new(lhs), rhs: Box::new(rhs) } }
+                Expr {
+                    pos,
+                    node: ExprNode::Pipe {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                }
             };
         }
         Ok(lhs)
@@ -865,7 +980,9 @@ impl Parser {
                 Some(Tok::Lt) => {
                     // generic type args: C<A,B>(...) — only when an explicit
                     // `(args)` call follows the closing `>`; backtrack otherwise
-                    let Some(e2) = self.try_parse_gen_call(&e) else { break; };
+                    let Some(e2) = self.try_parse_gen_call(&e) else {
+                        break;
+                    };
                     e = e2;
                 }
                 Some(Tok::LBracket) => {
@@ -969,48 +1086,78 @@ impl Parser {
         match t {
             Tok::Int(v) => {
                 self.ptr += 1;
-                Ok(Expr { pos, node: ExprNode::Int(v) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Int(v),
+                })
             }
             Tok::Float(v) => {
                 self.ptr += 1;
-                Ok(Expr { pos, node: ExprNode::Float(v) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Float(v),
+                })
             }
             Tok::True => {
                 self.ptr += 1;
-                Ok(Expr { pos, node: ExprNode::Bool(true) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Bool(true),
+                })
             }
             Tok::False => {
                 self.ptr += 1;
-                Ok(Expr { pos, node: ExprNode::Bool(false) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Bool(false),
+                })
             }
             Tok::Nil => {
                 self.ptr += 1;
-                Ok(Expr { pos, node: ExprNode::Nil })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Nil,
+                })
             }
             Tok::Str(parts) => {
                 self.ptr += 1;
                 let expanded = self.expand_str(&parts)?;
-                Ok(Expr { pos, node: ExprNode::Str(expanded) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Str(expanded),
+                })
             }
             Tok::Ident(name) => match name.as_str() {
                 "this" => {
                     self.ptr += 1;
-                    Ok(Expr { pos, node: ExprNode::This })
+                    Ok(Expr {
+                        pos,
+                        node: ExprNode::This,
+                    })
                 }
                 "super" => {
                     self.ptr += 1;
-                    Ok(Expr { pos, node: ExprNode::Super })
+                    Ok(Expr {
+                        pos,
+                        node: ExprNode::Super,
+                    })
                 }
                 "nil" => {
                     self.ptr += 1;
-                    Ok(Expr { pos, node: ExprNode::Nil })
+                    Ok(Expr {
+                        pos,
+                        node: ExprNode::Nil,
+                    })
                 }
                 "and" | "or" | "not" | "if" | "else" | "while" | "for" | "return" | "break"
                 | "continue" | "func" | "class" | "trait" | "pub" | "impl" | "as" | "var"
                 | "let" | "is" => Err(self.err("keyword not allowed as identifier")),
                 _ => {
                     self.ptr += 1;
-                    Ok(Expr { pos, node: ExprNode::Ident(name) })
+                    Ok(Expr {
+                        pos,
+                        node: ExprNode::Ident(name),
+                    })
                 }
             },
             Tok::LBracket => {
@@ -1026,7 +1173,10 @@ impl Parser {
                     }
                 }
                 self.expect(Tok::RBracket, "']'")?;
-                Ok(Expr { pos, node: ExprNode::List(out) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::List(out),
+                })
             }
             Tok::At => {
                 self.ptr += 1;
@@ -1045,7 +1195,10 @@ impl Parser {
                     }
                 }
                 self.expect(Tok::RParen, "')'")?;
-                Ok(Expr { pos, node: ExprNode::Map(out) })
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::Map(out),
+                })
             }
             Tok::Pipe => self.lambda(),
             Tok::LParen => {
@@ -1089,24 +1242,32 @@ impl Parser {
         let mut params = Vec::new();
         while !matches!(self.peek(), Some(Tok::Pipe)) {
             let (name, _) = self.ident("lambda parameter")?;
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()?) } else { None };
+            let ty = if self.eat(Tok::Colon) {
+                Some(self.ty()?)
+            } else {
+                None
+            };
             params.push(Param { name, ty });
             if !self.eat(Tok::Comma) {
                 break;
             }
         }
         self.expect(Tok::Pipe, "'|' closing lambda parameter list")?;
-        let ret = if self.eat(Tok::Arrow) { Some(self.ty()?) } else { None };
+        let ret = if self.eat(Tok::Arrow) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
         let body = self.block()?;
         Ok(Expr {
             pos,
-            node: ExprNode::Lambda(Box::new(Lambda { params, ret, body: Box::new(body) })),
+            node: ExprNode::Lambda(Box::new(Lambda {
+                params,
+                ret,
+                body: Box::new(body),
+            })),
         })
     }
-}
-
-fn rhs_of(e: Expr) -> Expr {
-    e
 }
 
 fn bin_expr(pos: Pos, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {

@@ -1,7 +1,6 @@
 //! Interned type registry with arena, substitution, and diagnostics.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct TyId(pub u32);
@@ -46,7 +45,6 @@ pub struct Diag {
     pub msg: String,
 }
 
-
 #[derive(Default)]
 pub struct Reg {
     pub types: Vec<Ty>,
@@ -56,7 +54,10 @@ pub struct Reg {
 
 impl Reg {
     pub fn new() -> Reg {
-        Reg { types: Vec::new(), cache: BTreeMap::new() }
+        Reg {
+            types: Vec::new(),
+            cache: BTreeMap::new(),
+        }
     }
 
     pub fn mk(&mut self, t: Ty) -> TyId {
@@ -88,14 +89,18 @@ impl Reg {
                 self.mk(Ty::Map(nk, nv))
             }
             Ty::Fn(f) => {
-                let params = FnTy { params: f.params.clone(), ret: f.ret, lam: None };
-                let ps: Vec<TyId> = params
-                    .params
-                    .iter()
-                    .map(|p| self.subst(*p, map))
-                    .collect();
+                let params = FnTy {
+                    params: f.params.clone(),
+                    ret: f.ret,
+                    lam: None,
+                };
+                let ps: Vec<TyId> = params.params.iter().map(|p| self.subst(*p, map)).collect();
                 let nr = self.subst(params.ret, map);
-                self.mk(Ty::Fn(FnTy { params: ps, ret: nr, lam: None }))
+                self.mk(Ty::Fn(FnTy {
+                    params: ps,
+                    ret: nr,
+                    lam: None,
+                }))
             }
             Ty::Named(n, args) => {
                 let a2: Vec<TyId> = args.iter().map(|a| self.subst(*a, map)).collect();

@@ -9,10 +9,6 @@ pub struct Op {
 }
 
 impl Op {
-    pub fn is_null(&self) -> bool {
-        self.raw.ptr.is_null()
-    }
-
     /// Parse textual MLIR in `ctx`; `source_name` is used for locations.
     pub fn parse(ctx: sys::MlirContext, source: &str, source_name: &str) -> Result<Op, String> {
         let src = CString::new(source).map_err(|e| e.to_string())?;

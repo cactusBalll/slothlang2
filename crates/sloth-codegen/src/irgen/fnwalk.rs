@@ -39,11 +39,6 @@ impl FnWalk {
         self.vcount += 1;
         format!("%v{}", n)
     }
-    pub(crate) fn z(&mut self) -> String {
-        let n = self.vcount;
-        self.vcount += 1;
-        format!("%{}", n)
-    }
 }
 
 impl FnWalk {

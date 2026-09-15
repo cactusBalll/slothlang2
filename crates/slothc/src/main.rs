@@ -61,7 +61,15 @@ fn dispatch(args: &Vec<String>) -> Result<String, String> {
                     } else {
                         sloth_codegen::irgen::compile_to_ir(&src, "main")?
                     };
-                    build_mode_r(&src, &ir0, if out_path.is_empty() { "sloth_app" } else { &out_path })
+                    build_mode_r(
+                        &src,
+                        &ir0,
+                        if out_path.is_empty() {
+                            "sloth_app"
+                        } else {
+                            &out_path
+                        },
+                    )
                 }
                 _ => unreachable!(),
             }
@@ -86,7 +94,7 @@ fn print_out(args: &Vec<String>) {
     }
 }
 
-fn build_mode_r(src: &str, ir: &str, out_path: &str) -> Result<String, String> {
+fn build_mode_r(_src: &str, ir: &str, out_path: &str) -> Result<String, String> {
     let wrapper = "  func.func @main() -> i32 attributes {llvm.emit_c_interface} {\n    call @sloth_main() : () -> ()\n    %z = arith.constant 0 : i32\n    return %z : i32\n  }\n";
     let closed = ir.strip_suffix("}\n").unwrap_or(&ir);
     let full = format!("{}\n{}\n}}\n", closed, wrapper);
@@ -111,7 +119,12 @@ fn build_mode_r(src: &str, ir: &str, out_path: &str) -> Result<String, String> {
         return Err("mlir-opt failed".to_string());
     }
     let st2 = std::process::Command::new("/usr/lib/llvm-21/bin/mlir-translate")
-        .args(["--mlir-to-llvmir", "/tmp/opencode/app-llvm.mlir", "-o", "/tmp/opencode/app.ll"])
+        .args([
+            "--mlir-to-llvmir",
+            "/tmp/opencode/app-llvm.mlir",
+            "-o",
+            "/tmp/opencode/app.ll",
+        ])
         .status()
         .map_err(|e| e.to_string())?;
     if !st2.success() {

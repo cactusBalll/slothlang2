@@ -93,7 +93,7 @@ impl ModEmitter {
         // validate `impl` surfaces after all classes are collected;
         // subclass inheritance transitively carries the trait surface
         for d in &prog.decls {
-            if let DeclNode::Class(c) = &d.node {
+            if let DeclNode::Class(_c) = &d.node {
                 let mut eff: Vec<String> = Vec::new();
                 let mut cur = Some(d.name.clone());
                 while let Some(pn) = cur {

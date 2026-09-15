@@ -31,8 +31,11 @@ pub extern "C" fn sloth_str_push(b: i64, w: i64, n: i64) -> i64 {
         }
         let bytes = (w as u64).to_le_bytes();
         let dst = (*p).data as *mut libc::c_void;
-        libc::memcpy((dst as *mut libc::c_char).offset((*p).len as isize) as *mut libc::c_void,
-                     bytes.as_ptr() as *const libc::c_void, un);
+        libc::memcpy(
+            (dst as *mut libc::c_char).offset((*p).len as isize) as *mut libc::c_void,
+            bytes.as_ptr() as *const libc::c_void,
+            un,
+        );
         (*p).len += un;
         p as i64
     }
@@ -59,7 +62,11 @@ pub extern "C" fn sloth_str_intern(ptr: i64, len: i64) -> i64 {
             libc::memcpy(data, ptr as *const libc::c_void, len as usize);
         }
         // NUL terminate for easy C display
-        libc::memset((data as *mut libc::c_char).offset(len as isize) as *mut libc::c_void, 0, 1);
+        libc::memset(
+            (data as *mut libc::c_char).offset(len as isize) as *mut libc::c_void,
+            0,
+            1,
+        );
         (*td).data = data;
         t as i64
     }
@@ -93,13 +100,16 @@ pub extern "C" fn sloth_str_char(s: i64, i: i64) -> i64 {
         let t = sloth_gc_alloc(std::mem::size_of::<StrT>() + 2) as *mut StrT;
         let dat = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
         *(dat as *mut u8) = b;
-        libc::memset((dat as *mut libc::c_char).offset(1) as *mut libc::c_void, 0, 1);
+        libc::memset(
+            (dat as *mut libc::c_char).offset(1) as *mut libc::c_void,
+            0,
+            1,
+        );
         (*t).len = 1;
         (*t).data = dat;
         t as i64
     }
 }
-
 
 pub(crate) unsafe fn strb_append(p: *mut StrB, src: *const libc::c_void, n: usize) {
     if (*p).cap < (*p).len + n {
@@ -215,8 +225,7 @@ pub extern "C" fn sloth_str_eq(a: i64, b: i64) -> i64 {
         let ta = a as *const StrT;
         let tb = b as *const StrT;
         ((*ta).len == (*tb).len
-            && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0)
-            as i64
+            && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0) as i64
     }
 }
 
@@ -232,7 +241,7 @@ mod tests {
                 let c = crate::strings::sloth_str_char(s, i);
                 assert_eq!(crate::strings::sloth_str_len(c), 1, "char len @{}", i);
                 let td = c as *mut crate::strings::StrT;
-                let b = *(((*td).data as *const u8));
+                let b = *((*td).data as *const u8);
                 assert_eq!(b, want, "char @{}", i);
             }
         }

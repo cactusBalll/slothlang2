@@ -35,17 +35,6 @@ impl Engine {
 }
 
 impl Engine {
-    pub fn register(&self, name: &str, sym: *mut libc::c_void) {
-        unsafe {
-            let cn = CString::new(name).unwrap();
-            sys::mlirExecutionEngineRegisterSymbol(
-                self.raw,
-                sys::mlirStringRefCreateFromCString(cn.as_ptr()),
-                sym,
-            );
-        }
-    }
-
     pub fn invoke(&self, name: &str, args: &mut [*mut libc::c_void]) -> Result<(), String> {
         unsafe {
             let cn = CString::new(name).unwrap();

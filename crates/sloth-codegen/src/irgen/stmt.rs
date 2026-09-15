@@ -174,23 +174,18 @@ impl ModEmitter {
                         )
                     {
                         match fw.lookup(&h.clone()) {
-                            Some((_, dt)) => {
-                                match self.r.get(dt).clone() {
-                                    Ty::Named(nm, _) if self.result_insts.contains(&nm) => {
-                                        let is_ok = matches!(
-                                            callee.node,
-                                            ExprNode::Ident(ref id) if id == "ok",
-                                        );
-                                        pre = Some(self.emit_result_ctor(
-                                            fw,
-                                            &nm,
-                                            &args[0],
-                                            is_ok,
-                                            &value.pos,
-                                        ));
-                                    }
-                                    _ => {
-                                        self.err(
+                            Some((_, dt)) => match self.r.get(dt).clone() {
+                                Ty::Named(nm, _) if self.result_insts.contains(&nm) => {
+                                    let is_ok = matches!(
+                                        callee.node,
+                                        ExprNode::Ident(ref id) if id == "ok",
+                                    );
+                                    pre = Some(
+                                        self.emit_result_ctor(fw, &nm, &args[0], is_ok, &value.pos),
+                                    );
+                                }
+                                _ => {
+                                    self.err(
                                             &value.pos,
                                             format!(
                                                 "ctor `{}` requires a declared Result target (assignment target `{}` is not Result<_, _>)",
@@ -198,9 +193,8 @@ impl ModEmitter {
                                                 h
                                             ),
                                         );
-                                    }
                                 }
-                            }
+                            },
                             None => {
                                 self.err(
                                     &value.pos,
@@ -217,15 +211,14 @@ impl ModEmitter {
                 let (mut v, vty) = match pre {
                     Some((w, tt)) => (w, tt),
                     None => {
-                        let hint = if let (Some(PathSeg::Name(h)), _) =
-                            (target.first(), target.last())
-                        {
-                            fw.lookup(&h.clone())
-                                .map(|x| x.1)
-                                .unwrap_or_else(|| self.r.mk(Ty::Unit))
-                        } else {
-                            self.r.mk(Ty::Unit)
-                        };
+                        let hint =
+                            if let (Some(PathSeg::Name(h)), _) = (target.first(), target.last()) {
+                                fw.lookup(&h.clone())
+                                    .map(|x| x.1)
+                                    .unwrap_or_else(|| self.r.mk(Ty::Unit))
+                            } else {
+                                self.r.mk(Ty::Unit)
+                            };
                         self.exp_ret.push(hint);
                         let out = self.emit_expr(fw, value);
                         self.exp_ret.pop();
@@ -376,31 +369,27 @@ impl ModEmitter {
                                             if let Ty::Named(kcls, _) = self.r.get(k).clone() {
                                                 if self.class_ids.contains_key(&kcls) {
                                                     match self.find_map_key_hash(&kcls) {
-                                                    Some((hmname, defcls, hfd)) => {
-                                                        let oargv =
-                                                            vec![(iv.clone(), self.r.mk(Ty::I64))];
-                                                        let osig = vec!["i64".to_string()];
-                                                        let (hv, _ht) = self.emit_method_call(
-                                                            fw,
-                                                            &defcls,
-                                                            &hmname,
-                                                            &hfd,
-                                                            false,
-                                                            &oargv,
-                                                            &osig,
-                                                            &s.pos,
-                                                        );
-                                                        use_h = Some(hv);
-                                                    }
-                                                    None => {
-                                                        self.err(
+                                                        Some((hmname, defcls, hfd)) => {
+                                                            let oargv = vec![(
+                                                                iv.clone(),
+                                                                self.r.mk(Ty::I64),
+                                                            )];
+                                                            let osig = vec!["i64".to_string()];
+                                                            let (hv, _ht) = self.emit_method_call(
+                                                                fw, &defcls, &hmname, &hfd, false,
+                                                                &oargv, &osig, &s.pos,
+                                                            );
+                                                            use_h = Some(hv);
+                                                        }
+                                                        None => {
+                                                            self.err(
                                                             &s.pos,
                                                             format!(
                                                                 "map key `{}` implements no `hash()`-family method — keyed by pointer identity (Hashable surface needs `hash()`/`hashKey()`/`__hash__()`)",
                                                                 kcls
                                                             ),
                                                         );
-                                                    }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -887,7 +876,7 @@ impl ModEmitter {
                         return;
                     }
                     // iterator protocol: iterator object (or iter())/next() -> Opt<el>
-                    Ty::Named(c, _) => {
+                    Ty::Named(_c, _) => {
                         self.emit_proto_loop(fw, var, body, mav.clone(), at.clone(), pos);
                         return;
                     }
@@ -982,14 +971,7 @@ impl ModEmitter {
                         let oargv = vec![(kw.clone(), k)];
                         let osig = vec![mlir_word_ty(k, &self.r)];
                         let (hv, _ht) = self.emit_method_call(
-                            fw,
-                            &defcls,
-                            &hmname,
-                            &hfd,
-                            false,
-                            &oargv,
-                            &osig,
-                            pos,
+                            fw, &defcls, &hmname, &hfd, false, &oargv, &osig, pos,
                         );
                         let getfn = if vf {
                             "sloth_map_get_h_f64"
@@ -1015,10 +997,18 @@ impl ModEmitter {
                         fw.op(&format!(
                             "    {} = call @{}({}, {}) : {}",
                             vw,
-                            if vf { "sloth_map_get_f64" } else { "sloth_map_get" },
+                            if vf {
+                                "sloth_map_get_f64"
+                            } else {
+                                "sloth_map_get"
+                            },
                             mav,
                             kw,
-                            if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+                            if vf {
+                                "(i64, i64) -> f64"
+                            } else {
+                                "(i64, i64) -> i64"
+                            }
                         ));
                         vw
                     }
@@ -1028,10 +1018,18 @@ impl ModEmitter {
                 fw.op(&format!(
                     "    {} = call @{}({}, {}) : {}",
                     vw,
-                    if vf { "sloth_map_get_f64" } else { "sloth_map_get" },
+                    if vf {
+                        "sloth_map_get_f64"
+                    } else {
+                        "sloth_map_get"
+                    },
                     mav,
                     kw,
-                    if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+                    if vf {
+                        "(i64, i64) -> f64"
+                    } else {
+                        "(i64, i64) -> i64"
+                    }
                 ));
                 vw
             }
@@ -1040,10 +1038,18 @@ impl ModEmitter {
             fw.op(&format!(
                 "    {} = call @{}({}, {}) : {}",
                 vw,
-                if vf { "sloth_map_str_get_f64" } else { "sloth_map_str_get" },
+                if vf {
+                    "sloth_map_str_get_f64"
+                } else {
+                    "sloth_map_str_get"
+                },
                 mav,
                 kw,
-                if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+                if vf {
+                    "(i64, i64) -> f64"
+                } else {
+                    "(i64, i64) -> i64"
+                }
             ));
             vw
         };
@@ -1091,7 +1097,7 @@ impl ModEmitter {
         arr: String,
         el: TyId,
         kind: IdxKind,
-        pos: &Pos,
+        _pos: &Pos,
     ) {
         let (countfn, getfn, getty) = match kind {
             IdxKind::Arr => {

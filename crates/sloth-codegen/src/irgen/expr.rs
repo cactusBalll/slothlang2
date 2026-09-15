@@ -22,19 +22,7 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    pub(crate) fn intern_str(&mut self, s: &str) -> String {
-        for (i, x) in self.strpool.iter().enumerate() {
-            if x == s {
-                return format!("@sl_str{}", i);
-            }
-        }
-        self.strpool.push(s.to_string());
-        format!("@sl_str{}", self.strpool.len() - 1)
-    }
-}
-
-impl ModEmitter {
-    pub fn emit_expr(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
+    pub(crate) fn emit_expr(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         match &e.node {
             ExprNode::Int(v) => {
                 let r = fw.v();
@@ -76,10 +64,9 @@ impl ModEmitter {
             ExprNode::Str(ss) => {
                 if !ss.is_plain() {
                     // interpolated string: chain per-part push onto a builder
-                    let mut curw = String::new();
                     let c0 = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : i64", c0));
-                    curw = c0;
+                    let mut curw = c0;
                     for part in &ss.parts {
                         match part {
                             StrPart::Lit(l) => {
@@ -197,11 +184,10 @@ impl ModEmitter {
                 while pads.len() % 8 != 0 {
                     pads.push(0);
                 }
-                let mut curw = String::new();
+                let c0 = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", c0));
+                let mut curw = c0;
                 {
-                    let c0 = fw.v();
-                    fw.op(&format!("    {} = arith.constant 0 : i64", c0));
-                    curw = c0;
                     for (i, ch) in pads.chunks(8).enumerate() {
                         let mut w: u64 = 0;
                         for (k, b) in ch.iter().enumerate() {
@@ -558,7 +544,7 @@ impl ModEmitter {
                                 );
                             }
                         }
-                        let z = if fl {
+                        let _z = if fl {
                             fw.v()
                         } else {
                             let z2 = fw.v();
@@ -612,35 +598,35 @@ impl ModEmitter {
             BinOp::EqEq | BinOp::NotEq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
         ) {
             if let Ty::Named(cls, _) = self.r.get(at).clone() {
-            let oname = match op {
-                BinOp::EqEq => "__eq__",
-                BinOp::NotEq => "__ne__",
-                BinOp::Lt => "__lt__",
-                BinOp::Le => "__le__",
-                BinOp::Gt => "__gt__",
-                BinOp::Ge => "__ge__",
-                _ => unreachable!(),
-            };
-            if let Some((defcls, fd)) = self.find_method(&cls, oname) {
-                let oargv = vec![(a.clone(), at), (b.clone(), bt)];
-                let osig = vec![mlir_word_ty(at, &self.r), mlir_word_ty(bt, &self.r)];
-                return self
-                    .emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, pos);
-            }
-            // patch #33: no overload on class surfaces -> never silently
-            // degrade to word compare (cmpi/cmpf pointer identity)
-            if let Ty::Named(bc, _) = self.r.get(bt).clone() {
-                if self.class_ids.get(&bc).is_some() || self.class_ids.get(&cls).is_some() {
-                    self.err(
-                        pos,
-                        format!(
+                let oname = match op {
+                    BinOp::EqEq => "__eq__",
+                    BinOp::NotEq => "__ne__",
+                    BinOp::Lt => "__lt__",
+                    BinOp::Le => "__le__",
+                    BinOp::Gt => "__gt__",
+                    BinOp::Ge => "__ge__",
+                    _ => unreachable!(),
+                };
+                if let Some((defcls, fd)) = self.find_method(&cls, oname) {
+                    let oargv = vec![(a.clone(), at), (b.clone(), bt)];
+                    let osig = vec![mlir_word_ty(at, &self.r), mlir_word_ty(bt, &self.r)];
+                    return self
+                        .emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, pos);
+                }
+                // patch #33: no overload on class surfaces -> never silently
+                // degrade to word compare (cmpi/cmpf pointer identity)
+                if let Ty::Named(bc, _) = self.r.get(bt).clone() {
+                    if self.class_ids.get(&bc).is_some() || self.class_ids.get(&cls).is_some() {
+                        self.err(
+                            pos,
+                            format!(
                             "comparison `{:?}` on classes `{}` and `{}` requires a `{}` overload",
                             op, cls, bc, oname
                         ),
-                    );
-                    return (String::new(), cmp_ty_id);
+                        );
+                        return (String::new(), cmp_ty_id);
+                    }
                 }
-            }
             }
         }
         // str value equality (patch #36): ==/!= route to the content
@@ -982,14 +968,7 @@ impl ModEmitter {
                                     let oargv = vec![(kev.0.clone(), kev.1)];
                                     let osig = vec![mlir_word_ty(kev.1, &self.r)];
                                     let (hv, ht) = self.emit_method_call(
-                                        fw,
-                                        &defcls,
-                                        &hmname,
-                                        &hfd,
-                                        false,
-                                        &oargv,
-                                        &osig,
-                                        &e.pos,
+                                        fw, &defcls, &hmname, &hfd, false, &oargv, &osig, &e.pos,
                                     );
                                     let _ = ht;
                                     use_h = Some(hv);
@@ -1061,13 +1040,7 @@ impl ModEmitter {
                                         let oargv = vec![(iv.clone(), it)];
                                         let osig = vec![mlir_word_ty(it, &self.r)];
                                         let (hv, _ht) = self.emit_method_call(
-                                            fw,
-                                            &defcls,
-                                            &hmname,
-                                            &hfd,
-                                            false,
-                                            &oargv,
-                                            &osig,
+                                            fw, &defcls, &hmname, &hfd, false, &oargv, &osig,
                                             &e.pos,
                                         );
                                         let (sym, retty) = if self.is_float(*v) {
@@ -1444,7 +1417,7 @@ impl ModEmitter {
             } else {
                 plan.mangled.clone()
             };
-            let (mut vals, tys) = match &variadic {
+            let (vals, tys) = match &variadic {
                 Some(vd) => {
                     // extra args pack into one Array<T> word; the declared elem
                     // kind decides the slot route (int extras sitofp to f64)

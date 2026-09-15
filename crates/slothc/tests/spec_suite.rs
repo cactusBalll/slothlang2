@@ -82,7 +82,9 @@ fn run_diag(path: &PathBuf, want: &str) -> Result<(), String> {
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        return Err(format!("expected compile/surface failure, but check passed"));
+        return Err(format!(
+            "expected compile/surface failure, but check passed"
+        ));
     }
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     if !err.contains(want) {
@@ -100,7 +102,11 @@ fn spec_case_count() {
         let (_p, marks) = collect_markers(f);
         n += marks.len();
     }
-    assert!(n >= 200, "spec suite has {} cases; design P0 wants >= 200", n);
+    assert!(
+        n >= 200,
+        "spec suite has {} cases; design P0 wants >= 200",
+        n
+    );
 }
 
 #[test]
