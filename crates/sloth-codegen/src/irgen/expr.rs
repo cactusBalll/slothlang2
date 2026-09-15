@@ -19,6 +19,60 @@ impl ModEmitter {
             _ => String::new(),
         }
     }
+
+    /// write the (possibly relocated) push handle back into the receiver's
+    /// storage: local variable slot or enclosing object field; other receiver
+    /// faces (rvalue chains, nested container elements) are compile errors
+    pub(crate) fn emit_arr_push_writeback(
+        &mut self,
+        fw: &mut FnWalk,
+        callee: &Expr,
+        handle: &str,
+        pos: &Pos,
+    ) {
+        let (recv, _fname) = match &callee.node {
+            ExprNode::Field { obj, name } => (obj, name.clone()),
+            _ => return,
+        };
+        match &recv.node {
+            // `a.push(v)` — local variable slot
+            ExprNode::Ident(n) => match fw.lookup(n) {
+                Some((slot, ty)) => match self.r.get(ty) {
+                    Ty::Array(_) => {
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        fw.op(&format!(
+                            "    memref.store {}, {}[{}] : memref<1xi64>",
+                            handle, slot, z
+                        ));
+                    }
+                    _ => self.err(pos, format!("push receiver `{}` is not an array", n)),
+                },
+                None => self.err(pos, format!("push receiver unknown `{}`", n)),
+            },
+            // `this.data.push(v)` / `o.inner.push(v)` — set field on the
+            // container object that owns the array field
+            ExprNode::Field { obj, name } => {
+                let (rv, rt) = self.emit_expr(fw, obj);
+                match self.r.get(rt) {
+                    Ty::Named(c, _) => {
+                        let idx = self.field_index(c, name) as i64;
+                        let zi = fw.v();
+                        fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                        fw.op(&format!(
+                            "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                            rv, zi, handle
+                        ));
+                    }
+                    _ => self.err(
+                        pos,
+                        "push receiver must be a local or object field".to_string(),
+                    ),
+                }
+            }
+            _ => self.err(pos, "push receiver must be a local or object field".to_string()),
+        }
+    }
 }
 
 impl ModEmitter {
@@ -1345,6 +1399,10 @@ impl ModEmitter {
                                 callv, recvv, v
                             ));
                         }
+                        // GC growth may relocate the array buffer: the runtime
+                        // returns the new handle — write it back to the
+                        // receiver's storage (local slot or object field)
+                        self.emit_arr_push_writeback(fw, callee, &callv, pos);
                         let z = fw.v();
                         fw.op(&format!("    {} = arith.constant 0 : i64", z));
                         return (z, self.r.mk(Ty::Unit));

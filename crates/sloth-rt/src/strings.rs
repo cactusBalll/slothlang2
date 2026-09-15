@@ -44,7 +44,7 @@ pub extern "C" fn sloth_str_push(b: i64, w: i64, n: i64) -> i64 {
 // ---------------- string pool interning ----------------
 
 #[repr(C)]
-pub(crate) struct StrT {
+pub struct StrT {
     pub len: libc::size_t,
     pub data: *mut libc::c_void,
 }
@@ -226,31 +226,5 @@ pub extern "C" fn sloth_str_eq(a: i64, b: i64) -> i64 {
         let tb = b as *const StrT;
         ((*ta).len == (*tb).len
             && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0) as i64
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// str iteration returns single-byte strings
-    #[test]
-    fn str_char_roundtrip() {
-        unsafe {
-            let s = crate::strings::sloth_str_intern("ab\0".as_ptr() as i64, 2);
-            assert_eq!(crate::strings::sloth_str_len(s), 2, "interned len");
-            for (i, want) in (0..2).zip([b'a', b'b']) {
-                let c = crate::strings::sloth_str_char(s, i);
-                assert_eq!(crate::strings::sloth_str_len(c), 1, "char len @{}", i);
-                let td = c as *mut crate::strings::StrT;
-                let b = *((*td).data as *const u8);
-                assert_eq!(b, want, "char @{}", i);
-            }
-        }
-    }
-
-    #[test]
-    fn print_str_smoke() {
-        let s = crate::strings::sloth_str_intern("hi\0".as_ptr() as i64, 2);
-        assert_eq!(crate::strings::sloth_rt_print_str(s), 0);
-        let _ = crate::console::sloth_rt_print_i64(1);
     }
 }

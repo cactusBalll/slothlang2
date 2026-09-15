@@ -311,12 +311,12 @@ pub extern "C" fn sloth_map_keys(m: i64) -> i64 {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
-        let arr = sloth_arr_new(0);
+        let mut arr = sloth_arr_new(0);
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
-                sloth_arr_push(arr, *s.offset(1));
+                arr = sloth_arr_push(arr, *s.offset(1));
             }
             i += 1;
         }
@@ -329,86 +329,15 @@ pub extern "C" fn sloth_map_values(m: i64) -> i64 {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
-        let arr = sloth_arr_new(0);
+        let mut arr = sloth_arr_new(0);
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
-                sloth_arr_push(arr, *s.offset(2));
+                arr = sloth_arr_push(arr, *s.offset(2));
             }
             i += 1;
         }
         arr
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::arrays::{sloth_arr_get, sloth_arr_len};
-    use crate::maps::*;
-
-    #[test]
-    fn map_roundtrip_20_keys() {
-        let m = sloth_map_new(0);
-        for i in 0..20 {
-            sloth_map_set(m, i, i * 2);
-        }
-        assert_eq!(sloth_map_len(m), 20, "len after 20 sets");
-        for i in 0..20 {
-            assert_eq!(sloth_map_get(m, i), i * 2, "key {}", i);
-        }
-        let ks = sloth_map_keys(m);
-        assert_eq!(sloth_arr_len(ks), 20, "keys array len");
-        let vs = sloth_map_values(m);
-        assert_eq!(sloth_arr_len(vs), 20, "values array len");
-    }
-
-    /// two-key map: no phantom used slots, uniform probe
-    #[test]
-    fn map_small_two_keys() {
-        let m = sloth_map_new(0);
-        sloth_map_set(m, 5, 50);
-        sloth_map_set(m, 6, 60);
-        assert_eq!(sloth_map_len(m), 2);
-        assert_eq!(sloth_map_get(m, 5), 50);
-        assert_eq!(sloth_map_get(m, 6), 60);
-        let ks = sloth_map_keys(m);
-        assert_eq!(sloth_arr_len(ks), 2, "keys array");
-        let ks_len = sloth_arr_len(ks);
-        let mut i = 0i64;
-        let mut s50 = 0i64;
-        let mut s60 = 0i64;
-        while i < ks_len {
-            let k = sloth_arr_get(ks, i);
-            if k == 5 {
-                s50 = 1;
-            }
-            if k == 6 {
-                s60 = 1;
-            }
-            assert_eq!(sloth_map_get(m, k), k * 10);
-            i += 1;
-        }
-        assert_eq!(s50, 1, "key 5 present");
-        assert_eq!(s60, 1, "key 6 present");
-    }
-}
-
-#[cfg(test)]
-mod tests_h {
-    use crate::maps::*;
-
-    /// patch #35: content-hash keyed object slots; equal hash ⇒ equal slot
-    #[test]
-    fn obj_key_getset_h() {
-        let m = sloth_map_new(2);
-        let _ = sloth_map_set_h(m, 1001, 31, 10);
-        assert_eq!(sloth_map_len(m), 1);
-        // distinct key word, same cached content hash: contract lookup
-        assert_eq!(sloth_map_get_h(m, 555, 31), 10);
-        // same-hash set overwrites the same slot
-        let _ = sloth_map_set_h(m, 999, 31, 42);
-        assert_eq!(sloth_map_len(m), 1);
-        assert_eq!(sloth_map_get_h(m, 999, 31), 42);
     }
 }

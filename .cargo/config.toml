@@ -1,0 +1,9 @@
+# libgc (Boehm) + cargo libtest harness: parallel test threads race the
+# collector's bring-up (GC_allow_register_threads vs GC_register_my_thread)
+# and abort. sloth2 is single-threaded (no fibers, §7.1) — serialize tests.
+# GC bring-up races are handled inside sloth-rt's gc::init for cross-thread
+# FIRST-USE, but libtest thread pools still trigger the abort path, so tests
+# stay serialized; runtime paths unaffected (single-threaded programs).
+[env]
+RUST_TEST_THREADS = "1"
+MLIR_SYS_210_PREFIX = "/usr/lib/llvm-21"

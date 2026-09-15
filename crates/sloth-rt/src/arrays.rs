@@ -30,22 +30,30 @@ pub extern "C" fn sloth_arr_len(a: i64) -> i64 {
     unsafe { *(a as *mut i64) }
 }
 
-/// append one i64 word; returns the new length (call site usually ignores it)
+/// append one i64 word; returns the (possibly moved) array handle —
+/// GC_realloc relocates the buffer when growing, so callers MUST propagate
+/// the returned handle (old input is freed immediately by the collector)
 #[no_mangle]
 pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
     unsafe {
         let p = a as *mut i64;
         let len = *p;
         let cap = *p.offset(1);
+        let mut base = a;
         if len >= cap {
             let nc = (cap * 2).max(8);
-            let raw = libc::realloc(a as *mut libc::c_void, (nc + 2) as libc::size_t * 8);
-            let p2 = raw as *mut i64;
+            let raw = crate::gc::sloth_gc_realloc(
+                a as *mut libc::c_void,
+                (nc + 2) as libc::size_t * 8,
+            );
+            base = raw as i64;
+            let p2 = base as *mut i64;
             *p2.offset(1) = nc;
         }
-        *p.offset((len + 2) as isize) = w;
-        *p = len + 1;
-        len + 1
+        let p2 = base as *mut i64;
+        *p2.offset((len + 2) as isize) = w;
+        *p2 = len + 1;
+        base
     }
 }
 
@@ -69,15 +77,22 @@ pub extern "C" fn sloth_arr_push_f64(a: i64, w: f64) -> i64 {
         let p = a as *mut i64;
         let len = *p;
         let cap = *p.offset(1);
+        let mut base = a;
         if len >= cap {
+            // GC_realloc moves the buffer: return the relocated handle
             let nc = (cap * 2).max(8);
-            let raw = libc::realloc(a as *mut libc::c_void, (nc + 2) as libc::size_t * 8);
-            let p2 = raw as *mut i64;
+            let raw = crate::gc::sloth_gc_realloc(
+                a as *mut libc::c_void,
+                (nc + 2) as libc::size_t * 8,
+            );
+            base = raw as i64;
+            let p2 = base as *mut i64;
             *p2.offset(1) = nc;
         }
-        *(p.offset((len + 2) as isize) as *mut f64) = w;
-        *p = len + 1;
-        len + 1
+        let p2 = base as *mut i64;
+        *(p2.offset((len + 2) as isize) as *mut f64) = w;
+        *p2 = len + 1;
+        base
     }
 }
 
