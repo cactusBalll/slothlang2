@@ -1260,18 +1260,71 @@ impl ModEmitter {
 
 
 impl ModEmitter {
+    /// flow-typing MVP: `x is C` / `x is not nil` narrows x inside then-branch
+    /// by shadowing its slot binding with the narrowed type
+    fn narrow_pattern(&mut self, fw: &mut FnWalk, cond: &Expr) -> Option<(String, TyId)> {
+        match &cond.node {
+            ExprNode::Is { negated: false, lhs, rhs } => {
+                let x = match &lhs.node {
+                    ExprNode::Ident(n) => n.clone(),
+                    _ => return None,
+                };
+                match &rhs.node {
+                    ExprNode::Ident(cn) if self.class_ids.contains_key(cn.as_str()) => {
+                        let nty = self.r.mk(Ty::Named(cn.to_string(), Vec::new()));
+                        Some((x, nty))
+                    }
+                    _ => None,
+                }
+            }
+            ExprNode::Is { negated: true, lhs, rhs } if matches!(&lhs.node, ExprNode::Ident(_)) => {
+                if !matches!(&rhs.node, ExprNode::Nil) {
+                    return None;
+                }
+                let x = match &lhs.node {
+                    ExprNode::Ident(n) => n.clone(),
+                    _ => return None,
+                };
+                let narrowed = match fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone()) {
+                    Some(Ty::Opt(e)) => e,
+                    _ => return None,
+                };
+                Some((x, narrowed))
+            }
+            _ => None,
+        }
+    }
+
     fn walk_if(&mut self, fw: &mut FnWalk, cond: &Expr, then_: &Stmt, else_: Option<&Stmt>, pos: &Pos) {
         if !fw.noterm() {
             self.err(pos, "unreachable code".to_string());
             return;
         }
         let (c, _ct) = self.emit_expr(fw, cond);
+        let narrow = if self.diags.is_empty() {
+            self.narrow_pattern(fw, cond)
+        } else {
+            None
+        };
         let thlab = fw.newlabel("t");
         let ellab = fw.newlabel("e");
         let endlab = fw.newlabel("fi");
         fw.cjump(&c, &thlab, &ellab);
         fw.label(&thlab);
-        self.walk_body(fw, then_);
+        match narrow {
+            Some((x, nty)) => {
+                let slot = fw.lookup(&x).map(|(a, _)| a);
+                if let Some(a) = slot {
+                    fw.push_scope();
+                    fw.scopes.last_mut().unwrap().insert(x.clone(), (a, nty));
+                    self.walk_body(fw, then_);
+                    fw.pop_scope();
+                } else {
+                    self.walk_body(fw, then_);
+                }
+            }
+            None => self.walk_body(fw, then_),
+        }
         fw.jump(&endlab);
         fw.label(&ellab);
         if let Some(e2) = else_ {
@@ -2634,6 +2687,42 @@ impl ModEmitter {
                     r, sym, v, mty
                 ));
                 (r, self.r.mk(Ty::Unit))
+            }
+            "int" if !argv.is_empty() => {
+                let (v, t) = argv[0].clone();
+                let ts = self.r.get(t).clone();
+                match ts {
+                    Ty::F64 => {
+                        fw.op(&format!(
+                            "    {} = arith.fptosi {} : f64 to i64",
+                            r, v
+                        ));
+                        (r, self.r.mk(Ty::I64))
+                    }
+                    Ty::Str => {
+                        self.err(pos, "int() of str unsupported (MVP)".to_string());
+                        (v, self.r.mk(Ty::I64))
+                    }
+                    _ => (v, self.r.mk(Ty::I64)),
+                }
+            }
+            "float" if !argv.is_empty() => {
+                let (v, t) = argv[0].clone();
+                let ts = self.r.get(t).clone();
+                match ts {
+                    Ty::F64 => (v, self.r.mk(Ty::F64)),
+                    Ty::Str => {
+                        self.err(pos, "float() of str unsupported (MVP)".to_string());
+                        (v, self.r.mk(Ty::F64))
+                    }
+                    _ => {
+                        fw.op(&format!(
+                            "    {} = arith.sitofp {} : i64 to f64",
+                            r, v
+                        ));
+                        (r, self.r.mk(Ty::F64))
+                    }
+                }
             }
             "len" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();

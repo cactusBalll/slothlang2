@@ -1035,6 +1035,79 @@ mod irgen_p12 {
     }
 }
 
+// ---------------- patch #13: is narrowing + int()/float() ----------------
+mod irgen_p13 {
+    use super::*;
+
+    /// `if (x is Bird)` rebinds x to Bird chain: Bird-only method callable
+    #[test]
+    fn is_class_narrows() {
+        let src = r#"
+            class Animal { func leg(): int { return 4; } }
+            class Bird: Animal {
+                func fly(): unit { print("flap"); }
+                func leg(): int { return 2; }
+            }
+            func main(): unit {
+                var a: Animal = Bird();
+                print(a.leg());
+                if (a is Bird) {
+                    a.fly();
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `if (p is not nil)` unbinds the optional: method call legal inside
+    #[test]
+    fn is_not_nil_narrows_opt() {
+        let src = r#"
+            class Shape {
+                func sides(): int { return 4; }
+            }
+            func report(p: Shape?): unit {
+                if (p is not nil) {
+                    print(p.sides());
+                } else {
+                    print(0);
+                }
+            }
+            func main(): unit {
+                report(nil);
+                report(Shape());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// explicit conversion builtins: int() truncation, float() promotion
+    #[test]
+    fn int_float_conversions() {
+        let src = r#"
+            func main(): unit {
+                print(int(2.7));
+                print(float(3) + 0.5);
+                print(float(int(float(9))));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// conversions of str are rejected diagnostics (MVP)
+    #[test]
+    fn conversion_str_rejected() {
+        for form in ["int(\"3\")", "float(\"3\")"] {
+            let src = format!("func main(): unit {{\n    var x = {};\n}}\n", form);
+            let e = match run_src(&src, "main") {
+                Ok(()) => panic!("str conversion accepted: {}", form),
+                Err(e) => e,
+            };
+            assert!(e.contains("unsupported"), "unexpected: {}", e);
+        }
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
