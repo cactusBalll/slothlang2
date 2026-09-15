@@ -1765,6 +1765,83 @@ mod irgen_p20 {
     }
 }
 
+// ---------------- patch #21: interpolation routes through Display ----------------
+mod irgen_p21 {
+    use super::*;
+
+    /// `${userclass}` interpolates via to_str (symmetric with print)
+    #[test]
+    fn interpolation_display() {
+        let src = r#"
+            trait Display {
+                func to_str(): str;
+            }
+            class Pt impl Display {
+                var x: int;
+                var y: int;
+                func __init__(x: int, y: int): unit {
+                    this.x = x;
+                    this.y = y;
+                    return;
+                }
+                func to_str(): str {
+                    return "Pt(${this.x}, ${this.y})";
+                }
+            }
+            func main(): unit {
+                let p = Pt(1, 2);
+                print("point = ${p}");
+                let msg = "value=${Pt(7, 8)}";
+                print(msg);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// int field interpolation inside to_str still works (nested chain)
+    #[test]
+    fn interpolation_mixed_parts() {
+        let src = r#"
+            trait Display {
+                func to_str(): str;
+            }
+            class Box impl Display {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+                func to_str(): str { return "Box{ v=${this.v} }"; }
+            }
+            func main(): unit {
+                let b = Box(42);
+                print("x=${b} n=${42} s=${"hi"} f=${2.5} b=${true}");
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// no Display impl: interpolation refuses diagnostically
+    #[test]
+    fn interpolation_display_missing_diag() {
+        let src = r#"
+            class Plain {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+            }
+            func main(): unit {
+                let p = Plain(1);
+                print("oops ${p}");
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("interpolation of class without Display accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires trait bound `Display`"),
+            "unexpected: {}", e
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

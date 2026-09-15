@@ -2257,6 +2257,33 @@ impl ModEmitter {
                                         "    {} = call @sloth_str_push_b({}, {}) : (i64, i64) -> i64",
                                         r, curw, v
                                     ));
+                                } else if let Ty::Named(ref cls, _) = self.r.get(t).clone() {
+                                    // Display-plumbed interpolation, symmetric with
+                                    // print: user class needs impl Display + to_str()
+                                    self.satisfies_bound_check(&e.pos, &t, "Display", "interpolation");
+                                    match self.find_method(cls, "to_str") {
+                                        Some((defcls, fd)) => {
+                                            let (sv, _st) = self.emit_method_call(
+                                                fw, &defcls, "to_str", &fd, false,
+                                                &vec![(v.clone(), t)],
+                                                &vec!["i64".to_string()], &e.pos,
+                                            );
+                                            fw.op(&format!(
+                                                "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
+                                                r, curw, sv
+                                            ));
+                                        }
+                                        None => {
+                                            self.err(
+                                                &e.pos,
+                                                "`${}` on class requires impl Display with `to_str`".to_string(),
+                                            );
+                                            fw.op(&format!(
+                                                "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
+                                                r, curw, v
+                                            ));
+                                        }
+                                    }
                                 } else {
                                     fw.op(&format!(
                                         "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
