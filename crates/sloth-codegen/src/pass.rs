@@ -874,7 +874,7 @@ mod irgen_p9 {
                 Ok(()) => panic!("kind mismatch accepted: {:?}", src),
                 Err(e) => e,
             };
-            assert!(e.contains("initializer is float"), "unexpected: {}", e);
+            assert!(e.contains("expected: non-float surface\\n  got: float"), "unexpected: {}", e);
         }
     }
 
@@ -1940,7 +1940,7 @@ mod irgen_p22 {
             Err(e) => e,
         };
         assert!(
-            e.contains("cannot assign `str` to `int`"),
+            e.contains("expected: int\\n  got: str"),
             "unexpected: {}",
             e
         );
@@ -1959,7 +1959,7 @@ mod irgen_p22 {
             Err(e) => e,
         };
         assert!(
-            e.contains("initializer is `str` but declared type is `int`"),
+            e.contains("type mismatch in initializer at line"),
             "unexpected: {}",
             e
         );
@@ -2006,7 +2006,7 @@ mod irgen_p22 {
             Err(e) => e,
         };
         assert!(
-            e.contains("type mismatch: cannot assign"),
+            e.contains("type mismatch in assignment to `x`"),
             "unexpected: {}",
             e
         );
@@ -2057,7 +2057,7 @@ mod irgen_p22 {
             Err(e) => e,
         };
         assert!(
-            e.contains("cannot assign `Array<str>` to `Array<int>`"),
+            e.contains("expected: Array<int>\\n  got: Array<str>"),
             "unexpected: {}",
             e
         );

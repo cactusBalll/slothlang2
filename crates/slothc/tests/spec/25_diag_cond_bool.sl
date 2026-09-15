@@ -5,4 +5,4 @@ func main(): unit {
         n = n - 1;
     }
 }
-// diag: condition must be `bool` (no implicit truthy conversion from `int`)
+// diag: type mismatch in condition

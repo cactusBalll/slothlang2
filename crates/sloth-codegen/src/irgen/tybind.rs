@@ -289,12 +289,11 @@ impl ModEmitter {
         }
         if self.is_float(vty) {
             let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
-            self.err(
+            self.err_diff(
                 pos,
-                format!(
-                    "type mismatch: cannot assign `float` to `{}` (`{}`)",
-                    dtn, name
-                ),
+                &format!("assignment to `{}`", name),
+                "float",
+                &dtn,
             );
             // keep IR parseable: store with the value's own float spelling
             fw.assign(name, v, true);
@@ -307,13 +306,7 @@ impl ModEmitter {
         } else {
             let dtn = self.surface_name(&dts);
             let vtn = self.surface_name(&vts);
-            self.err(
-                pos,
-                format!(
-                    "type mismatch: cannot assign `{}` to `{}` variable `{}`",
-                    vtn, dtn, name
-                ),
-            );
+            self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
             fw.assign(name, v, false);
         }
     }
@@ -474,5 +467,30 @@ impl ModEmitter {
             Some(t) => self.shape_of(&t, tnames),
             None => self.r.mk(Ty::Unit),
         }
+    }
+}
+
+impl ModEmitter {
+    /// structured expected/got diff diagnostic (patch #40): replaces the
+    /// word-face one-liners across assignment/initializer/field faces
+    pub(crate) fn err_diff(&mut self, pos: &Pos, ctx: &str, expected: &str, got: &str) {
+        self.err(
+            pos,
+            format!(
+                "type mismatch in {} at line {}\n  expected: {}\n  got: {}",
+                ctx, pos.line, expected, got
+            ),
+        );
+    }
+
+    /// condition face: no implicit truthy conversion (structured diff too)
+    pub(crate) fn err_cond_bool(&mut self, pos: &Pos, got: &str) {
+        self.err(
+            pos,
+            format!(
+                "type mismatch in condition at line {}\n  expected: bool\n  got: {}\n  (condition must be `bool`; no implicit truthy conversion)",
+                pos.line, got
+            ),
+        );
     }
 }

@@ -130,10 +130,11 @@ impl ModEmitter {
                             fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
                             (cv, dt)
                         } else if !df && vf {
-                            self.err(
+                            self.err_diff(
                                 &s.pos,
-                                "type mismatch: initializer is float but declared type is not"
-                                    .to_string(),
+                                "initializer",
+                                "non-float surface",
+                                &self.surface_name(self.r.get(t)),
                             );
                             (v, t)
                         } else {
@@ -143,14 +144,11 @@ impl ModEmitter {
                             let dts = self.r.get(dt).clone();
                             let vts = self.r.get(t).clone();
                             if !self.surface_compat(&dts, &vts) {
-                                let dtn = self.surface_name(&dts);
-                                let vtn = self.surface_name(&vts);
-                                self.err(
+                                self.err_diff(
                                     &s.pos,
-                                    format!(
-                                        "type mismatch: initializer is `{}` but declared type is `{}`",
-                                        vtn, dtn
-                                    ),
+                                    "initializer",
+                                    &self.surface_name(&dts),
+                                    &self.surface_name(&vts),
                                 );
                             }
                             (v, t)
@@ -299,10 +297,11 @@ impl ModEmitter {
                                     fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
                                     vc = cv;
                                 } else if !self.is_float(fty) && self.is_float(vty) {
-                                    self.err(
+                                    self.err_diff(
                                         &s.pos,
-                                        "type mismatch: cannot assign float to non-float field"
-                                            .to_string(),
+                                        &format!("field assignment `{}`", f),
+                                        "non-float surface",
+                                        "float",
                                     );
                                 }
                                 self.op_set_field(fw, &recv, &zi, &vc, fty, s.pos.clone());
@@ -717,13 +716,7 @@ impl ModEmitter {
         // only a real bool tests
         if self.r.get(ct) != &Ty::Bool {
             let tn = sloth_frontend::ty::ty_name(self.r.get(ct));
-            self.err(
-                pos,
-                format!(
-                    "condition must be `bool` (no implicit truthy conversion from `{}`)",
-                    tn
-                ),
-            );
+            self.err_cond_bool(pos, &tn);
         }
         let narrow = if self.diags.is_empty() {
             self.narrow_pattern(fw, cond)
@@ -773,13 +766,7 @@ impl ModEmitter {
         let (c, ct) = self.emit_expr(fw, cond);
         if self.r.get(ct) != &Ty::Bool {
             let tn = sloth_frontend::ty::ty_name(self.r.get(ct));
-            self.err(
-                pos,
-                format!(
-                    "condition must be `bool` (no implicit truthy conversion from `{}`)",
-                    tn
-                ),
-            );
+            self.err_cond_bool(pos, &tn);
         }
         fw.cjump(&c, &doo, &done);
         fw.label(&doo);

@@ -3,4 +3,4 @@ func main(): unit {
     var x = 1;
     x = "s";
 }
-// diag: type mismatch: cannot assign `str` to `int` variable `x`
+// diag: type mismatch in assignment to `x`
