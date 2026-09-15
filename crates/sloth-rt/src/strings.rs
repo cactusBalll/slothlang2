@@ -55,7 +55,9 @@ pub extern "C" fn sloth_str_intern(ptr: i64, len: i64) -> i64 {
         let td = t as *mut StrT;
         (*td).len = len as usize;
         let data = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
-        libc::memcpy(data, ptr as *const libc::c_void, len as usize);
+        if len != 0 {
+            libc::memcpy(data, ptr as *const libc::c_void, len as usize);
+        }
         // NUL terminate for easy C display
         libc::memset((data as *mut libc::c_char).offset(len as isize) as *mut libc::c_void, 0, 1);
         (*td).data = data;
@@ -172,7 +174,9 @@ pub extern "C" fn sloth_str_push_b(b: i64, v: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn sloth_str_finish(b: i64) -> i64 {
     unsafe {
-        let p: *mut StrB = b as *mut StrB;
+        // b == 0 (no chunks pushed at all, e.g. the `""` literal) makes a
+        // fresh empty builder instead of dereferencing a NULL handle
+        let p: *mut StrB = strb_or_new(b);
         let h = sloth_str_intern((*p).data as i64, (*p).len as i64);
         libc::free((*p).data);
         libc::free(p as *mut libc::c_void);

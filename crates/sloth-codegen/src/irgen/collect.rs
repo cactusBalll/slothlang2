@@ -148,6 +148,17 @@ impl ModEmitter {
     /// for llvm.func emission, and checks the call ABI (word kinds).
     pub(crate) fn check_impls(&mut self, cls: &str, impls: &[String], pos: &Pos) {
         for tr in impls {
+            // patch #31: Hashable⇒Equatable contract (hash equality ⇒ value
+            // equality) — the class chain must also impl Equatable
+            if tr == "Hashable" && !self.impl_chain_has(cls, "Equatable") {
+                self.err(
+                    pos,
+                    format!(
+                        "class `{}` impl `Hashable` must also impl `Equatable` (hash equality implies value equality)",
+                        cls
+                    ),
+                );
+            }
             let sigs = match self.traits.get(tr) {
                 Some(s) => s.clone(),
                 None => {

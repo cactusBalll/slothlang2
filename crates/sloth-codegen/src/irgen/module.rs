@@ -22,6 +22,25 @@ impl ModEmitter {
             self.mod_alias.insert(a.to_string(), mname.to_string());
         }
         let qname = alias.unwrap_or(mname).to_string();
+        // foreign global cells (declared lazily; inits run in modinit):
+        // register BEFORE func emission so foreign bodies can read their own
+        // module's globals via fglobals
+        for d in &prog.decls {
+            if let DeclNode::Var { ty, .. } = &d.node {
+                let t = match ty {
+                    Some(t) => self.ty_of(t),
+                    None => self.r.mk(Ty::Unit),
+                };
+                let sym = self.declare_global(mname, &d.name, t);
+                self.fglobals
+                    .insert(format!("{}.{}", qname, d.name), (sym.clone(), t));
+                self.fglobals
+                    .insert(format!("{}.{}", mname, d.name), (sym.clone(), t));
+                if !visible_of(d) {
+                    self.hidden.insert(format!("{}.{}", qname, d.name));
+                }
+            }
+        }
         // foreign traits first (impl checks resolve against them)
         for d in &prog.decls {
             if let DeclNode::Trait(t) = &d.node {
@@ -121,23 +140,6 @@ impl ModEmitter {
                     }
                 }
                 _ => {}
-            }
-        }
-        // foreign global cells (declared lazily; inits run in modinit)
-        for d in &prog.decls {
-            if let DeclNode::Var { ty, init } = &d.node {
-                let t = match ty {
-                    Some(t) => self.ty_of(t),
-                    None => self.r.mk(Ty::Unit),
-                };
-                let sym = self.declare_global(mname, &d.name, t);
-                self.fglobals
-                    .insert(format!("{}.{}", qname, d.name), (sym.clone(), t));
-                self.fglobals
-                    .insert(format!("{}.{}", mname, d.name), (sym.clone(), t));
-                if !visible_of(d) {
-                    self.hidden.insert(format!("{}.{}", qname, d.name));
-                }
             }
         }
         // module init func: runs this module's var inits at startup

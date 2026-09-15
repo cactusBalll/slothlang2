@@ -366,6 +366,37 @@ mod irgen_p4 {
         }
     }
 
+    /// cross-module pub var read with a declared main(): modinit assembly
+    /// runs in entry before main body (was: `M.g` read the raw 0 cell)
+    #[test]
+    fn multimod_global_reads_with_main() {
+        let d = std::env::temp_dir().join("sloth_mmg");
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(
+            d.join("g.mm.sl"),
+            "pub var g = 42;\npub var s = \"seed\";\npub func h() -> int {\n    return g;\n}\n",
+        )
+        .unwrap();
+        let src = "import \"g.mm.sl\" as M;\nfunc main() {\n    print(M.g);\n    print(M.h());\n    print(M.s);\n}\n";
+        run_src_multimod(src, &d).unwrap();
+    }
+
+    /// empty string literal: no builder chunks pushed at all (was: NULL
+    /// builder deref in sloth_str_finish)
+    #[test]
+    fn empty_str_literal_works() {
+        let src = r#"
+            func main() {
+                var s = "";
+                print(s);
+                print("x" + s);
+                var t = "" + "y";
+                print(t);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
     /// pub fn/var/class access from another module still works
     #[test]
     fn pub_cross_module_allowed() {
@@ -1243,7 +1274,8 @@ mod irgen_p15 {
     fn map_object_keys_work() {
         let src = r#"
             trait Hashable { func hashKey(): int; }
-            class Point impl Hashable {
+            trait Equatable { func __eq__(other: Point): bool; }
+            class Point impl Hashable, Equatable {
                 var x: int;
                 var y: int;
                 func __init__(x: int, y: int): unit {
@@ -1253,6 +1285,9 @@ mod irgen_p15 {
                 }
                 func hashKey(): int {
                     return this.x + 1000 * this.y;
+                }
+                func __eq__(other: Point): bool {
+                    return this.x == other.x && this.y == other.y;
                 }
             }
             func main(): unit {
@@ -1274,10 +1309,12 @@ mod irgen_p15 {
     fn generic_bound_check() {
         let src = r#"
             trait Hashable { func hashKey(): int; }
-            class Point impl Hashable {
+            trait Equatable { func __eq__(other: Point): bool; }
+            class Point impl Hashable, Equatable {
                 var x: int = 42;
                 func __init__(): unit { return; }
                 func hashKey(): int { return 7; }
+                func __eq__(other: Point): bool { return this.x == other.x; }
             }
             func pick<T: Hashable>(k: T): T {
                 var q = k;
@@ -1728,7 +1765,8 @@ mod irgen_p20 {
         run_src(src, "main").unwrap();
     }
 
-    /// no overload on comparison: numeric fallback keeps old behavior (int words)
+    /// no overload on comparison of class values: compile-time diagnostic
+    /// (patch #33 — no silent cmpi/cmpf word degradation)
     #[test]
     fn cmp_without_overload_int_path() {
         let src = r#"
@@ -1742,7 +1780,15 @@ mod irgen_p20 {
                 print(a != b);
             }
         "#;
-        run_src(src, "main").unwrap();
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("class comparison without overload accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a `__ne__` overload"),
+            "unexpected: {}",
+            e
+        );
     }
 
     /// indexing a class without __index__: diagnostic
@@ -2374,10 +2420,12 @@ mod irgen_p26 {
             trait Hashable {
                 func __hash__(): int;
             }
-            class Pt impl Hashable {
+            trait Equatable { func __eq__(other: Pt): bool; }
+            class Pt impl Hashable, Equatable {
                 var x: int;
                 func __init__(x: int): unit { this.x = x; return; }
                 func __hash__(): int { return this.x; }
+                func __eq__(other: Pt): bool { return this.x == other.x; }
             }
             func main(): unit {
                 let m = @(Pt(1): 10, Pt(2): 20);
@@ -2435,5 +2483,212 @@ mod irgen_examples {
     #[test]
     fn example_objects2_runs() {
         run_example("objects2.sl");
+    }
+}
+
+// ---------------- patch #31: Hashable⇒Equatable contract ----------------
+mod irgen_p31 {
+    use super::*;
+
+    /// class impl Hashable without Equatable: contract diag (design §2.5)
+    #[test]
+    fn hashable_without_equatable_diag() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            class Key impl Hashable {
+                var x: int = 1;
+                func __init__(): unit { return; }
+                func hashKey(): int { return this.x; }
+            }
+            func main(): unit { print(Key()); }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("Hashable without Equatable accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("must also impl `Equatable`"),
+            "unexpected: {}",
+            e
+        );
+    }
+
+    /// Hashable on a subclass while Equatable sits higher on the class
+    /// chain: chain lookup satisfies the contract
+    #[test]
+    fn hashable_equatable_chain_ok() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            trait Equatable { func __eq__(other: Sub): bool; }
+            class Base impl Equatable {
+                var x: int = 1;
+                func __init__(): unit { return; }
+                func __eq__(other: Sub): bool { return this.x == other.x; }
+            }
+            class Sub: Base impl Hashable {
+                func hashKey(): int { return this.x; }
+            }
+            func main(): unit {
+                var m = @(Sub(): 7);
+                print(m.len());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// Equatable on the chain but Hashable declared later keeps working
+    #[test]
+    fn hashable_with_equatable_ok() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            trait Equatable { func __eq__(other: K): bool; }
+            class K impl Equatable, Hashable {
+                var x: int = 5;
+                func __init__(): unit { return; }
+                func hashKey(): int { return this.x; }
+                func __eq__(other: K): bool { return this.x == other.x; }
+            }
+            func main(): unit {
+                var m = @(K(): 3);
+                print(m.len());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
+// ---------------- patch #32: builtin-type `is` surfaces ----------------
+mod irgen_p32 {
+    use super::*;
+
+    /// `x is str` on a str token is statically true; narrows inside the if
+    #[test]
+    fn is_str_true_narrows() {
+        let src = r#"
+            func main(): unit {
+                var s = "ab";
+                if s is str {
+                    print(s.len());      // expect narrowing keep the word route
+                }
+                print(s is str);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `x is int` false on a str token, true on an int token; negation flips
+    #[test]
+    fn is_builtin_mismatch_and_negation() {
+        let src = r#"
+            func main(): unit {
+                var s = "x";
+                if s is int {
+                    print(0);
+                } else {
+                    print(1);            // int face != str token
+                }
+                var n = 5;
+                print(n is int);         // true
+                print(s is int);         // false
+                print(n is not str);     // true
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// optional token: `s? is str` looks through the option layer
+    #[test]
+    fn is_builtin_through_option() {
+        let src = r#"
+            func main(): unit {
+                var s: str? = "abc";
+                if s is str {
+                    print(s.len());      // expect 3
+                } else {
+                    print(0);
+                }
+                var n: str? = nil;
+                if n is str {
+                    print(n.len());
+                } else {
+                    print(-1);           // expect -1 (nil never is-str)
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
+// ---------------- patch #33: comparison family strictness ----------------
+mod irgen_p33 {
+    use super::*;
+
+    /// class equality without __eq__/__ne__: compile-time diagnostic
+    #[test]
+    fn class_eq_without_overload_diag() {
+        let src = r#"
+            class Plain {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+            }
+            func main(): unit {
+                print(Plain(1) == Plain(1));
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("class `==` without overload accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a `__eq__` overload"),
+            "unexpected: {}",
+            e
+        );
+    }
+
+    /// ordered comparisons without __lt__: diagnostic too
+    #[test]
+    fn class_lt_without_overload_diag() {
+        let src = r#"
+            class Plain {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                print(Plain() < Plain());
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("class `<` without overload accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a `__lt__` overload"),
+            "unexpected: {}",
+            e
+        );
+    }
+
+    /// with the overload present the dispatch path is unchanged; int/str
+    /// word comparisons never reach the new diagnostic
+    #[test]
+    fn compare_overloads_and_builtin_words_ok() {
+        let src = r#"
+            class Num {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+                func __eq__(other: Num): bool { return this.v == other.v; }
+                func __ne__(other: Num): bool { return this.v != other.v; }
+                func __lt__(other: Num): bool { return this.v < other.v; }
+            }
+            func main(): unit {
+                print(Num(1) == Num(1));
+                print(Num(1) != Num(2));
+                print(Num(1) < Num(2));
+                print(7 == 7);
+                print(7 < 8);
+                print("aa" == "aa");
+            }
+        "#;
+        run_src(src, "main").unwrap();
     }
 }

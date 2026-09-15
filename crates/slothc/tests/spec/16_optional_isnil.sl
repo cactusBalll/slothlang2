@@ -19,5 +19,14 @@ func main(): unit {
     report(Shape());
     print(pick(nil));           // expect: 7
     print(pick(3));             // expect: 3
+    print(3 is int);            // expect: true
+    var s = "hello";
+    if s is str {
+        print(s.len());         // expect: 5
+    } else {
+        print(0);
+    }
+    print(s is int);            // expect: false
+    print("ab" is not str);     // expect: false
 }
 

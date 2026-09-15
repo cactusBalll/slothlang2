@@ -145,6 +145,16 @@ impl ModEmitter {
             .map(|(i, t)| format!("%p{}: {}", i, t))
             .collect();
         let sigtxt = sigtxt.join(", ");
+        // entry (declared main or script): imported modules' var inits first
+        let entry_text = if entry && !self.init_mods.is_empty() {
+            let mut pre = String::new();
+            for m in self.init_mods.clone() {
+                pre.push_str(&format!("    call @sloth_{}__ginit() : () -> ()\n", m));
+            }
+            format!("{}{}", pre, entry_text)
+        } else {
+            entry_text
+        };
         if entry {
             self.out.push_str(&format!(
                 "  func.func @sloth_main({}) -> {} attributes {{llvm.emit_c_interface}} {{\n",

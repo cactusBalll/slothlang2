@@ -5,7 +5,10 @@ trait Display {
 trait Hashable {
     func __hash__(): int;
 }
-class Key impl Display, Hashable {
+trait Equatable {
+    func __eq__(other: Key): bool;
+}
+class Key impl Display, Equatable, Hashable {
     var x: int;
     func __init__(x: int) {
         this.x = x;
@@ -15,6 +18,9 @@ class Key impl Display, Hashable {
     }
     func __hash__(): int {
         return this.x;
+    }
+    func __eq__(other: Key): bool {
+        return this.x == other.x;
     }
 }
 func main(): unit {

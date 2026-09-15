@@ -343,6 +343,14 @@ impl ModEmitter {
     pub(crate) fn is_predef_trait(bound: &str) -> bool {
         matches!(bound, "Hashable" | "Equatable" | "Comparable" | "Display")
     }
+
+    /// builtin type surface names usable as `is` right side (patch #32)
+    pub(crate) fn is_builtin_type_name(n: &str) -> bool {
+        matches!(
+            n,
+            "int" | "i64" | "float" | "f64" | "str" | "bool" | "range"
+        )
+    }
 }
 
 impl ModEmitter {

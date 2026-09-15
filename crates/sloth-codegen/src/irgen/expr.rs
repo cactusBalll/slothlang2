@@ -251,6 +251,14 @@ impl ModEmitter {
                 } else if let Some((gsym, t, _)) = self.globals.get(name).cloned() {
                     let (v, _vt) = self.emit_global_read(fw, &gsym, t);
                     (v, t)
+                } else if let Some((gsym, t)) = self
+                    .fglobals
+                    .get(&format!("{}.{}", self.cur_mod, name))
+                    .cloned()
+                {
+                    // own-module global while emitting a foreign module's body
+                    let (v, _vt) = self.emit_global_read(fw, &gsym, t);
+                    (v, t)
                 } else {
                     self.err(&e.pos, format!("unknown identifier `{}`", name));
                     (String::new(), self.r.mk(Ty::Unit))
@@ -287,6 +295,35 @@ impl ModEmitter {
                 }
                 // class membership test via static ancestor chain of cls ids
                 if let ExprNode::Ident(cn) = &rhs.node {
+                    // patch #32: builtin type surfaces (`is str` / `is int` /
+                    // ...) — static word-class compare, const true/false
+                    if self.class_ids.get(cn).is_none() && Self::is_builtin_type_name(cn) {
+                        if self.is_float(lt) {
+                            self.err(&e.pos, "`is` on float is unsupported".to_string());
+                            return (String::new(), self.r.mk(Ty::Unit));
+                        }
+                        // unwrap option layers for the word surface
+                        let mut wt = self.r.get(lt).clone();
+                        while let Ty::Opt(inner) = wt {
+                            wt = self.r.get(inner).clone();
+                        }
+                        let matches = match (&wt, cn.as_str()) {
+                            (Ty::I64, "int") | (Ty::I64, "i64") => true,
+                            (Ty::F64, "float") | (Ty::F64, "f64") => true,
+                            (Ty::Str, "str") => true,
+                            (Ty::Bool, "bool") => true,
+                            (Ty::Range, "range") => true,
+                            _ => false,
+                        };
+                        let hit = if matches { !*negated } else { *negated };
+                        let c = fw.v();
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            c,
+                            if hit { 1i64 } else { 0i64 }
+                        ));
+                        return (c, self.r.mk(Ty::Bool));
+                    }
                     if self.class_ids.get(cn).is_none() {
                         self.err(&e.pos, format!("`is` type `{}` not a known class", cn));
                         return (String::new(), self.r.mk(Ty::Unit));
@@ -566,6 +603,7 @@ impl ModEmitter {
         bt: TyId,
         pos: &Pos,
     ) -> (String, TyId) {
+        let cmp_ty_id = self.r.mk(Ty::Bool);
         // operator overload: comparison family dispatches __gt__/__eq__ etc
         // on a class receiver (a < b ≡ a.__lt__(b)); result is the method's
         // own type (conventionally bool). No overload keeps the numeric path.
@@ -574,25 +612,38 @@ impl ModEmitter {
             BinOp::EqEq | BinOp::NotEq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
         ) {
             if let Ty::Named(cls, _) = self.r.get(at).clone() {
-                let oname = match op {
-                    BinOp::EqEq => "__eq__",
-                    BinOp::NotEq => "__ne__",
-                    BinOp::Lt => "__lt__",
-                    BinOp::Le => "__le__",
-                    BinOp::Gt => "__gt__",
-                    BinOp::Ge => "__ge__",
-                    _ => unreachable!(),
-                };
-                if let Some((defcls, fd)) = self.find_method(&cls, oname) {
-                    let oargv = vec![(a.clone(), at), (b.clone(), bt)];
-                    let osig = vec![mlir_word_ty(at, &self.r), mlir_word_ty(bt, &self.r)];
-                    return self
-                        .emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, pos);
+            let oname = match op {
+                BinOp::EqEq => "__eq__",
+                BinOp::NotEq => "__ne__",
+                BinOp::Lt => "__lt__",
+                BinOp::Le => "__le__",
+                BinOp::Gt => "__gt__",
+                BinOp::Ge => "__ge__",
+                _ => unreachable!(),
+            };
+            if let Some((defcls, fd)) = self.find_method(&cls, oname) {
+                let oargv = vec![(a.clone(), at), (b.clone(), bt)];
+                let osig = vec![mlir_word_ty(at, &self.r), mlir_word_ty(bt, &self.r)];
+                return self
+                    .emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, pos);
+            }
+            // patch #33: no overload on class surfaces -> never silently
+            // degrade to word compare (cmpi/cmpf pointer identity)
+            if let Ty::Named(bc, _) = self.r.get(bt).clone() {
+                if self.class_ids.get(&bc).is_some() || self.class_ids.get(&cls).is_some() {
+                    self.err(
+                        pos,
+                        format!(
+                            "comparison `{:?}` on classes `{}` and `{}` requires a `{}` overload",
+                            op, cls, bc, oname
+                        ),
+                    );
+                    return (String::new(), cmp_ty_id);
                 }
+            }
             }
         }
         let fl = self.is_float(at) || self.is_float(bt);
-        let cmp_ty_id = self.r.mk(Ty::Bool);
         if fl {
             let pred = match op {
                 BinOp::EqEq => "oeq",
