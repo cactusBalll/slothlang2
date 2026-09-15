@@ -812,6 +812,121 @@ impl ModEmitter {
         )
     }
 
+    /// structural surface compatibility (patch #22): equal-by-interning,
+    /// nil (word 0) into anything, Opt target lenient (word view), dyn
+    /// target accepts concrete class instances, element-wise arrays/maps.
+    fn surface_compat(&self, a: &Ty, b: &Ty) -> bool {
+        if a == b {
+            return true;
+        }
+        match (a, b) {
+            (_, Ty::Unit) => true,
+            (Ty::Opt(..), _) => true,
+            (Ty::Dyn(_), Ty::Named(..)) => true,
+            (Ty::Array(x), Ty::Array(y)) => {
+                self.surface_compat(self.r.get(*x), self.r.get(*y))
+            }
+            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
+                self.surface_compat(self.r.get(*k1), self.r.get(*k2))
+                    && self.surface_compat(self.r.get(*v1), self.r.get(*v2))
+            }
+            (Ty::Named(p, _), Ty::Named(c, _)) => {
+                // same mangled instance name covers Result_int_str([args] vs []),
+                // else subclass-targets-superclass chain
+                if p == c {
+                    true
+                } else {
+                    self.class_chain_has(c, p)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// does the superclass chain of `cls` include `base`? (is-a ranking)
+    fn class_chain_has(&self, cls: &str, target: &str) -> bool {
+        let mut cur = Some(cls.to_string());
+        while let Some(c) = cur {
+            if c == target {
+                return true;
+            }
+            match self.classes.get(&c) {
+                Some(ci) => cur = ci.superclass.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// diagnostic-friendly surface name: composites spill their element kinds
+    fn surface_name(&self, t: &Ty) -> String {
+        match t {
+            Ty::Array(e) => {
+                format!("Array<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
+            }
+            Ty::Map(k, v) => {
+                format!(
+                    "Map<{}, {}>",
+                    sloth_frontend::ty::ty_name(self.r.get(*k)),
+                    sloth_frontend::ty::ty_name(self.r.get(*v))
+                )
+            }
+            other => sloth_frontend::ty::ty_name(other),
+        }
+    }
+
+    /// plain-name assignment checked against the declared/inferred surface
+    /// type recorded at declare time (patch #22): float target promotes int
+    /// words; float value into non-float target diagnosed; structurally
+    /// different i64-word surfaces (int/str/bool/class/array/map) diagnosed;
+    /// nil (word 0) accepted into any non-float target.
+    fn check_named_assign(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        dt: TyId,
+        v: &str,
+        vty: TyId,
+        pos: &Pos,
+    ) {
+        if self.is_float(dt) {
+            if self.is_float(vty) {
+                fw.assign(name, v, true);
+            } else {
+                let cv = fw.v();
+                fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                fw.assign(name, &cv, true);
+            }
+            return;
+        }
+        if self.is_float(vty) {
+            let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
+            self.err(
+                pos,
+                format!("type mismatch: cannot assign `float` to `{}` (`{}`)", dtn, name),
+            );
+            // keep IR parseable: store with the value's own float spelling
+            fw.assign(name, v, true);
+            return;
+        }
+        let dts = self.r.get(dt).clone();
+        let vts = self.r.get(vty).clone();
+        if self.surface_compat(&dts, &vts) {
+            fw.assign(name, v, false);
+        } else {
+            let dtn = self.surface_name(&dts);
+            let vtn = self.surface_name(&vts);
+            self.err(
+                pos,
+                format!(
+                    "type mismatch: cannot assign `{}` to `{}` variable `{}`",
+                    vtn, dtn, name
+                ),
+            );
+            fw.assign(name, v, false);
+        }
+    }
+
     /// does a class chain (cls + superclasses) implement trait `tr`?
     fn impl_chain_has(&self, cls: &str, tr: &str) -> bool {
         let mut cur = Some(cls.to_string());
@@ -1391,6 +1506,22 @@ impl ModEmitter {
                             self.err(&s.pos, "type mismatch: initializer is float but declared type is not".to_string());
                             (v, t)
                         } else {
+                            // declared word-surface check (patch #22):
+                            // cross-kind i64-word declarations (int/str/bool/
+                            // class/array/map) conflict structurally
+                            let dts = self.r.get(dt).clone();
+                            let vts = self.r.get(t).clone();
+                            if !self.surface_compat(&dts, &vts) {
+                                let dtn = self.surface_name(&dts);
+                                let vtn = self.surface_name(&vts);
+                                self.err(
+                                    &s.pos,
+                                    format!(
+                                        "type mismatch: initializer is `{}` but declared type is `{}`",
+                                        vtn, dtn
+                                    ),
+                                );
+                            }
                             (v, t)
                         }
                     }
@@ -1461,11 +1592,14 @@ impl ModEmitter {
                         if fw.imm_of(n) {
                             self.err(&s.pos, format!("cannot assign to immutable `{}` (declared with `let`)", n));
                         }
-                        let fl = match fw.lookup(n) {
-                            Some((_, t)) => self.is_float(t),
-                            None => false,
-                        };
-                        fw.assign(n, &v, fl);
+                        match fw.lookup(n) {
+                            Some((_, dt)) => {
+                                self.check_named_assign(fw, n, dt, &v, vty, &s.pos);
+                            }
+                            None => {
+                                fw.assign(n, &v, false);
+                            }
+                        }
                     }
                     Some(PathSeg::Index(ix)) => {
                         // a[i] = v / m[k] = v (single-index MVP)

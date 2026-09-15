@@ -1842,6 +1842,140 @@ mod irgen_p21 {
     }
 }
 
+// ---------------- patch #22: var/let surface-type assignment checks ----------------
+mod irgen_p22 {
+    use super::*;
+
+    /// var reassignment across word classes: `var x = 1; x = "s"` diagnosed
+    #[test]
+    fn var_word_class_conflict() {
+        let src = r#"
+            func main(): unit {
+                var x = 1;
+                x = 2;
+                print(x);
+                x = "s";
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("cross-word reassignment accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("cannot assign `str` to `int`"), "unexpected: {}", e);
+    }
+
+    /// annotated let with mismatched surface initialized diagnosed
+    #[test]
+    fn let_surface_init_conflict() {
+        let src = r#"
+            func main(): unit {
+                let n: int = "s";
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("mismatched let initializer accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("initializer is `str` but declared type is `int`"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// subclass instance initialized into a superclass-typed variable passes;
+    /// the same-name instance check covers `Result<int,str>` with/without args
+    #[test]
+    fn is_a_and_same_instance_ok() {
+        let src = r#"
+            class Animal {
+                func __init__(): unit { return; }
+                func who(): str { return "A"; }
+            }
+            class Bird: Animal {
+                func __init__(): unit {
+                    super.__init__();
+                    return;
+                }
+            }
+            func main(): unit {
+                let a: Animal = Bird();
+                print(a.who());
+                let r: Result<int, str> = ok(5);
+                print(r.unwrap());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// assigning a foreign class instance into a differently-typed var is not accepted
+    #[test]
+    fn cross_class_conflict() {
+        let src = r#"
+            class A { func __init__(): unit { return; } }
+            class B { func __init__(): unit { return; } }
+            func main(): unit {
+                var x = A();
+                x = B();
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("cross-class reassignment accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("type mismatch: cannot assign"), "unexpected: {}", e);
+    }
+
+    /// float target promotes int words on assignment; float value diagnosed
+    #[test]
+    fn float_var_assignment_routes() {
+        let src = r#"
+            func main(): unit {
+                var f = 0.0;
+                f = f + 5;
+                print(f);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// nil reassignment into a class-typed var passes (word 0); shape-checked arrays pass
+    #[test]
+    fn nil_and_shape_ok() {
+        let src = r#"
+            class A { func __init__(): unit { return; } }
+            func main(): unit {
+                var a: Array<int> = [1, 2];
+                a = [3];
+                print(a.len());
+                let b = A();
+                var c = A();
+                c = nil;
+                print(1);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// shape mismatch: Array<int> into Array<str> variable diagnosed
+    #[test]
+    fn array_shape_conflict() {
+        let src = r#"
+            func main(): unit {
+                var a: Array<int> = [1, 2];
+                a = ["s"];
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("array shape conflict accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("cannot assign `Array<str>` to `Array<int>`"),
+            "unexpected: {}", e
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
