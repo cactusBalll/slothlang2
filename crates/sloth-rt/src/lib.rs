@@ -773,6 +773,13 @@ pub extern "C" fn sloth_panic_noimpl(cls_id: i64) -> i64 {
     std::process::exit(1);
 }
 
+/// unwrap() on an err Result: unrecoverable, exit with diagnosis
+#[no_mangle]
+pub extern "C" fn sloth_panic_unwrap() -> i64 {
+    eprintln!("sloth panic: unwrap() on err Result");
+    std::process::exit(1);
+}
+
 #[cfg(test)]
 mod str_tests {
     #[test]

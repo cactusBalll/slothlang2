@@ -1417,22 +1417,23 @@ impl ModEmitter {
                 let _ = self.emit_expr(fw, e);
             }
             StmtNode::Let { mutable, name, ty, init } => {
-                // typed(s) ok()/err() ctor fast-path: declared Result init
-                let pre: Option<(String, TyId)> = match (&ty, &init.node) {
-                    (
-                        Some(te),
-                        ExprNode::Call { callee, args },
-                    ) if args.len() == 1
-                        && matches!(
-                            callee.node,
-                            ExprNode::Ident(ref id) if id == "ok" || id == "err",
-                        ) =>
+                // typed(s) ok()/err() ctor fast-path: Result init (annotation
+                // provides the T/E binding; absent annotation diagnosed)
+                let pre: Option<(String, TyId)> = match &init.node {
+                    ExprNode::Call { callee, args }
+                        if args.len() == 1
+                            && matches!(
+                                callee.node,
+                                ExprNode::Ident(ref id) if id == "ok" || id == "err",
+                            ) =>
                     {
-                        let dt = self.ty_of(te);
-                        let inst = match self.r.get(dt).clone() {
-                            Ty::Named(nm, _) if self.result_insts.contains(&nm) => Some(nm),
-                            _ => None,
-                        };
+                        let inst = ty.as_ref().and_then(|te| {
+                            let dt = self.ty_of(te);
+                            match self.r.get(dt).clone() {
+                                Ty::Named(nm, _) if self.result_insts.contains(&nm) => Some(nm),
+                                _ => None,
+                            }
+                        });
                         match inst {
                             Some(inst) => {
                                 let is_ok = matches!(
@@ -1442,18 +1443,13 @@ impl ModEmitter {
                                 Some(self.emit_result_ctor(fw, &inst, &args[0], is_ok, &init.pos))
                             }
                             None => {
-                                if matches!(
-                                    &callee.node,
-                                    ExprNode::Ident(ref id) if id == "ok" || id == "err",
-                                ) {
-                                    self.err(
-                                        &init.pos,
-                                        format!(
-                                            "ctor `{}` requires a declared Result target (let/var with Result<_, _>)",
-                                            if Self::init_str2(callee) == "err" { "err" } else { "ok" }
-                                        ),
-                                    );
-                                }
+                                self.err(
+                                    &init.pos,
+                                    format!(
+                                        "ctor `{}` requires a declared Result target (let/var with Result<_, _>)",
+                                        if Self::init_str2(callee) == "err" { "err" } else { "ok" }
+                                    ),
+                                );
                                 None
                             }
                         }
@@ -1796,7 +1792,45 @@ impl ModEmitter {
 
 impl ModEmitter {
     fn walk_return_value(&mut self, fw: &mut FnWalk, e: &Expr) {
-        let (v, t) = self.emit_expr(fw, e);
+        // typed ok()/err() ctor fast-path in return position (patch #23):
+        // the T/E binding comes from the function's declared Result<_ of,_>
+        // return annotation
+        let mut pre: Option<(String, TyId)> = None;
+        if let ExprNode::Call { callee, args } = &e.node {
+            if args.len() == 1
+                && matches!(
+                    callee.node,
+                    ExprNode::Ident(ref id) if id == "ok" || id == "err",
+                )
+            {
+                let inst = match self.r.get(fw.ret).clone() {
+                    Ty::Named(nm, _) if self.result_insts.contains(&nm) => Some(nm),
+                    _ => None,
+                };
+                match inst {
+                    Some(inst) => {
+                        let is_ok = matches!(
+                            &callee.node,
+                            ExprNode::Ident(ref id) if id == "ok"
+                        );
+                        pre = Some(self.emit_result_ctor(fw, &inst, &args[0], is_ok, &e.pos));
+                    }
+                    None => {
+                        self.err(
+                            &e.pos,
+                            format!(
+                                "ctor `{}` requires a declared Result target (Result<_, _> return annotation)",
+                                if Self::init_str2(callee) == "err" { "err" } else { "ok" }
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        let (v, t) = match pre {
+            Some((w, tt)) => (w, tt),
+            None => self.emit_expr(fw, e),
+        };
         let fl = self.is_float(t);
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
@@ -2917,7 +2951,8 @@ impl ModEmitter {
                             ));
                             return (r, fty2);
                         }
-                        Ty::Named(_, _) | Ty::Dyn(_) | Ty::Array(_) | Ty::Map(..) => {
+                        Ty::Named(_, _) | Ty::Dyn(_) | Ty::Array(_) | Ty::Map(..)
+                        | Ty::Bool => {
                             let r = fw.v();
                             fw.op(&format!(
                                 "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
@@ -3930,7 +3965,8 @@ impl ModEmitter {
             .any(|d| d.name == "Result" && matches!(d.node, DeclNode::Class(_)))
         {
             match sloth_frontend::parser::parse(
-                "class Result<T, E> {\n\
+                "extern func sloth_panic_unwrap(): int;\n\
+                 class Result<T, E> {\n\
                  var ok: bool = false;\n\
                  var v: T;\n\
                  var e: E;\n\
@@ -3938,6 +3974,11 @@ impl ModEmitter {
                  return this.ok;\n\
                  }\n\
                  func unwrap(): T {\n\
+                 var flag: bool = this.ok;\n\
+                 if flag {\n\
+                 return this.v;\n\
+                 }\n\
+                 { sloth_panic_unwrap(); }\n\
                  return this.v;\n\
                  }\n\
                  func err(): E {\n\

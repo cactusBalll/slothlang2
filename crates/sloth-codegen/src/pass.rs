@@ -1976,6 +1976,105 @@ mod irgen_p22 {
     }
 }
 
+// ---------------- patch #23: Result<T,E> closure (return ctors + unwrap panic) ----------------
+mod irgen_p23 {
+    use super::*;
+
+    /// ok()/err() ctors in return position inferred from the declared
+    /// Result<_, _> return annotation
+    #[test]
+    fn return_position_ctors() {
+        let src = r#"
+            func make_ok(): Result<int, str> {
+                return ok(42);
+            }
+            func make_err(): Result<int, str> {
+                return err("boom");
+            }
+            func main(): unit {
+                let a = make_ok();
+                print(a.unwrap());
+                let b = make_err();
+                print(b.err());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float payload + err(int) in return position route slots correctly
+    #[test]
+    fn return_position_slots() {
+        let src = r#"
+            func make(): Result<float, int> {
+                return ok(3.5);
+            }
+            func bad(): Result<float, int> {
+                return err(7);
+            }
+            func main(): unit {
+                let a = make();
+                print(a.unwrap() + 1.0);
+                let b = bad();
+                print(b.err());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// ok()/err() without a Result context diagnosed
+    #[test]
+    fn ctor_without_result_diag() {
+        let src = r#"
+            func main(): unit {
+                let x = ok(5);
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("untyped ok() accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a declared Result target"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// unwrap() on an err Result stops the process via the panic channel
+    /// (verified in a subprocess: exit code 1 + diagnosis on stderr)
+    #[test]
+    fn unwrap_on_err_panics() {
+        let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let exe = format!("{}/../../target/debug/slothc", md);
+        if !std::path::Path::new(&exe).exists() {
+            eprintln!("skip: slothc binary not built");
+            return;
+        }
+        let src = r#"
+            func main(): unit {
+                let r: Result<int, str> = err("boom");
+                print(r.unwrap());
+            }
+        "#;
+        let dir = std::env::temp_dir();
+        let p = dir.join("sloth_p23_unwrap.sl");
+        std::fs::write(&p, src).unwrap();
+        let out = std::process::Command::new(&exe)
+            .arg("run")
+            .arg(&p)
+            .output()
+            .expect("subprocess");
+        let stde = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "unwrap on err should have exited nonzero"
+        );
+        assert!(
+            stde.contains("unwrap() on err Result"),
+            "unexpected stderr: {}", stde
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
