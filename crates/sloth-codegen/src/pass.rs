@@ -3057,3 +3057,43 @@ mod irgen_p38 {
         run_src(src, "main").unwrap();
     }
 }
+
+// ---------------- patch #39: lambda param faces & free-call captures ----------------
+mod irgen_p39 {
+    use super::*;
+
+    /// annotated params + return annotation; calls to free functions inside
+    /// the body are looked up, not captured
+    #[test]
+    fn lambda_free_calls_and_annots() {
+        let src = r#"
+            func pick<T>(v: T): T { return v; }
+            func main(): unit {
+                let e: str = "m";
+                var gen = |x: int| -> Result<int, str> { return err(e); };
+                print(gen(1).err());     // expect: m   (capture intact, fn face ok)
+                var withT = |x: int| -> int { return pick(x); };
+                print(withT(4));         // expect: 4
+                var neg = |x: int, y: str| -> bool { return y == "x"; };
+                print(neg(1, "x"));      // expect: true
+                print(neg(2, "z"));      // expect: false
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// capture-snapshot semantics untouched: local mutation stays a copy
+    #[test]
+    fn lambda_capture_snapshot_kept() {
+        let src = r#"
+            func main(): unit {
+                var base = 10;
+                var inc = |x: int| { return x + base; };
+                print(inc(5));           // expect: 15
+                base = 99;
+                print(inc(5));           // expect: 15 (snapshot)
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}

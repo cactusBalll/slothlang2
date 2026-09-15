@@ -113,7 +113,25 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
     for u in used {
-        if !decls.contains(&u) && !me.globals.contains_key(&u) && got.insert(u.clone()) {
+        // only true identifiers count as captures: not a declared call target
+        // (builtin face or module funcs) and not already bound (patch #39)
+        let callee_like = matches!(
+            u.as_str(),
+            "ok" | "err"
+                | "print"
+                | "len"
+                | "keys"
+                | "values"
+                | "str"
+                | "int"
+                | "float"
+                | "bool"
+                | "range"
+        ) || me.funcs.contains_key(&u)
+            || me.cross_funcs.contains_key(&u)
+            || me.class_defs.contains_key(&u);
+        if !decls.contains(&u) && !me.globals.contains_key(&u) && !callee_like && got.insert(u.clone())
+        {
             out.push(u);
         }
     }
