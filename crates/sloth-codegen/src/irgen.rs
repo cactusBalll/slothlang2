@@ -20,6 +20,63 @@ fn words_scalar(t: &Ty) -> usize {
     }
 }
 
+// patch #25: scan an expression/stmt tree for a `super.__init__(...)` call
+fn expr_is_super_init(e: &Expr) -> bool {
+    match &e.node {
+        ExprNode::Field { obj, name } => name == "__init__" && matches!(obj.node, ExprNode::Super),
+        _ => false,
+    }
+}
+
+fn expr_has_super_init(e: &Expr) -> bool {
+    if expr_is_super_init(e) {
+        return true;
+    }
+    match &e.node {
+        ExprNode::Call { callee, args }
+        | ExprNode::GenCall { callee, args, .. } => {
+            expr_has_super_init(callee) || args.iter().any(expr_has_super_init)
+        }
+        ExprNode::Field { obj, .. } => expr_has_super_init(obj),
+        ExprNode::Index { obj, idx } => expr_has_super_init(obj) || expr_has_super_init(idx),
+        ExprNode::Un { expr, .. } => expr_has_super_init(expr),
+        ExprNode::Arith { lhs, rhs, .. } | ExprNode::Bin { lhs, rhs, .. } => {
+            expr_has_super_init(lhs) || expr_has_super_init(rhs)
+        }
+        ExprNode::Elvis { lhs, rhs } => expr_has_super_init(lhs) || expr_has_super_init(rhs),
+        ExprNode::Pipe { lhs, rhs } => expr_has_super_init(lhs) || expr_has_super_init(rhs),
+        ExprNode::Is { lhs, rhs, .. } => expr_has_super_init(lhs) || expr_has_super_init(rhs),
+        ExprNode::List(xs) => xs.iter().any(expr_has_super_init),
+        ExprNode::Map(pairs) => pairs
+            .iter()
+            .any(|(k, v)| expr_has_super_init(k) || expr_has_super_init(v)),
+        _ => false,
+    }
+}
+
+fn stmt_has_super_init(s: &Stmt) -> bool {
+    match &s.node {
+        StmtNode::Expr(e) => expr_has_super_init(e),
+        StmtNode::Assign { value, .. } => expr_has_super_init(value),
+        StmtNode::Let { init, .. } => expr_has_super_init(init),
+        StmtNode::If { cond, then_, else_ } => {
+            expr_has_super_init(cond)
+                || stmt_has_super_init(then_)
+                || else_.as_deref().map(stmt_has_super_init).unwrap_or(false)
+        }
+        StmtNode::While { cond, body } => {
+            expr_has_super_init(cond) || stmt_has_super_init(body)
+        }
+        StmtNode::For { iter, body, .. } => {
+            expr_has_super_init(iter) || stmt_has_super_init(body)
+        }
+        StmtNode::Return(Some(e)) => expr_has_super_init(e),
+        StmtNode::Block(ss) => ss.iter().any(stmt_has_super_init),
+        _ => false,
+    }
+}
+
+
 // ---------------- module emitter ----------------
 
 pub struct ModEmitter {
@@ -1092,6 +1149,30 @@ impl ModEmitter {
                 self.check_impls(&d.name, &eff, &d.pos);
             }
         }
+        // class ctor discipline (patch #25): a subclass ctor must invoke
+        // super.__init__ (anywhere in its body)
+        for d in &prog.decls {
+            if let DeclNode::Class(c) = &d.node {
+                if c.superclass.is_none() {
+                    continue;
+                }
+                let init = self
+                    .classes
+                    .get(&d.name)
+                    .and_then(|ci| ci.methods.iter().find(|(n, _)| n == "__init__"))
+                    .map(|(_, fd)| fd.clone());
+                let has = init
+                    .as_ref()
+                    .map(|fd| stmt_has_super_init(&fd.body))
+                    .unwrap_or(true); // no declared ctor: inherited surface, not enforced
+                if !has {
+                    self.err(
+                        &d.pos,
+                        "constructor of `{}` must call super.__init__".to_string().replace("{}", &d.name),
+                    );
+                }
+            }
+        }
     }
 
     /// check a class's declared traits: known + every method satisfied
@@ -1903,7 +1984,13 @@ impl ModEmitter {
             self.err(pos, "unreachable code".to_string());
             return;
         }
-        let (c, _ct) = self.emit_expr(fw, cond);
+        let (c, ct) = self.emit_expr(fw, cond);
+        // conditional surfaces take no implicit truthy conversion (§2.1):
+        // only a real bool tests
+        if self.r.get(ct) != &Ty::Bool {
+            let tn = sloth_frontend::ty::ty_name(self.r.get(ct));
+            self.err(pos, format!("condition must be `bool` (no implicit truthy conversion from `{}`)", tn));
+        }
         let narrow = if self.diags.is_empty() {
             self.narrow_pattern(fw, cond)
         } else {
@@ -1949,7 +2036,11 @@ impl ModEmitter {
         let done = fw.newlabel("wd");
         fw.jump(&head);
         fw.label(&head);
-        let (c, _ct) = self.emit_expr(fw, cond);
+        let (c, ct) = self.emit_expr(fw, cond);
+        if self.r.get(ct) != &Ty::Bool {
+            let tn = sloth_frontend::ty::ty_name(self.r.get(ct));
+            self.err(pos, format!("condition must be `bool` (no implicit truthy conversion from `{}`)", tn));
+        }
         fw.cjump(&c, &doo, &done);
         fw.label(&doo);
         fw.loops.push((done.clone(), head.clone()));
@@ -2570,7 +2661,7 @@ impl ModEmitter {
                     } else {
                         c1
                     };
-                    return (r, self.r.mk(Ty::I64));
+                    return (r, self.r.mk(Ty::Bool));
                 }
                 // class membership test via static ancestor chain of cls ids
                 if let ExprNode::Ident(cn) = &rhs.node {
@@ -2581,6 +2672,23 @@ impl ModEmitter {
                     if self.is_float(lt) {
                         self.err(&e.pos, "`is` on float is unsupported".to_string());
                         return (String::new(), self.r.mk(Ty::Unit));
+                    }
+                    // comparability (patch #25): both sides must share a class
+                    // chain relation (C is D / D is C)
+                    if let Ty::Named(lc, _) = self.r.get(lt).clone() {
+                        if &lc != cn
+                            && !self.class_chain_has(&lc, cn)
+                            && !self.class_chain_has(cn, &lc)
+                        {
+                            self.err(
+                                &e.pos,
+                                format!(
+                                    "types `{}` and `{}` have no class relation for `is`",
+                                    lc, cn
+                                ),
+                            );
+                            return (String::new(), self.r.mk(Ty::Unit));
+                        }
                     }
                     // membership set: cn and every class whose ancestor chain reaches cn
                     let mut idsv: Vec<i64> = Vec::new();

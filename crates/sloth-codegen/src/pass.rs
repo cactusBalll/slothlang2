@@ -2151,6 +2151,143 @@ mod irgen_p24 {
     }
 }
 
+// ---------------- patch #25: ctor discipline + bool conds + is comparability ----------------
+mod irgen_p25 {
+    use super::*;
+
+    /// subclass ctor without super.__init__: diagnosed
+    #[test]
+    fn ctor_missing_super_diag() {
+        let src = r#"
+            class Animal {
+                func __init__(): unit { return; }
+            }
+            class Dog: Animal {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                let d = Dog();
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("ctor without super.__init__ accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("constructor of `Dog` must call super.__init__"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// ctor calling super.__init__ passes (nested statement forms included)
+    #[test]
+    fn ctor_super_call_ok() {
+        let src = r#"
+            class Animal {
+                var tag: int;
+                func __init__(): unit { this.tag = 0; return; }
+            }
+            class Dog: Animal {
+                func __init__(): unit {
+                    var c = 1;
+                    if c > 0 {
+                        {
+                            super.__init__();
+                        }
+                    }
+                    return;
+                }
+            }
+            func main(): unit {
+                let d = Dog();
+                print(1);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// if/while conditions reject implicit truthy conversions
+    #[test]
+    fn non_bool_cond_diag() {
+        let src = r#"
+            func main(): unit {
+                var n = 3;
+                while n {
+                    n = n - 1;
+                }
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("int while condition accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("condition must be `bool`"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// bool conditions (incl. chained comparisons) keep working
+    #[test]
+    fn bool_cond_ok() {
+        let src = r#"
+            func main(): unit {
+                var n = 3;
+                while n > 0 {
+                    n = n - 1;
+                }
+                if n == 0 {
+                    print(1);
+                } else {
+                    print(0);
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// unrelated class `is` test: diagnosed both ways
+    #[test]
+    fn is_incomparable_diag() {
+        let src = r#"
+            class A { func __init__(): unit { return; } }
+            class B { func __init__(): unit { return; } }
+            func main(): unit {
+                let a = A();
+                if a is B {
+                    print(1);
+                }
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("unrelated `is` accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("no class relation for `is`"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// subclass/parent `is` tests flow normally
+    #[test]
+    fn is_comparable_ok() {
+        let src = r#"
+            class Animal { func __init__(): unit { return; } }
+            class Dog: Animal { func __init__(): unit { super.__init__(); return; } }
+            func main(): unit {
+                let a = Dog();
+                if a is Animal {
+                    print(a is Dog);
+                } else {
+                    print(0);
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
