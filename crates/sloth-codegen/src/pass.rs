@@ -937,6 +937,60 @@ mod irgen_p10 {
     }
 }
 
+// ---------------- patch #11: variadic function bodies ----------------
+mod irgen_p11 {
+    use super::*;
+
+    /// variadic param binds inside the body as a real Array<int>; mixed with a
+    /// fixed leading parameter and callable with zero extra args
+    #[test]
+    fn variadic_body_binding() {
+        let src = r#"
+            func add_all(base: int, xs...: Array<int>): int {
+                var s = base;
+                for (var x: xs) {
+                    s = s + x;
+                }
+                return s;
+            }
+            func only(xs...: Array<int>): int {
+                var s = 0;
+                for (var x: xs) { s = s + x; }
+                return s;
+            }
+            print(add_all(100, 1, 2, 3));
+            print(add_all(5));
+            print(only(4, 5, 6));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float elem kind: int extras are promoted, float extras pass through
+    #[test]
+    fn variadic_float_elems() {
+        let src = r#"
+            func stats(xs...: Array<float>): float {
+                var s = 0.0;
+                for (var x: xs) { s = s + x; }
+                return s;
+            }
+            print(stats(1, 2.5, 3));
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float arg into an int-elem variadic is a diagnostic
+    #[test]
+    fn variadic_kind_mismatch_diag() {
+        let src = "func f(xs...: Array<int>): unit { print(1); }\nfunc main(): unit { f(2.5); }\n";
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("float into int variadic accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("variadic argument is float"), "unexpected: {}", e);
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

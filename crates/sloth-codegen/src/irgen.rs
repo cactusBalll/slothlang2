@@ -1580,7 +1580,10 @@ impl ModEmitter {
             }
             ExprNode::Float(v) => {
                 let r = fw.v();
-                let s = format!("{}", v);
+                let mut s = format!("{}", v);
+                if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("nan") {
+                    s.push_str(".0");
+                }
                 let t = self.r.mk(Ty::F64);
                 fw.op(&format!("    {} = arith.constant {} : f64", r, s));
                 (r, t)
@@ -2478,11 +2481,43 @@ impl ModEmitter {
             }
         }        // direct function call
         if let Some(fd) = self.funcs.get(&name).cloned() {
-            let plan = self.plan_func(&name, None, &fd, None);
+            let variadic = fd.variadic.clone();
+            let plan = self.plan_func(&name, None, &fd, variadic.as_ref());
             let r = fw.v();
             let sym = plan.mangled.clone();
-            let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
-            let tys = sigargs.join(", ");
+            let (mut vals, tys) = match &variadic {
+                Some(vd) => {
+                    // extra args pack into one Array<T> word; the declared elem
+                    // kind decides the slot route (int extras sitofp to f64)
+                    let elty = self.ty_of(&vd.elem);
+                    let fels = self.is_float(elty);
+                    let fixed = plan.params.len() - 1;
+                    let mut vals: Vec<String> = argv[..fixed].iter().map(|x| x.0.clone()).collect();
+                    let mut sigs: Vec<String> =
+                        argv[..fixed].iter().map(|x| mlir_word_ty(x.1, &self.r)).collect();
+                    let mut pv: Vec<String> = Vec::new();
+                    for (v, t) in &argv[fixed.min(argv.len())..] {
+                        if fels && !self.is_float(*t) {
+                            let cv = fw.v();
+                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                            pv.push(cv);
+                        } else if !fels && self.is_float(*t) {
+                            self.err(pos, "type mismatch: variadic argument is float but elem type is not".to_string());
+                            pv.push(v.clone());
+                        } else {
+                            pv.push(v.clone());
+                        }
+                    }
+                    let packed = self.pack_variadic(fw, fels, &pv);
+                    vals.push(packed);
+                    sigs.push("i64".to_string());
+                    (vals, sigs.join(", "))
+                }
+                None => (
+                    argv.iter().map(|x| x.0.clone()).collect(),
+                    sigargs.join(", "),
+                ),
+            };
             let rt = mlir_ret_ty(self, plan.ret);
             if self.is_unit(plan.ret) {
                 fw.op(&format!(
@@ -2623,6 +2658,32 @@ impl ModEmitter {
     }
 }
 
+impl ModEmitter {
+    /// build one fresh Array<T> word from already-coerced words (variadic pack)
+    fn pack_variadic(&mut self, fw: &mut FnWalk, fels: bool, vals: &[String]) -> String {
+        let n = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", n, vals.len()));
+        let arr = fw.v();
+        fw.op(&format!("    {} = call @sloth_arr_new({}) : (i64) -> i64", arr, n));
+        for (i, v) in vals.iter().enumerate() {
+            let zi = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", zi, i));
+            if fels {
+                fw.op(&format!(
+                    "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
+                    arr, zi, v
+                ));
+            } else {
+                fw.op(&format!(
+                    "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                    arr, zi, v
+                ));
+            }
+        }
+        arr
+    }
+}
+
 // ---------------- module driver ----------------
 
 /// external runtime symbols used by generated code
@@ -2702,7 +2763,7 @@ impl ModEmitter {
         for d in &prog.decls {
             if let DeclNode::Func(f) = &d.node {
                 let entry = d.name == "main";
-                self.emit_func(&d.name, None, f, None, entry);
+                self.emit_func(&d.name, None, f, f.variadic.as_ref(), entry);
             }
         }
         // 1b) classes: emit methods + ctor
