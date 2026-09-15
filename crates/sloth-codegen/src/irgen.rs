@@ -814,6 +814,29 @@ impl ModEmitter {
                             .insert((defcls.clone(), m.name.clone()));
                     }
                     None => {
+                        // default body: synthesize the method on the class
+                        if let Some(dbody) = &m.body {
+                            let fd = FuncDef {
+                                type_params: Vec::new(),
+                                params: m.params.clone(),
+                                variadic: None,
+                                ret: Some(m.ret.clone()),
+                                body: dbody.clone(),
+                                is_extern: false,
+                            };
+                            let ci = match self.classes.get_mut(cls) {
+                                Some(c) => c,
+                                None => {
+                                    self.err(pos, format!("trait `{}` impl on missing class `{}`", tr, cls));
+                                    continue;
+                                }
+                            };
+                            ci.methods.push((m.name.clone(), fd));
+                            // synthesized body must be vtable-addressable
+                            self.llvm_method.insert((cls.to_string(), m.name.clone()));
+                            _ = dbody;
+                            continue;
+                        }
                         self.err(
                             pos,
                             format!("trait `{}` method `{}` not implemented by `{}`", tr, m.name, cls),
@@ -3294,11 +3317,15 @@ impl ModEmitter {
                 self.emit_func(&d.name, None, f, f.variadic.as_ref(), entry);
             }
         }
-        // 1b) classes: emit methods + ctor
+        // 1b) classes: emit methods + ctor (incl. trait-synthesized defaults)
         for d in &prog.decls {
-            if let DeclNode::Class(c) = &d.node {
-                for m in &c.methods {
-                    self.emit_func(&m.name, Some(&d.name), &m.fd, None, false);
+            if let DeclNode::Class(_) = &d.node {
+                let meths = match self.classes.get(&d.name) {
+                    Some(ci) => ci.methods.clone(),
+                    None => Vec::new(),
+                };
+                for (mname, fd) in meths {
+                    self.emit_func(&mname, Some(&d.name), &fd, None, false);
                 }
             }
         }

@@ -490,8 +490,23 @@ impl Parser {
             }
             self.expect(Tok::Colon, "':' return type")?;
             let ret = self.ty()?;
-            self.expect(Tok::Semi, "';'")?;
-            methods.push(MethodSig { name: mname, params, ret });
+            // default body: `{...}` instead of `;`
+            let body = if self.eat(Tok::LBrace) {
+                let mut out = Vec::new();
+                while !matches!(self.peek(), Some(Tok::RBrace)) {
+                    if self.peek().is_none() {
+                        return Err(self.err("unexpected EOF in trait default body"));
+                    }
+                    out.push(self.stmt()?);
+                }
+                self.ptr += 1;
+                let bpos = self.pos();
+                Some(Box::new(Stmt { node: StmtNode::Block(out), pos: bpos }))
+            } else {
+                self.expect(Tok::Semi, "';'")?;
+                None
+            };
+            methods.push(MethodSig { name: mname, params, ret, body });
         }
         self.ptr += 1; // eat }
         Ok(Decl {

@@ -118,6 +118,8 @@ pub struct MethodSig {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Type,
+    /// default method body (optional)
+    pub body: Option<Box<Stmt>>,
 }
 
 // ---------------- Types ----------------

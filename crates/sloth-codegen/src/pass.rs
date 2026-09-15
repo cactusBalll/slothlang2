@@ -1425,6 +1425,69 @@ mod irgen_p17 {
     }
 }
 
+// ---------------- patch #18a: trait default method bodies ----------------
+mod irgen_p18a {
+    use super::*;
+
+    /// default bodies synthesize onto impl-missing classes; overrides win
+    #[test]
+    fn trait_default_body_synthesis() {
+        let src = r#"
+            trait Hello {
+                func greet(): unit {
+                    print("hi\n");
+                    return;
+                }
+            }
+            class A impl Hello {
+                func greet(): unit {
+                    print("A\n");
+                    return;
+                }
+            }
+            class B impl Hello {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                let a = A();
+                let b = B();
+                a.greet();
+                b.greet();
+                let l: Array<dyn Hello> = [a, b];
+                for (var x: l) { x.greet(); }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// default body with params + return word dispatches through the trait
+    #[test]
+    fn trait_default_body_params() {
+        let src = r#"
+            trait Eq {
+                func eq(r: int): int {
+                    var me = 1;
+                    print(me);
+                    return r;
+                }
+            }
+            class Wrap impl Eq {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                let w = Wrap();
+                print(w.eq(7));
+                let l: Array<dyn Eq> = [w];
+                for (var q: l) {
+                    print(q.eq(7) + 100);
+                }
+            }
+        "#;
+        // class without eq uses the default body; dyn dispatch ABI-checked
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
