@@ -1287,6 +1287,107 @@ mod irgen_p15 {
     }
 }
 
+// ---------------- patch #16: Iterator/Iterable protocol ----------------
+mod irgen_p16 {
+    use super::*;
+
+    /// custom class with iter()/next() drives for over its payload
+    #[test]
+    fn iterator_protocol_class() {
+        let src = r#"
+            class Queue {
+                var data: Array<int> = [];
+                var pos: int = 0;
+                func push(v: int): unit {
+                    this.data.push(v);
+                    return;
+                }
+                func iter(): Queue {
+                    return this;
+                }
+                func next(): int? {
+                    if (this.pos >= this.data.len()) {
+                        return nil;
+                    }
+                    var v = this.data[this.pos];
+                    this.pos = this.pos + 1;
+                    return v;
+                }
+            }
+            func main(): unit {
+                let q = Queue();
+                q.push(10);
+                q.push(20);
+                q.push(30);
+                var s: int = 0;
+                for (var x: q) {
+                    print(x);
+                    s = s + x;
+                }
+                print(s);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// str iteration yields 1-char strings
+    #[test]
+    fn str_iter_per_char() {
+        let src = r#"
+            func main(): unit {
+                let s: str = "ab";
+                var n: int = 0;
+                for (var c: s) {
+                    n = n + 1;
+                    print(c);
+                }
+                print(n);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// map key iteration still goes through the keys() route
+    #[test]
+    fn map_for_keys_route_kept() {
+        let src = r#"
+            func main(): unit {
+                let m: Map<int, int> = @(1: 11, 2: 22);
+                var t: int = 0;
+                for (var k: m) {
+                    t = t + k;
+                }
+                print(t);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// for over a class without next/iter refuses diagnostically
+    #[test]
+    fn iterator_protocol_missing_diag() {
+        let src = r#"
+            class Plain {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                let p = Plain();
+                for (var x: p) {
+                    print(x);
+                }
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("iterator protocolless class accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("has no `next()`"),
+            "unexpected: {}", e
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

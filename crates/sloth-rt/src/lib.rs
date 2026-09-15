@@ -124,6 +124,22 @@ pub extern "C" fn sloth_str_len(p: i64) -> i64 {
     unsafe { (*(p as *mut StrT)).len as i64 }
 }
 
+/// single-character string for iteration: `for (var c: "str")`
+#[no_mangle]
+pub extern "C" fn sloth_str_char(s: i64, i: i64) -> i64 {
+    unsafe {
+        let td = s as *mut StrT;
+        let b = *(((*td).data as *const u8).offset(i as isize)) as u8;
+        let t = sloth_gc_alloc(std::mem::size_of::<StrT>() + 2) as *mut StrT;
+        let dat = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
+        *(dat as *mut u8) = b;
+        libc::memset((dat as *mut libc::c_char).offset(1) as *mut libc::c_void, 0, 1);
+        (*t).len = 1;
+        (*t).data = dat;
+        t as i64
+    }
+}
+
 
 unsafe fn strb_append(p: *mut StrB, src: *const libc::c_void, n: usize) {
     if (*p).cap < (*p).len + n {
@@ -742,6 +758,24 @@ pub extern "C" fn sloth_panic_noimpl(cls_id: i64) -> i64 {
         cls_id
     );
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod str_tests {
+    #[test]
+    fn str_char_roundtrip() {
+        unsafe {
+            let s = crate::sloth_str_intern("ab\0".as_ptr() as i64, 2);
+            assert_eq!(crate::sloth_str_len(s), 2, "interned len");
+            for (i, want) in (0..2).zip([b'a', b'b']) {
+                let c = crate::sloth_str_char(s, i);
+                assert_eq!(crate::sloth_str_len(c), 1, "char len @{}", i);
+                let td = c as *mut crate::StrT;
+                let b = *(((*td).data as *const u8));
+                assert_eq!(b, want, "char @{}", i);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

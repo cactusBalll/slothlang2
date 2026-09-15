@@ -94,6 +94,15 @@ pub struct ClassInfo {
     pub impls: Vec<String>,
 }
 
+/// for-in index loop element kinds
+#[derive(Clone, Copy, PartialEq)]
+enum IdxKind {
+    /// array word backed by sloth_arr_len + sloth_arr_get(_f64)
+    Arr,
+    /// interned string: sloth_str_len + sloth_str_char returns Str words
+    StrChar,
+}
+
 impl ModEmitter {
     pub fn new(name: &str) -> ModEmitter {
         ModEmitter {
@@ -1487,11 +1496,10 @@ impl ModEmitter {
                 // array/map iteration: for x in arr|map { ... } with a slotted counter
                 let (mav, at) = self.emit_expr(fw, iter);
                 let ats = self.r.get(at).clone();
-                let av;
-                let el = match &ats {
+                match &ats {
                     Ty::Array(e) => {
-                        av = mav;
-                        *e
+                        self.emit_index_loop(fw, var, body, mav, *e, IdxKind::Arr, pos);
+                        return;
                     }
                     // map iteration MVP: for-in yields the key set (Array<K> route)
                     Ty::Map(k, _v) => {
@@ -1500,102 +1508,215 @@ impl ModEmitter {
                             "    {} = call @sloth_map_keys({}) : (i64) -> i64",
                             ks, mav
                         ));
-                        av = ks;
-                        *k
+                        self.emit_index_loop(fw, var, body, ks, *k, IdxKind::Arr, pos);
+                        return;
+                    }
+                    // str iteration: per-char 1-byte strings
+                    Ty::Str => {
+                        { let et = self.r.mk(Ty::Str); self.emit_index_loop(fw, var, body, mav, et, IdxKind::StrChar, pos); }
+                        return;
+                    }
+                    // iterator protocol: iterator object (or iter())/next() -> Opt<el>
+                    Ty::Named(c, _) => {
+                        self.emit_proto_loop(fw, var, body, mav.clone(), at.clone(), pos);
+                        return;
                     }
                     _ => {
-                        self.err(pos, "for-iteration requires a range, array or map".to_string());
+                        self.err(pos, "for-iteration requires a range, array, map, string, array-backed or iterator value".to_string());
                         return;
                     }
                 };
-                let lenv = fw.v();
-                fw.op(&format!(
-                    "    {} = call @sloth_arr_len({}) : (i64) -> i64",
-                    lenv, av
-                ));
-                fw.push_scope();
-                let islot = fw.v();
-                let z = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", z));
-                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
-                let zi2 = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", zi2));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    zi2, islot, z
-                ));
-                let head = fw.newlabel("af");
-                let doo = fw.newlabel("ab");
-                let done = fw.newlabel("ae");
-                fw.jump(&head);
-                fw.label(&head);
-                let iv = fw.v();
-                fw.op(&format!(
-                    "    {} = memref.load {}[{}] : memref<1xi64>",
-                    iv, islot, z
-                ));
-                let c = fw.v();
-                fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, lenv));
-                let c1 = fw.v();
-                fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
-                fw.cjump(&c1, &doo, &done);
-                fw.label(&doo);
-                fw.loops.push((done.clone(), head.clone()));
-                // loop var = arr[i]
-                let gtv: String;
-                let gety;
-                if self.is_float(el) {
-                    let f = fw.v();
-                    fw.op(&format!(
-                        "    {} = call @sloth_arr_get_f64({}, {}) : (i64, i64) -> f64",
-                        f, av, iv
-                    ));
-                    gtv = f;
-                    gety = el;
-                } else {
-                    let f = fw.v();
-                    fw.op(&format!(
-                        "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
-                        f, av, iv
-                    ));
-                    gtv = f;
-                    gety = el;
-                }
-                let vs = fw.v();
-                if self.is_float(gety) {
-                    fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
-                    fw.op(&format!(
-                        "    memref.store {}, {}[{}] : memref<1xf64>",
-                        gtv, vs, z
-                    ));
-                } else {
-                    fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
-                    fw.op(&format!(
-                        "    memref.store {}, {}[{}] : memref<1xi64>",
-                        gtv, vs, z
-                    ));
-                }
-                fw.scopes
-                    .last_mut()
-                    .unwrap()
-                    .insert(var.to_string(), (vs, gety));
-                self.walk_body(fw, body);
-                fw.loops.pop();
-                // idx += 1
-                let one2 = fw.v();
-                fw.op(&format!("    {} = arith.constant 1 : i64", one2));
-                let nx = fw.v();
-                fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    nx, islot, z
-                ));
-                fw.jump(&head);
-                fw.label(&done);
-                fw.pop_scope();
             }
         }
     }
+
+    fn emit_index_loop(
+            &mut self,
+            fw: &mut FnWalk,
+            var: &str,
+            body: &Stmt,
+            arr: String,
+            el: TyId,
+            kind: IdxKind,
+            pos: &Pos,
+        ) {
+            let (countfn, getfn, getty) = match kind {
+                IdxKind::Arr => {
+                    if self.is_float(el) {
+                        ("sloth_arr_len", "sloth_arr_get_f64", "(i64, i64) -> f64")
+                    } else {
+                        ("sloth_arr_len", "sloth_arr_get", "(i64, i64) -> i64")
+                    }
+                }
+                IdxKind::StrChar => ("sloth_str_len", "sloth_str_char", "(i64, i64) -> i64"),
+            };
+            let lenv = fw.v();
+            fw.op(&format!("    {} = call @{}({}) : (i64) -> i64", lenv, countfn, arr));
+            fw.push_scope();
+            let islot = fw.v();
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
+            let zi2 = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", zi2));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                zi2, islot, z
+            ));
+            let head = fw.newlabel("af");
+            let doo = fw.newlabel("ab");
+            let done = fw.newlabel("ae");
+            fw.jump(&head);
+            fw.label(&head);
+            let iv = fw.v();
+            fw.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                iv, islot, z
+            ));
+            let c = fw.v();
+            fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, lenv));
+            let c1 = fw.v();
+            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+            fw.cjump(&c1, &doo, &done);
+            fw.label(&doo);
+            fw.loops.push((done.clone(), head.clone()));
+            // loop var = seq[i]
+            let gtv = fw.v();
+            fw.op(&format!(
+                "    {} = call @{}({}, {}) : {}",
+                gtv, getfn, arr, iv, getty
+            ));
+            let gety = if kind == IdxKind::StrChar { self.r.mk(Ty::Str) } else { el };
+            let vs = fw.v();
+            if self.is_float(gety) {
+                fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
+                fw.op(&format!("    memref.store {}, {}[{}] : memref<1xf64>", gtv, vs, z));
+            } else {
+                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+                fw.op(&format!("    memref.store {}, {}[{}] : memref<1xi64>", gtv, vs, z));
+            }
+            fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, gety));
+            self.walk_body(fw, body);
+            fw.loops.pop();
+            // idx += 1
+            let one2 = fw.v();
+            fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+            let nx = fw.v();
+            fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                nx, islot, z
+            ));
+            fw.jump(&head);
+            fw.label(&done);
+            fw.pop_scope();
+        }
+
+    /// iterator protocol: iterator object (or it.iter())/next() -> Opt<el>
+        /// (worded MVP: Opt as i64 word, 0 = nil; float elements rejected)
+        fn emit_proto_loop(
+            &mut self,
+            fw: &mut FnWalk,
+            var: &str,
+            body: &Stmt,
+            recv: String,
+            recvty: TyId,
+            pos: &Pos,
+        ) {
+            // normalize: value itself an iterator, or expose iter() first
+            let cls = match self.r.get(recvty) {
+                Ty::Named(c, _) => c.clone(),
+                _ => {
+                    self.err(&pos, "for-iteration requires a range, array, map or iterator value".to_string());
+                    return;
+                }
+            };
+            let (itv, itty);
+            if let Some((defcls, fd)) = self.find_method(&cls, "iter") {
+                let (v, t) = self.emit_method_call(
+                    fw, &defcls, "iter", &fd, false,
+                    &vec![(recv.clone(), recvty.clone())],
+                    &vec!["i64".to_string()], &pos,
+                );
+                if let Ty::Named(c, _) = self.r.get(t) {
+                    itv = v;
+                    itty = t;
+                    _ = c;
+                } else {
+                    self.err(&pos, "iter() must return an iterator object".to_string());
+                    return;
+                }
+            } else {
+                itv = recv;
+                itty = recvty;
+            }
+            let icls = match self.r.get(itty) {
+                Ty::Named(c, _) => c.clone(),
+                _ => unreachable!(),
+            };
+            let nfd = self.find_method(&icls, "next");
+            if nfd.is_none() {
+                self.err(&pos, format!("class `{}` has no `next()` (iterator protocol)", icls));
+                return;
+            }
+            let (ndefcls, nfn) = nfd.unwrap();
+            let nplan = self.plan_for_class("next", &ndefcls, &nfn);
+            let el = match self.r.get(nplan.ret) {
+                Ty::Opt(e) => *e,
+                _ => {
+                    self.err(&pos, format!("iterator `next()` must return Opt (class `{}`)", icls));
+                    return;
+                }
+            };
+            if self.is_float(el) {
+                self.err(&pos, "iterator element type float unsupported (MVP)".to_string());
+                return;
+            }
+            // iterator slot storage
+            let islot = fw.v();
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
+            fw.op(&format!("    memref.store {}, {}[{}] : memref<1xi64>", itv, islot, z));
+            fw.push_scope();
+            let head = fw.newlabel("if");
+            let doo = fw.newlabel("ib");
+            let done = fw.newlabel("ie");
+            fw.jump(&head);
+            fw.label(&head);
+            let itw = fw.v();
+            fw.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                itw, islot, z
+            ));
+            let (ov, _ot) = self.emit_method_call(
+                fw, &ndefcls, "next", &nfn, false,
+                &vec![(itw, itty.clone())],
+                &vec!["i64".to_string()], &pos,
+            );
+            let nc = fw.v();
+            let znil = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", znil));
+            fw.op(&format!(
+                "    {} = arith.cmpi eq, {}, {} : i64",
+                nc, ov, znil
+            ));
+            let nc1 = fw.v();
+            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", nc1, nc));
+            fw.cjump(&nc1, &done, &doo);
+            fw.label(&doo);
+            fw.loops.push((done.clone(), head.clone()));
+            // loop var = unwrap(next())
+            let vs = fw.v();
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+            fw.op(&format!("    memref.store {}, {}[{}] : memref<1xi64>", ov, vs, z));
+            fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, el));
+            self.walk_body(fw, body);
+            fw.loops.pop();
+            fw.jump(&head);
+            fw.label(&done);
+            fw.pop_scope();
+        }
 
     fn walk_break(&mut self, fw: &mut FnWalk, pos: &Pos) {
         match fw.loops.last() {
@@ -2246,7 +2367,7 @@ impl ModEmitter {
                             ));
                             return (r, fty2);
                         }
-                        Ty::Named(_, _) | Ty::Dyn(_) => {
+                        Ty::Named(_, _) | Ty::Dyn(_) | Ty::Array(_) | Ty::Map(..) => {
                             let r = fw.v();
                             fw.op(&format!(
                                 "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
@@ -3095,6 +3216,7 @@ pub fn rt_decls() -> String {
   func.func private @sloth_str_push_f(i64, f64) -> i64
   func.func private @sloth_str_push_b(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_str_char(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_len(i64) -> i64\n");
