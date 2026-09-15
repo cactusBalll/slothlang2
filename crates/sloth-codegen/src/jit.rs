@@ -8,11 +8,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(
-        module: &crate::module::Op,
-        opt: i32,
-        libs: &[String],
-    ) -> Engine {
+    pub fn new(module: &crate::module::Op, opt: i32, libs: &[String]) -> Engine {
         unsafe {
             let refs: Vec<CString> = libs
                 .iter()
@@ -26,7 +22,11 @@ impl Engine {
                 sys::mlirModuleFromOperation(module.raw),
                 opt,
                 srefs.len() as i32,
-                if srefs.is_empty() { std::ptr::null() } else { srefs.as_ptr() },
+                if srefs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    srefs.as_ptr()
+                },
                 false,
             );
             Engine { raw: jit }
@@ -62,10 +62,7 @@ impl Engine {
                     self.raw,
                     sys::mlirStringRefCreateFromCString(cn.as_ptr()),
                 );
-                Err(format!(
-                    "invoke {} failed (packed ptr {:?})",
-                    name, lookup
-                ))
+                Err(format!("invoke {} failed (packed ptr {:?})", name, lookup))
             }
         }
     }
@@ -80,9 +77,18 @@ pub fn run_llvm_pipeline(ctx: sys::MlirContext, op: sys::MlirOperation) -> Resul
         sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertFuncToLLVMPass());
         sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionArithToLLVMConversionPass());
         sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertIndexToLLVMPass());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertControlFlowToLLVMPass());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionFinalizeMemRefToLLVMConversionPass());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionReconcileUnrealizedCastsPass());
+        sys::mlirPassManagerAddOwnedPass(
+            pm,
+            sys::mlirCreateConversionConvertControlFlowToLLVMPass(),
+        );
+        sys::mlirPassManagerAddOwnedPass(
+            pm,
+            sys::mlirCreateConversionFinalizeMemRefToLLVMConversionPass(),
+        );
+        sys::mlirPassManagerAddOwnedPass(
+            pm,
+            sys::mlirCreateConversionReconcileUnrealizedCastsPass(),
+        );
         let r = sys::mlirPassManagerRunOnOp(pm, op);
         let ok = r.value == 1;
         sys::mlirPassManagerDestroy(pm);

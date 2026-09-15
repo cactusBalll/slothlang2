@@ -3,10 +3,10 @@
 pub use mlir_sys as sys;
 
 mod context;
+pub mod irgen;
+mod jit;
 mod module;
 pub mod pass;
-mod jit;
-pub mod irgen;
 
 pub fn selftest() -> Result<(), String> {
     pass::smoke_all()

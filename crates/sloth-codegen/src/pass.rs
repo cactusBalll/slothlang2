@@ -54,8 +54,7 @@ pub fn sloth_main_hello() -> Result<(), String> {
     eprintln!("--- MLIR ---\n{}", ir);
     let ctx = Context::new();
     let op = Op::parse(ctx.raw, &ir, "hello.mlir")?;
-    crate::jit::run_llvm_pipeline(ctx.raw, op.raw)
-        .map_err(|e| format!("pipeline: {}", e))?;
+    crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let engine = crate::jit::Engine::new(&op, 2, &[lib_path()]);
     engine.invoke("sloth_main", &mut [])?;
     Ok(())
@@ -99,12 +98,14 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
             return Err(format!("MLIR parse: {}", e));
         }
     };
-    crate::jit::run_llvm_pipeline(ctx.raw, op.raw)
-        .map_err(|e| format!("pipeline: {}", e))?;
+    crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let e = crate::jit::Engine::new(&op, 2, &[lib_path()]);
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
     let r = e.invoke("sloth_main", &mut []);
-    let _ = std::fs::write(format!("/tmp/opencode/{}/llvm-after.mlir", mod_name), op.print());
+    let _ = std::fs::write(
+        format!("/tmp/opencode/{}/llvm-after.mlir", mod_name),
+        op.print(),
+    );
     r?;
     Ok(())
 }
@@ -120,8 +121,7 @@ pub fn run_src_multimod(src: &str, base: &std::path::Path) -> Result<(), String>
             return Err(format!("MLIR parse: {}", e));
         }
     };
-    crate::jit::run_llvm_pipeline(ctx.raw, op.raw)
-        .map_err(|e| format!("pipeline: {}", e))?;
+    crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let e = Engine::new(&op, 2, &[lib_path()]);
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
     let r = e.invoke("sloth_main", &mut []);
@@ -308,7 +308,11 @@ mod irgen_p4 {
     fn multimodb_works() {
         let d = std::env::temp_dir().join("sloth_mm");
         let _ = std::fs::create_dir_all(&d);
-        std::fs::write(d.join("lib.mm.sl"), "pub func twofold(a: int) -> int {\n    return a + a;\n}").unwrap();
+        std::fs::write(
+            d.join("lib.mm.sl"),
+            "pub func twofold(a: int) -> int {\n    return a + a;\n}",
+        )
+        .unwrap();
         let src = "import \"lib.mm.sl\";\nvar x = twofold(6);\nprint(x);\n";
         run_src_multimod(src, &d).unwrap();
     }
@@ -372,7 +376,8 @@ mod irgen_p4 {
             "pub var n = 3;\npub class Box {\n    var v: int;\n    func __init__(a: int) {\n        this.v = a;\n    }\n}\npub func triple(x: int) -> int {\n    return x * 3;\n}\n",
         )
         .unwrap();
-        let src = "import \"pub.mm.sl\" as q;\nprint(q.triple(q.n));\nvar b = q.Box(2);\nprint(b.v);\n";
+        let src =
+            "import \"pub.mm.sl\" as q;\nprint(q.triple(q.n));\nvar b = q.Box(2);\nprint(b.v);\n";
         run_src_multimod(src, &d).unwrap();
     }
 
@@ -410,8 +415,16 @@ mod irgen_p4 {
     fn circular_import_diagnosed() {
         let d = std::env::temp_dir().join("sloth_mmcyc");
         let _ = std::fs::create_dir_all(&d);
-        std::fs::write(d.join("b.sl"), "import \"a.sl\";\nfunc bx() -> int {\n    return 1;\n}\n").unwrap();
-        std::fs::write(d.join("a.sl"), "import \"b.sl\";\npub func ax() -> int {\n    return bx();\n}\n").unwrap();
+        std::fs::write(
+            d.join("b.sl"),
+            "import \"a.sl\";\nfunc bx() -> int {\n    return 1;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("a.sl"),
+            "import \"b.sl\";\npub func ax() -> int {\n    return bx();\n}\n",
+        )
+        .unwrap();
         let src = "import \"a.sl\";\nprint(ax());\n";
         let e = match run_src_multimod(src, &d) {
             Ok(()) => panic!("cycle accepted"),
@@ -770,8 +783,6 @@ mod irgen_p3d {
     }
 }
 
-
-
 // patch #9: array push/pop, let immutability, declared-kind coercion
 mod irgen_p9 {
     use super::*;
@@ -806,7 +817,11 @@ mod irgen_p9 {
             Ok(()) => panic!("let rebinding accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("cannot assign to immutable"), "unexpected: {}", e);
+        assert!(
+            e.contains("cannot assign to immutable"),
+            "unexpected: {}",
+            e
+        );
     }
 
     /// var still mutable
@@ -823,10 +838,7 @@ mod irgen_p9 {
     /// declared type conflicts with initializer kind
     #[test]
     fn declared_kind_mismatch_diag() {
-        for src in [
-            "var x: int = 2.5;\nprint(x);\n",
-            "var y: int = 1.0;\n",
-        ] {
+        for src in ["var x: int = 2.5;\nprint(x);\n", "var y: int = 1.0;\n"] {
             let e = match run_src(src, "main") {
                 Ok(()) => panic!("kind mismatch accepted: {:?}", src),
                 Err(e) => e,
@@ -987,7 +999,11 @@ mod irgen_p11 {
             Ok(()) => panic!("float into int variadic accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("variadic argument is float"), "unexpected: {}", e);
+        assert!(
+            e.contains("variadic argument is float"),
+            "unexpected: {}",
+            e
+        );
     }
 }
 
@@ -1031,7 +1047,11 @@ mod irgen_p12 {
             Ok(()) => panic!("pipe to non-call accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("pipe rhs must be a function or call"), "unexpected: {}", e);
+        assert!(
+            e.contains("pipe rhs must be a function or call"),
+            "unexpected: {}",
+            e
+        );
     }
 }
 
@@ -1148,18 +1168,27 @@ mod irgen_p14 {
             Ok(()) => panic!("unbound generic accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("unknown identifier `x`") || e.contains("cannot infer"), "unexpected: {}", e);
+        assert!(
+            e.contains("unknown identifier `x`") || e.contains("cannot infer"),
+            "unexpected: {}",
+            e
+        );
     }
 
     /// variadic x generic stays unsupported (MVP shape) with a diagnostic
     #[test]
     fn generic_variadic_diag() {
-        let src = "func f<T>(xs...: Array<T>): unit { print(1); }\nfunc main(): unit { f(1, 2); }\n";
+        let src =
+            "func f<T>(xs...: Array<T>): unit { print(1); }\nfunc main(): unit { f(1, 2); }\n";
         let e = match run_src(src, "main") {
             Ok(()) => panic!("generic variadic accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("generic variadic unsupported"), "unexpected: {}", e);
+        assert!(
+            e.contains("generic variadic unsupported"),
+            "unexpected: {}",
+            e
+        );
     }
 }
 
@@ -1204,7 +1233,8 @@ mod irgen_p15 {
         };
         assert!(
             e.contains("requires a `__add__` overload"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -1283,7 +1313,8 @@ mod irgen_p15 {
         };
         assert!(
             e.contains("does not satisfy trait bound `Hashable`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 }
@@ -1382,10 +1413,7 @@ mod irgen_p16 {
             Ok(()) => panic!("iterator protocolless class accepted"),
             Err(e) => e,
         };
-        assert!(
-            e.contains("has no `next()`"),
-            "unexpected: {}", e
-        );
+        assert!(e.contains("has no `next()`"), "unexpected: {}", e);
     }
 }
 
@@ -1421,7 +1449,8 @@ mod irgen_p17 {
         };
         assert!(
             e.contains("Symbols not found") || e.contains("invoke sloth_main failed"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 }
@@ -1537,7 +1566,8 @@ mod irgen_p18b {
         };
         assert!(
             e.contains("requires trait bound `Display`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 }
@@ -1734,7 +1764,8 @@ mod irgen_p20 {
         };
         assert!(
             e.contains("requires an `__index__` overload"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -1837,7 +1868,8 @@ mod irgen_p21 {
         };
         assert!(
             e.contains("requires trait bound `Display`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 }
@@ -1861,7 +1893,11 @@ mod irgen_p22 {
             Ok(()) => panic!("cross-word reassignment accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("cannot assign `str` to `int`"), "unexpected: {}", e);
+        assert!(
+            e.contains("cannot assign `str` to `int`"),
+            "unexpected: {}",
+            e
+        );
     }
 
     /// annotated let with mismatched surface initialized diagnosed
@@ -1878,7 +1914,8 @@ mod irgen_p22 {
         };
         assert!(
             e.contains("initializer is `str` but declared type is `int`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -1922,7 +1959,11 @@ mod irgen_p22 {
             Ok(()) => panic!("cross-class reassignment accepted"),
             Err(e) => e,
         };
-        assert!(e.contains("type mismatch: cannot assign"), "unexpected: {}", e);
+        assert!(
+            e.contains("type mismatch: cannot assign"),
+            "unexpected: {}",
+            e
+        );
     }
 
     /// float target promotes int words on assignment; float value diagnosed
@@ -1971,7 +2012,8 @@ mod irgen_p22 {
         };
         assert!(
             e.contains("cannot assign `Array<str>` to `Array<int>`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 }
@@ -2035,7 +2077,8 @@ mod irgen_p23 {
         };
         assert!(
             e.contains("requires a declared Result target"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -2070,7 +2113,8 @@ mod irgen_p23 {
         );
         assert!(
             stde.contains("unwrap() on err Result"),
-            "unexpected stderr: {}", stde
+            "unexpected stderr: {}",
+            stde
         );
     }
 }
@@ -2112,7 +2156,8 @@ mod irgen_p24 {
         };
         assert!(
             e.contains("extern type `Tok` is opaque"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -2175,7 +2220,8 @@ mod irgen_p25 {
         };
         assert!(
             e.contains("constructor of `Dog` must call super.__init__"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -2221,10 +2267,7 @@ mod irgen_p25 {
             Ok(()) => panic!("int while condition accepted"),
             Err(e) => e,
         };
-        assert!(
-            e.contains("condition must be `bool`"),
-            "unexpected: {}", e
-        );
+        assert!(e.contains("condition must be `bool`"), "unexpected: {}", e);
     }
 
     /// bool conditions (incl. chained comparisons) keep working
@@ -2265,7 +2308,8 @@ mod irgen_p25 {
         };
         assert!(
             e.contains("no class relation for `is`"),
-            "unexpected: {}", e
+            "unexpected: {}",
+            e
         );
     }
 
@@ -2368,7 +2412,10 @@ mod irgen_examples {
 
     fn ws_root() -> std::path::PathBuf {
         let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        std::path::PathBuf::from(md).join("..").join("..").join("examples")
+        std::path::PathBuf::from(md)
+            .join("..")
+            .join("..")
+            .join("examples")
     }
 
     fn run_example(name: &str) {
