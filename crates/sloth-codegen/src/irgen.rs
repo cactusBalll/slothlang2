@@ -69,6 +69,11 @@ pub struct ModEmitter {
     pub cls_mod: HashMap<String, String>,
     /// lambda function counter (unique symbols per lambda site)
     pub lamcount: usize,
+    /// devirt/inline observation counters (patch #18c; SLOTH_STATS=1 prints)
+    pub stat_dcalls: usize,
+    pub stat_dyncalls: usize,
+    pub stat_ginsts: usize,
+    pub stat_extdecls: usize,
     /// registration order of classes (deterministic dyn-dispatch chain)
     pub class_order: Vec<String>,
     /// vtable slot assignment: (trait, method) -> (index, ret-float, ret-unit)
@@ -130,6 +135,10 @@ impl ModEmitter {
             foreign_cls: std::collections::HashSet::new(),
             cls_mod: HashMap::new(),
             lamcount: 0,
+            stat_dcalls: 0,
+            stat_dyncalls: 0,
+            stat_ginsts: 0,
+            stat_extdecls: 0,
             class_order: Vec::new(),
             vt_slots: HashMap::new(),
             llvm_method: std::collections::HashSet::new(),
@@ -940,6 +949,7 @@ impl ModEmitter {
         }
         // extern func: body-less declaration kept under its raw C-ABI name
         if f.is_extern {
+            self.stat_extdecls += 1;
             self.emitted_names.push(name.to_string());
             self.out.push_str(&format!(
                 "  func.func private @{}({}) -> {}\n",
@@ -3195,6 +3205,7 @@ impl ModEmitter {
             self.tp_subst.pop();
             self.tp_mangled.pop();
         }
+        self.stat_ginsts += 1;
         // instance plan: substitution frame active so T resolves to the bound type
         let plan = {
             self.tp_subst.push(map);
@@ -3462,6 +3473,12 @@ impl ModEmitter {
 
     /// full MLIR text of the module
     pub fn take_ir(me: &mut ModEmitter) -> String {
+        if std::env::var("SLOTH_STATS").as_deref() == Ok("1") {
+            eprintln!(
+                "sloth-stats: module={} direct-method-calls={} dyn-calls={} generic-instances={} extern-decls={}",
+                me.name, me.stat_dcalls, me.stat_dyncalls, me.stat_ginsts, me.stat_extdecls
+            );
+        }
         let mut m = format!("module @{} {{\n", me.name);
         m.push_str(&emit_str_globals(me));
         m.push_str(&rt_decls());
@@ -3839,6 +3856,7 @@ impl ModEmitter {
         if mname == "__init__" && !is_super {
             return self.emit_new_obj(fw, cls, argv, sigargs, pos);
         }
+        self.stat_dcalls += 1;
         // direct method dispatch: obj.method(args) => sloth_<mod>_Cls__method(this, args...)
         let saved_mod = self.cur_mod.clone();
         self.cur_mod = self
@@ -3987,6 +4005,7 @@ impl ModEmitter {
         _sigargs: &Vec<String>,
         pos: &Pos,
     ) -> (String, TyId) {
+        self.stat_dyncalls += 1;
         // dispatch ABI from the trait method signature
         let ms = match self
             .traits
