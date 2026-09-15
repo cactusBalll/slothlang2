@@ -36,3 +36,19 @@ pub extern "C" fn sloth_panic_unwrap() -> i64 {
     eprintln!("sloth panic: unwrap() on err Result");
     std::process::exit(1);
 }
+
+/// runtime panic with a fixed message (patch #34: the single exit path)
+pub fn panic_msg(msg: &str) -> ! {
+    eprintln!("sloth panic: {}", msg);
+    std::process::exit(1);
+}
+
+/// container out-of-bounds: kind names the container ("array"/"pop" ...),
+/// i the offending index (or key for kind "map"), len the container length
+pub fn panic_oob(kind: &str, i: i64, len: i64) -> ! {
+    eprintln!(
+        "sloth panic: {} index {} out of bounds (len {})",
+        kind, i, len
+    );
+    std::process::exit(1);
+}

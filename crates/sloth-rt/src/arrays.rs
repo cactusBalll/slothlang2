@@ -7,8 +7,7 @@ fn arr_index(a: i64, i: i64) -> *mut i64 {
         let p = a as *mut i64;
         let len = *p;
         if i < 0 || i >= len {
-            eprintln!("sloth panic: array index {} out of bounds (len {})", i, len);
-            std::process::exit(1);
+            crate::panics::panic_oob("array", i, len);
         }
         p.offset(i as isize + 2)
     }
@@ -57,8 +56,7 @@ pub extern "C" fn sloth_arr_pop(a: i64) -> i64 {
         let p = a as *mut i64;
         let len = *p;
         if len <= 0 {
-            eprintln!("sloth panic: pop from empty array");
-            std::process::exit(1);
+            crate::panics::panic_oob("pop", len - 1, len);
         }
         *p = len - 1;
         *p.offset((len - 1) as isize + 2)
@@ -90,8 +88,7 @@ pub extern "C" fn sloth_arr_pop_f64(a: i64) -> f64 {
         let p = a as *mut i64;
         let len = *p;
         if len <= 0 {
-            eprintln!("sloth panic: pop from empty array");
-            std::process::exit(1);
+            crate::panics::panic_oob("pop", len - 1, len);
         }
         *p = len - 1;
         *((p.offset((len - 1) as isize + 2)) as *mut f64)

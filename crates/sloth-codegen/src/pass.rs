@@ -2692,3 +2692,92 @@ mod irgen_p33 {
         run_src(src, "main").unwrap();
     }
 }
+
+// ---------------- patch #34: out-of-bounds panic channel ----------------
+mod irgen_p34 {
+    use super::*;
+
+    /// subprocess helper: run `slothc run`, expect failure + stderr match
+    fn run_expect_panic(src: &str, tag: &str, want: &str) {
+        let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let exe = format!("{}/../../target/debug/slothc", md);
+        if !std::path::Path::new(&exe).exists() {
+            eprintln!("skip: slothc binary not built");
+            return;
+        }
+        let dir = std::env::temp_dir();
+        let p = dir.join(format!("sloth_p34_{}.sl", tag));
+        std::fs::write(&p, src).unwrap();
+        let out = std::process::Command::new(&exe)
+            .arg("run")
+            .arg(&p)
+            .output()
+            .expect("subprocess");
+        let stde = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "out-of-bounds should exit nonzero"
+        );
+        assert!(stde.contains(want), "unexpected stderr: {}", stde);
+    }
+
+    /// array read out of bounds: kind/index/len diagnosis, exit 1
+    #[test]
+    fn arr_get_oob_panics() {
+        run_expect_panic(
+            r#"
+                func main(): unit {
+                    let a = [1, 2, 3];
+                    print(a[5]);
+                }
+            "#,
+            "arrget",
+            "array index 5 out of bounds (len 3)",
+        );
+    }
+
+    /// array index assignment out of bounds: same bounded channel
+    #[test]
+    fn arr_set_oob_panics() {
+        run_expect_panic(
+            r#"
+                func main(): unit {
+                    let a = [1, 2];
+                    a[9] = 7;
+                }
+            "#,
+            "arrset",
+            "array index 9 out of bounds (len 2)",
+        );
+    }
+
+    /// pop from an empty array: diagnosed, not a raw abort
+    #[test]
+    fn pop_empty_panics() {
+        run_expect_panic(
+            r#"
+                func main(): unit {
+                    let a = [];
+                    print(a.pop());
+                }
+            "#,
+            "popempty",
+            "sloth panic: pop",
+        );
+    }
+
+    /// missing map key on get: panic channel with the key in the message
+    #[test]
+    fn map_missing_key_panics() {
+        run_expect_panic(
+            r#"
+                func main(): unit {
+                    let m = @(1: 10, 2: 20);
+                    print(m[7]);
+                }
+            "#,
+            "mapkey",
+            "map key not found (7)",
+        );
+    }
+}
