@@ -2937,3 +2937,62 @@ mod irgen_p36 {
         run_src(src, "main").unwrap();
     }
 }
+
+// ---------------- patch #37: ctor faces with the context frame ----------------
+mod irgen_p37 {
+    use super::*;
+
+    /// assignment face: `x = ok(v)` binds the slot's declared Result<T,E>
+    #[test]
+    fn assign_face_ctors() {
+        let src = r#"
+            func main(): unit {
+                var x: Result<int, str> = err("seed");
+                print(x.err());          // expect: seed
+                x = ok(7);
+                print(x.unwrap());       // expect 7
+                x = err("later");
+                print(x.err());          // expect: later
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// generic context: ok() instantiates the monomorphized T frame
+    #[test]
+    fn generic_return_ctor_context() {
+        let src = r#"
+            func wrap<T, E>(v: T, e: E): Result<T, E> {
+                if v != v {
+                    return err(e);
+                }
+                return ok(v);
+            }
+            func main(): unit {
+                print(wrap(5, "no").unwrap());       // expect: 5
+                print(wrap("two", 9).unwrap());      // expect: two
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// assign-face ctor without a Result target still diagnosed (#23 口径)
+    #[test]
+    fn assign_face_ctor_without_target_diag() {
+        let src = r#"
+            func main(): unit {
+                var x: int = 0;
+                x = ok(5);
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("assign-face ctor without Result target accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires a declared Result target"),
+            "unexpected: {}",
+            e
+        );
+    }
+}

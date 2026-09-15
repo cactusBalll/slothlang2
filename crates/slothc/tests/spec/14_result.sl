@@ -20,5 +20,10 @@ func main(): unit {
     print(ro.unwrap());          // expect: 5
     let re = make_err();
     print(re.is_ok());           // expect: false
+    var q: Result<int, str> = err("seed");
+    q = ok(8);                   // assign-face ctor (patch #37)
+    print(q.unwrap());           // expect: 8
+    q = err("end");
+    print(q.err());              // expect: end
 }
 

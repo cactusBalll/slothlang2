@@ -155,7 +155,63 @@ impl ModEmitter {
                 fw.assign(name, &v, fl);
             }
             StmtNode::Assign { target, value } => {
-                let (mut v, vty) = self.emit_expr(fw, value);
+                // assign-face Result ctor fast-path (patch #37): `x = ok(v)`
+                // binds to the target's declared Result<T,E> frame
+                let mut pre: Option<(String, TyId)> = None;
+                if let (Some(PathSeg::Name(h)), ExprNode::Call { callee, args }) =
+                    (target.first(), &value.node)
+                {
+                    if args.len() == 1
+                        && matches!(
+                            callee.node,
+                            ExprNode::Ident(ref id) if id == "ok" || id == "err",
+                        )
+                    {
+                        match fw.lookup(&h.clone()) {
+                            Some((_, dt)) => {
+                                match self.r.get(dt).clone() {
+                                    Ty::Named(nm, _) if self.result_insts.contains(&nm) => {
+                                        let is_ok = matches!(
+                                            callee.node,
+                                            ExprNode::Ident(ref id) if id == "ok",
+                                        );
+                                        pre = Some(self.emit_result_ctor(
+                                            fw,
+                                            &nm,
+                                            &args[0],
+                                            is_ok,
+                                            &value.pos,
+                                        ));
+                                    }
+                                    _ => {
+                                        self.err(
+                                            &value.pos,
+                                            format!(
+                                                "ctor `{}` requires a declared Result target (assignment target `{}` is not Result<_, _>)",
+                                                if Self::init_str2(callee) == "err" { "err" } else { "ok" },
+                                                h
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                self.err(
+                                    &value.pos,
+                                    format!(
+                                        "ctor `{}` requires a declared Result target (assignment to unknown `{}`)",
+                                        if Self::init_str2(callee) == "err" { "err" } else { "ok" },
+                                        h
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                let (mut v, vty) = match pre {
+                    Some((w, tt)) => (w, tt),
+                    None => self.emit_expr(fw, value),
+                };
                 // super.x = v: store into an inherited field slot of this
                 if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) =
                     (target.first(), target.last())
