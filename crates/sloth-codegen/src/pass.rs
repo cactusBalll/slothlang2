@@ -902,8 +902,8 @@ mod irgen_p10 {
         let src = r#"
             var m: Map<int, int> = @(5: 50, 6: 60);
             var acc = 0;
-            for (var k: m) {
-                acc = acc + k + m[k];
+            for (var e: m) {
+                acc = acc + e.key + e.val;
             }
             print(acc);
             var ks = keys(m);
@@ -2282,6 +2282,80 @@ mod irgen_p25 {
                 } else {
                     print(0);
                 }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
+// ---------------- patch #26: Entry<K,V> map record iteration ----------------
+mod irgen_p26 {
+    use super::*;
+
+    /// map for-in yields Entry records: key/val fields readable, live pairs
+    #[test]
+    fn entry_iteration() {
+        let src = r#"
+            func main(): unit {
+                let m = @("a": 1, "b": 2, "c": 3);
+                var total = 0;
+                for (var e: m) {
+                    total = total + e.val;
+                    print(e.key);
+                }
+                print(total);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float values route through the Entry val slot (f64 element)
+    #[test]
+    fn entry_float_values() {
+        let src = r#"
+            func main(): unit {
+                let m = @(1: 2.5);
+                for (var e: m) {
+                    print(e.key + e.val);
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// Hashable-class keys: Entry.key is the object word, Entry.val routes
+    #[test]
+    fn entry_hashable_keys() {
+        let src = r#"
+            trait Hashable {
+                func __hash__(): int;
+            }
+            class Pt impl Hashable {
+                var x: int;
+                func __init__(x: int): unit { this.x = x; return; }
+                func __hash__(): int { return this.x; }
+            }
+            func main(): unit {
+                let m = @(Pt(1): 10, Pt(2): 20);
+                var s = 0;
+                for (var e: m) {
+                    s = s + e.val;
+                }
+                print(s);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// keys()/values() builtins keep working alongside Entry iteration
+    #[test]
+    fn keys_values_route_kept() {
+        let src = r#"
+            func main(): unit {
+                let m = @(7: 1, 8: 2);
+                let ks = keys(m);
+                let vs = values(m);
+                print(ks.len() + vs.len());
             }
         "#;
         run_src(src, "main").unwrap();

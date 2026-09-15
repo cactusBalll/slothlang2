@@ -2115,14 +2115,9 @@ impl ModEmitter {
                         self.emit_index_loop(fw, var, body, mav, *e, IdxKind::Arr, pos);
                         return;
                     }
-                    // map iteration MVP: for-in yields the key set (Array<K> route)
+                    // map iteration: for-in yields Entry<K,V> records (§3.5)
                     Ty::Map(k, _v) => {
-                        let ks = fw.v();
-                        fw.op(&format!(
-                            "    {} = call @sloth_map_keys({}) : (i64) -> i64",
-                            ks, mav
-                        ));
-                        self.emit_index_loop(fw, var, body, ks, *k, IdxKind::Arr, pos);
+                        self.emit_entry_loop(fw, var, body, mav.clone(), *k, *_v, pos);
                         return;
                     }
                     // str iteration: per-char 1-byte strings
@@ -2144,6 +2139,111 @@ impl ModEmitter {
         }
     }
 
+    /// map for-in: per iteration build an Entry<K,V> record object with the
+    /// live key/value pair; loop var binds the Entry object (§3.5)
+    fn emit_entry_loop(
+        &mut self,
+        fw: &mut FnWalk,
+        var: &str,
+        body: &Stmt,
+        mav: String,
+        k: TyId,
+        v2: TyId,
+        pos: &Pos,
+    ) {
+        let is_str = self.is_str(k);
+        let vf = self.is_float(v2);
+        let et = self.declare_class_inst("Entry", &[k, v2]);
+        let ename = match self.r.get(et) {
+            Ty::Named(n, _) => n.clone(),
+            _ => "Entry".to_string(),
+        };
+        let kidxf = self.field_index(&ename, "key");
+        let vidxf = self.field_index(&ename, "val");
+        // keys snapshot array (same as keys() route)
+        let ks = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_map_keys({}) : (i64) -> i64",
+            ks, mav
+        ));
+        let lenv = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_arr_len({}) : (i64) -> i64",
+            lenv, ks
+        ));
+        fw.push_scope();
+        let islot = fw.v();
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
+        let zi2 = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zi2));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            zi2, islot, z
+        ));
+        let head = fw.newlabel("me");
+        let doo = fw.newlabel("mb");
+        let done = fw.newlabel("md");
+        fw.jump(&head);
+        fw.label(&head);
+        let iv = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            iv, islot, z
+        ));
+        let c = fw.v();
+        fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, lenv));
+        let c1 = fw.v();
+        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+        fw.cjump(&c1, &doo, &done);
+        fw.label(&doo);
+        fw.loops.push((done.clone(), head.clone()));
+        // key word: keys array (word route covers int/str/Hashable keys)
+        let kw = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+            kw, ks, iv
+        ));
+        // value word: same map-read family as indexing (kkind routed by table)
+        let (getfn, getty) = match (is_str, vf) {
+            (true, true) => ("sloth_map_str_get_f64", "(i64, i64) -> f64"),
+            (true, false) => ("sloth_map_str_get", "(i64, i64) -> i64"),
+            (false, true) => ("sloth_map_get_f64", "(i64, i64) -> f64"),
+            (false, false) => ("sloth_map_get", "(i64, i64) -> i64"),
+        };
+        let vw = fw.v();
+        fw.op(&format!(
+            "    {} = call @{}({}, {}) : {}",
+            vw, getfn, mav, kw, getty
+        ));
+        // build the Entry record: plain object + fields (no user ctor)
+        let (obj, _ot) = self.emit_new_obj(fw, &ename, &Vec::new(), &Vec::new(), &pos);
+        let ki = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", ki, kidxf));
+        self.op_set_field(fw, &obj, &ki, &kw, k, pos.clone());
+        let vi = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : i64", vi, vidxf));
+        self.op_set_field(fw, &obj, &vi, &vw, v2, pos.clone());
+        let vs = fw.v();
+        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+        fw.op(&format!("    memref.store {}, {}[{}] : memref<1xi64>", obj, vs, z));
+        fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, et));
+        self.walk_body(fw, body);
+        fw.loops.pop();
+        let one2 = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+        let nx = fw.v();
+        fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            nx, islot, z
+        ));
+        fw.jump(&head);
+        fw.label(&done);
+        fw.pop_scope();
+    }
+
     fn emit_index_loop(
             &mut self,
             fw: &mut FnWalk,
@@ -2153,8 +2253,7 @@ impl ModEmitter {
             el: TyId,
             kind: IdxKind,
             pos: &Pos,
-        ) {
-            let (countfn, getfn, getty) = match kind {
+        ) {            let (countfn, getfn, getty) = match kind {
                 IdxKind::Arr => {
                     if self.is_float(el) {
                         ("sloth_arr_len", "sloth_arr_get_f64", "(i64, i64) -> f64")
@@ -4087,6 +4186,10 @@ impl ModEmitter {
         {
             match sloth_frontend::parser::parse(
                 "extern func sloth_panic_unwrap(): int;\n\
+                 class Entry<T, E> {\n\
+                 var key: T;\n\
+                 var val: E;\n\
+                 }\n\
                  class Result<T, E> {\n\
                  var ok: bool = false;\n\
                  var v: T;\n\

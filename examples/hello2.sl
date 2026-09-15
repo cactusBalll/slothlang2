@@ -13,7 +13,7 @@ pub func main(): unit {
     let scores: Map<str, int> = @("Curry": 6, "Dijkstra": 5, "Hitori": 4);
     scores["foo"] = 8;
     print(len(scores));
-    for (var k: scores) {
-        print("${k} = ${scores[k]}\n");
+    for (var e: scores) {
+        print("${e.key} = ${e.val}\n");
     }
 }
