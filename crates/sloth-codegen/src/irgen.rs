@@ -1524,6 +1524,48 @@ impl ModEmitter {
                                                 sym, av, iv, v, vsig
                                             ));
                                         }
+                                        Ty::Named(cn, _) => {
+                                            // Indexable overload: a[i] = v ≡ a.__assign__(i, v)
+                                            match self.find_method(cn.as_str(), "__assign__") {
+                                                Some((defcls, fd)) => {
+                                                    let mut vc = v.clone();
+                                                    let retf = fd.params.len() >= 3 && {
+                                                        let pt = fd.params[2].ty.clone();
+                                                        pt.as_ref()
+                                                            .map(|t| {
+                                                                let dt = self.ty_of(t);
+                                                                self.is_float(dt)
+                                                            })
+                                                            .unwrap_or(false)
+                                                    };
+                                                    if retf && !self.is_float(vty) {
+                                                        let cv = fw.v();
+                                                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                                                        vc = cv;
+                                                    }
+                                                    let oargv = vec![
+                                                        (av.clone(), at),
+                                                        (iv.clone(), self.r.mk(Ty::I64)),
+                                                        (vc, vty),
+                                                    ];
+                                                    let osig = vec![
+                                                        mlir_word_ty(at, &self.r),
+                                                        "i64".to_string(),
+                                                        mlir_word_ty(vty, &self.r),
+                                                    ];
+                                                    self.emit_method_call(
+                                                        fw, &defcls, "__assign__", &fd, false,
+                                                        &oargv, &osig, &s.pos,
+                                                    );
+                                                }
+                                                None => {
+                                                    self.err(
+                                                        &s.pos,
+                                                        format!("class `{}` requires an `__assign__` overload for index assignment", cn),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         _ => {
                                             self.err(&s.pos, "index assignment on non-array".to_string());
                                             return;
@@ -2530,6 +2572,16 @@ impl ModEmitter {
                 let r = fw.v();
                 match op {
                     UnOp::Neg => {
+                        // operator overload: -x on a class receiver dispatches __neg__
+                        if let Ty::Named(cls, _) = self.r.get(t).clone() {
+                            if let Some((defcls, fd)) = self.find_method(&cls, "__neg__") {
+                                let oargv = vec![(v.clone(), t)];
+                                let osig = vec![mlir_word_ty(t, &self.r)];
+                                return self.emit_method_call(
+                                    fw, &defcls, "__neg__", &fd, false, &oargv, &osig, &e.pos,
+                                );
+                            }
+                        }
                         let z = if fl {
                             fw.v()
                         } else {
@@ -2578,6 +2630,33 @@ impl ModEmitter {
         bt: TyId,
         pos: &Pos,
     ) -> (String, TyId) {
+        // operator overload: comparison family dispatches __gt__/__eq__ etc
+        // on a class receiver (a < b ≡ a.__lt__(b)); result is the method's
+        // own type (conventionally bool). No overload keeps the numeric path.
+        if matches!(
+            op,
+            BinOp::EqEq | BinOp::NotEq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) {
+            if let Ty::Named(cls, _) = self.r.get(at).clone() {
+                let oname = match op {
+                    BinOp::EqEq => "__eq__",
+                    BinOp::NotEq => "__ne__",
+                    BinOp::Lt => "__lt__",
+                    BinOp::Le => "__le__",
+                    BinOp::Gt => "__gt__",
+                    BinOp::Ge => "__ge__",
+                    _ => unreachable!(),
+                };
+                if let Some((defcls, fd)) = self.find_method(&cls, oname) {
+                    let oargv = vec![(a.clone(), at), (b.clone(), bt)];
+                    let osig = vec![
+                        mlir_word_ty(at, &self.r),
+                        mlir_word_ty(bt, &self.r),
+                    ];
+                    return self.emit_method_call(fw, &defcls, oname, &fd, false, &oargv, &osig, pos);
+                }
+            }
+        }
         let fl = self.is_float(at) || self.is_float(bt);
         let cmp_ty_id = self.r.mk(Ty::Bool);
         if fl {
@@ -2888,6 +2967,29 @@ impl ModEmitter {
                             (false, false) => ("sloth_map_get", "i64"),
                         };
                         (*v, sym, retty)
+                    }
+                    Ty::Named(cn, _) => {
+                        // Indexable overload: a[i] ≡ a.__index__(i); element
+                        // type is the method's own return type
+                        match self.find_method(cn, "__index__") {
+                            Some((defcls, fd)) => {
+                                let oargv = vec![(av.clone(), at), (iv.clone(), it)];
+                                let osig = vec![
+                                    mlir_word_ty(at, &self.r),
+                                    mlir_word_ty(it, &self.r),
+                                ];
+                                return self.emit_method_call(
+                                    fw, &defcls, "__index__", &fd, false, &oargv, &osig, &e.pos,
+                                );
+                            }
+                            None => {
+                                self.err(
+                                    &e.pos,
+                                    format!("class `{}` requires an `__index__` overload for indexing", cn),
+                                );
+                                (self.r.mk(Ty::Unit), "sloth_arr_get", "i64")
+                            }
+                        }
                     }
                     _ => {
                         self.err(&e.pos, format!("indexing non-array"));

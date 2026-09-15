@@ -1600,6 +1600,171 @@ mod irgen_p19 {
     }
 }
 
+// ---------------- patch #20: operator overload family completion ----------------
+mod irgen_p20 {
+    use super::*;
+
+    /// comparison overloads: __lt__/__eq__ on a class receiver
+    #[test]
+    fn comparison_overloads() {
+        let src = r#"
+            class Pt {
+                var x: int;
+                func __init__(x: int): unit { this.x = x; return; }
+                func __lt__(o: Pt): bool { return this.x < o.x; }
+                func __eq__(o: Pt): bool { return this.x == o.x; }
+            }
+            func main(): unit {
+                let a = Pt(1);
+                let b = Pt(2);
+                print(a < b);
+                print(a == b);
+                print(b < a);
+                let c = Pt(2);
+                print(b == c);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// full comparison family: __le__/__gt__/__ge__/__ne__
+    #[test]
+    fn comparison_family() {
+        let src = r#"
+            class S {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+                func __le__(o: S): bool { return this.v <= o.v; }
+                func __gt__(o: S): bool { return this.v > o.v; }
+                func __ge__(o: S): bool { return this.v >= o.v; }
+                func __ne__(o: S): bool { return this.v != o.v; }
+            }
+            func main(): unit {
+                let a = S(1);
+                let b = S(2);
+                print(a <= b);
+                print(a >= b);
+                print(a > b);
+                print(a != b);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// unary minus dispatches __neg__ on a class receiver
+    #[test]
+    fn neg_overload() {
+        let src = r#"
+            class V {
+                var x: int;
+                func __init__(x: int): unit { this.x = x; return; }
+                func __neg__(): V { return V(0 - this.x); }
+                func get(): int { return this.x; }
+            }
+            func main(): unit {
+                let a = V(7);
+                let n = -a;
+                print(n.get());
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// Indexable: a[i] ≡ a.__index__(i), a[i] = v ≡ a.__assign__(i, v)
+    #[test]
+    fn indexable_overloads() {
+        let src = r#"
+            class Bag {
+                var items: Array<int>;
+                func __init__(): unit {
+                    this.items = [0, 0, 0, 0];
+                    return;
+                }
+                func __index__(i: int): int { return this.items[i]; }
+                func __assign__(i: int, v: int): unit {
+                    var arr: Array<int> = this.items;
+                    arr[i] = v;
+                    return;
+                }
+            }
+            func main(): unit {
+                let b = Bag();
+                b[0] = 11;
+                b[1] = 22;
+                print(b[0]);
+                print(b[1]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// no overload on comparison: numeric fallback keeps old behavior (int words)
+    #[test]
+    fn cmp_without_overload_int_path() {
+        let src = r#"
+            class Plain {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+            }
+            func main(): unit {
+                let a = Plain(1);
+                let b = Plain(2);
+                print(a != b);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// indexing a class without __index__: diagnostic
+    #[test]
+    fn index_without_overload_diag() {
+        let src = r#"
+            class Plain {
+                var v: int;
+                func __init__(v: int): unit { this.v = v; return; }
+            }
+            func main(): unit {
+                let a = Plain(1);
+                print(a[0]);
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("indexing class without __index__ accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires an `__index__` overload"),
+            "unexpected: {}", e
+        );
+    }
+
+    /// float element routing through __index__ (f64 return)
+    #[test]
+    fn indexable_float_return() {
+        let src = r#"
+            class Grid {
+                var data: Array<float>;
+                func __init__(): unit {
+                    this.data = [1.5, 0.0];
+                    return;
+                }
+                func __index__(i: int): float { return this.data[i]; }
+                func __assign__(i: int, v: float): unit {
+                    var arr: Array<float> = this.data;
+                    arr[i] = v;
+                    return;
+                }
+            }
+            func main(): unit {
+                let g = Grid();
+                g[1] = 2.5;
+                print(g[0] + g[1]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;
