@@ -530,6 +530,14 @@ impl FnWalk {
         self.op(&format!("  {}:", name));
         self.term = false;
     }
+    /// labeled block that closes a brace-free fallthrough explicitly (for
+    /// mid-loop increment labels reached by fallthrough and by continue)
+    fn label_br(&mut self, name: &str) {
+        if self.noterm() {
+            self.op(&format!("    cf.br {}", name));
+        }
+        self.label(name);
+    }
     /// fresh label name
     fn newlabel(&mut self, p: &str) -> String {
         self.bb += 1;
@@ -2088,7 +2096,9 @@ impl ModEmitter {
                 fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
                 fw.cjump(&c1, &doo, &done);
                 fw.label(&doo);
-                fw.loops.push((done.clone(), head.clone()));
+                // continue lands on the increment, not the head test
+                let cont = fw.newlabel("fc");
+                fw.loops.push((done.clone(), cont.clone()));
                 // bind loop var
                 let vs = fw.v();
                 fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
@@ -2096,6 +2106,7 @@ impl ModEmitter {
                 fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, self.r.mk(Ty::I64)));
                 self.walk_body(fw, body);
                 fw.loops.pop();
+                fw.label_br(&cont);
                 // idx += 1
                 let one2 = fw.v();
                 fw.op(&format!("    {} = arith.constant 1 : i64", one2));
@@ -2198,7 +2209,9 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
         fw.cjump(&c1, &doo, &done);
         fw.label(&doo);
-        fw.loops.push((done.clone(), head.clone()));
+        // continue lands on the increment, not the head test
+        let cont = fw.newlabel("mc");
+        fw.loops.push((done.clone(), cont.clone()));
         // key word: keys array (word route covers int/str/Hashable keys)
         let kw = fw.v();
         fw.op(&format!(
@@ -2231,6 +2244,7 @@ impl ModEmitter {
         fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, et));
         self.walk_body(fw, body);
         fw.loops.pop();
+        fw.label_br(&cont);
         let one2 = fw.v();
         fw.op(&format!("    {} = arith.constant 1 : i64", one2));
         let nx = fw.v();
@@ -2292,7 +2306,9 @@ impl ModEmitter {
             fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
             fw.cjump(&c1, &doo, &done);
             fw.label(&doo);
-            fw.loops.push((done.clone(), head.clone()));
+            // continue lands on the increment, not the head test
+            let cont = fw.newlabel("ic");
+            fw.loops.push((done.clone(), cont.clone()));
             // loop var = seq[i]
             let gtv = fw.v();
             fw.op(&format!(
@@ -2311,6 +2327,7 @@ impl ModEmitter {
             fw.scopes.last_mut().unwrap().insert(var.to_string(), (vs, gety));
             self.walk_body(fw, body);
             fw.loops.pop();
+            fw.label_br(&cont);
             // idx += 1
             let one2 = fw.v();
             fw.op(&format!("    {} = arith.constant 1 : i64", one2));
@@ -5025,7 +5042,8 @@ impl ModEmitter {
             let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
             fw.op(&format!("    {} = arith.constant 0 : index", zi));
             fw.op(&format!("    {} = memref.load {}[{}] : {}", v, slot2, zi, mty));
-            let tret = if fl { self.r.mk(Ty::F64) } else { self.r.mk(Ty::I64) };
+            // surface type comes from the trait signature (str/fn keep identity)
+            let tret = if fl { self.r.mk(Ty::F64) } else { self.ty_of(&ms.ret) };
             return (v, tret);
         }
         let z = fw.v();
