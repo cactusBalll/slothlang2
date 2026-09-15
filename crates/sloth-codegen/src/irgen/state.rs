@@ -73,10 +73,13 @@ pub struct ModEmitter {
     pub stat_dyncalls: usize,
     pub stat_ginsts: usize,
     pub stat_extdecls: usize,
+    pub stat_vtbuilds: usize,
     /// registration order of classes (deterministic dyn-dispatch chain)
     pub class_order: Vec<String>,
     /// vtable slot assignment: (trait, method) -> (index, ret-float, ret-unit)
     pub vt_slots: HashMap<(String, String), usize>,
+    /// per-cls vtable builders already emitted (patch #28 global cache)
+    pub vt_built: std::collections::HashSet<String>,
     /// methods emitted inside llvm.func (vtable-addressable)
     pub llvm_method: std::collections::HashSet<(String, String)>,
     /// object bodies carry a fixed vtable capacity (total slots)
@@ -138,6 +141,7 @@ impl ModEmitter {
             stat_dyncalls: 0,
             stat_ginsts: 0,
             stat_extdecls: 0,
+            stat_vtbuilds: 0,
             pending_insts: Vec::new(),
             native_cls_id: 0,
             result_insts: std::collections::HashSet::new(),
@@ -145,6 +149,7 @@ impl ModEmitter {
             class_frames: HashMap::new(),
             class_order: Vec::new(),
             vt_slots: HashMap::new(),
+            vt_built: std::collections::HashSet::new(),
             llvm_method: std::collections::HashSet::new(),
             vt_cap: 0,
             tp_subst: Vec::new(),

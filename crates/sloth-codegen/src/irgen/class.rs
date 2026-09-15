@@ -428,9 +428,10 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    /// attach the class vtable to a fresh object (header word 1). Slot value =
-    /// raw fn pointer (llvm.mlir.addressof + llvm.ptrtoint) of the resolved
-    /// method emitting (llvm.func-marked).
+    /// attach the class vtable to a fresh object (header word 1). The class
+    /// vtable is built once per class by a lazy builder func and cached in a
+    /// mutable global cell (patch #28: per-cls global vtable cache); object
+    /// creation just fetches the cached pointer.
     pub(crate) fn emit_vt_build(&mut self, fw: &mut FnWalk, clsname: &str, obj: &str) {
         // effective impls: union over the superclass chain
         let mut impls: Vec<String> = Vec::new();
@@ -451,6 +452,59 @@ impl ModEmitter {
         if impls.is_empty() || self.vt_cap == 0 {
             return;
         }
+        let builder = self.emit_vt_builder(clsname, &impls);
+        let vt = fw.v();
+        fw.op(&format!(
+            "    {} = call @{}() : () -> i64",
+            vt, builder
+        ));
+        fw.op(&format!(
+            "    call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
+            obj, vt
+        ));
+    }
+
+    /// per-cls vtable builder `@sloth_vtb_<mod>_<cls>() -> i64`: builds the
+    /// class vtable (slot -> raw fn pointer of the resolved llvm.func method)
+    /// on first sight, keeps it in a mutable global cell, and returns it.
+    /// Emits once per class; later objects reuse the cached pointer.
+    fn emit_vt_builder(&mut self, clsname: &str, impls: &Vec<String>) -> String {
+        let fname = format!("sloth_vtb_{}_{}", self.name, clsname);
+        if self.vt_built.contains(&fname) {
+            return fname;
+        }
+        self.vt_built.insert(fname.clone());
+        self.stat_vtbuilds += 1;
+        let ity = self.r.mk(Ty::I64);
+        let modname = self.name.clone();
+        let gsym = self.declare_global(&modname, &format!("vtb_{}", clsname), ity);
+        let mut fw = fresh_walk(self);
+        let g = fw.v();
+        fw.op(&format!(
+            "    {} = memref.get_global @{} : memref<1xi64>",
+            g, gsym
+        ));
+        let zi = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", zi));
+        let cached = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            cached, g, zi
+        ));
+        let zz = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zz));
+        let cc = fw.v();
+        fw.op(&format!(
+            "    {} = arith.cmpi eq, {}, {} : i64",
+            cc, cached, zz
+        ));
+        let cce = fw.v();
+        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", cce, cc));
+        let lbl_build = fw.newlabel("vtb");
+        let lbl_done = fw.newlabel("vtb");
+        fw.cjump(&cce, &lbl_build, &lbl_done);
+        // miss: build the class vtable once
+        fw.label(&lbl_build);
         let ncap = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
@@ -493,10 +547,25 @@ impl ModEmitter {
                 vt, slotc, fp
             ));
         }
+        // cache the pointer for later objects, then merge
         fw.op(&format!(
-            "    call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
-            obj, vt
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            vt, g, zi
         ));
+        fw.jump(&lbl_done);
+        // hit: return the cached pointer
+        fw.label(&lbl_done);
+        let res = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            res, g, zi
+        ));
+        fw.op(&format!("    return {} : i64", res));
+        self.out.push_str(&format!(
+            "  func.func private @{}() -> i64 {{\n{}  }}\n",
+            fname, fw.cur
+        ));
+        fname
     }
 }
 

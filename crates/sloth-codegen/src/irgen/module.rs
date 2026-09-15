@@ -444,8 +444,8 @@ impl ModEmitter {
     pub fn take_ir(me: &mut ModEmitter) -> String {
         if std::env::var("SLOTH_STATS").as_deref() == Ok("1") {
             eprintln!(
-                "sloth-stats: module={} direct-method-calls={} dyn-calls={} generic-instances={} extern-decls={}",
-                me.name, me.stat_dcalls, me.stat_dyncalls, me.stat_ginsts, me.stat_extdecls
+                "sloth-stats: module={} direct-method-calls={} dyn-calls={} generic-instances={} extern-decls={} per-cls-vtables={}",
+                me.name, me.stat_dcalls, me.stat_dyncalls, me.stat_ginsts, me.stat_extdecls, me.stat_vtbuilds
             );
         }
         let mut m = format!("module @{} {{\n", me.name);
