@@ -358,6 +358,7 @@ impl ModEmitter {
             variadic: None,
             ret: Some(l.ret.clone().unwrap_or_else(|| Type::prim(Prim::Int))),
             body: l.body.clone(),
+            is_extern: false,
         };
         let sym = self.emit_func(&lname, None, &fd, None, false);
         let pty: Vec<TyId> = l
@@ -896,6 +897,21 @@ impl ModEmitter {
     ) -> String {
         let plan = self.plan_func(name, cls, f, variadic);
         if self.emitted_names.contains(&plan.mangled) {
+            return plan.mangled;
+        }
+        // extern func: body-less declaration kept under its raw C-ABI name
+        if f.is_extern {
+            self.emitted_names.push(name.to_string());
+            self.out.push_str(&format!(
+                "  func.func private @{}({}) -> {}\n",
+                name,
+                plan.params
+                    .iter()
+                    .map(|p| if self.is_float(p.1) { "f64" } else { "i64" })
+                    .collect::<Vec<&str>>()
+                    .join(", "),
+                mlir_ret_ty(self, plan.ret),
+            ));
             return plan.mangled;
         }
         // methods addressable by vtable slots are emitted as llvm.func
@@ -2810,7 +2826,8 @@ impl ModEmitter {
             let variadic = fd.variadic.clone();
             let plan = self.plan_func(&name, None, &fd, variadic.as_ref());
             let r = fw.v();
-            let sym = plan.mangled.clone();
+            // extern funcs resolve under their raw C-ABI symbol
+            let sym = if fd.is_extern { name.clone() } else { plan.mangled.clone() };
             let (mut vals, tys) = match &variadic {
                 Some(vd) => {
                     // extra args pack into one Array<T> word; the declared elem

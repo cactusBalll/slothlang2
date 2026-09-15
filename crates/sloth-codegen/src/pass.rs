@@ -1388,6 +1388,43 @@ mod irgen_p16 {
     }
 }
 
+// ---------------- patch #17: extern func (C ABI) ----------------
+mod irgen_p17 {
+    use super::*;
+
+    /// extern funcs declare raw C-ABI symbols and call straight into the rt
+    #[test]
+    fn extern_func_direct() {
+        let src = r#"
+            extern func sloth_extern_floor(x: float): float;
+            extern func sloth_extern_powf(a: float, b: float): float;
+            func main(): unit {
+                let two: float = 2.0;
+                let half: float = 0.5;
+                print(sloth_extern_floor(two * 0.75));
+                print(sloth_extern_powf(two, half));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// extern decl parses as a statement position? no — parsed as func decl only
+    #[test]
+    fn extern_decl_diag_missing_body() {
+        // sloth-extern symbols only exist in libsloth_rt.so; a wrong raw name must
+        // break the JIT load instead of being silently aliased
+        let src = "extern func sloth_no_such_symbol(x: float): float;\nfunc main(): unit {\n    print(sloth_no_such_symbol(1.0));\n}\n";
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("missing extern symbol accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("Symbols not found") || e.contains("invoke sloth_main failed"),
+            "unexpected: {}", e
+        );
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

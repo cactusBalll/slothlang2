@@ -639,6 +639,19 @@ pub extern "C" fn sloth_arr_set_f64(a: i64, i: i64, v: f64) -> i64 {
     }
 }
 
+// ---------------- example extern (C-ABI) functions ----------------
+
+/// example `extern func` targets (§5.4): linked directly for JIT/AOT
+#[no_mangle]
+pub extern "C" fn sloth_extern_floor(x: f64) -> f64 {
+    x.floor()
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_extern_powf(a: f64, b: f64) -> f64 {
+    a.powf(b)
+}
+
 /// dynamic trait dispatch: vtable primitives.
 
 #[repr(C)]

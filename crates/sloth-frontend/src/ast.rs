@@ -63,6 +63,8 @@ pub struct FuncDef {
     pub variadic: Option<Variadic>,
     pub ret: Option<Type>,
     pub body: Box<Stmt>,
+    /// extern func: C-ABI external declaration, no body
+    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -143,7 +143,7 @@ impl Parser {
         }
         matches!(
             self.peek(),
-            Some(Tok::Ident(s)) if s == "func" || s == "class" || s == "trait" || s == "var" || s == "let"
+            Some(Tok::Ident(s)) if s == "func" || s == "class" || s == "trait" || s == "var" || s == "let" || s == "extern"
         )
     }
 
@@ -172,6 +172,11 @@ impl Parser {
                 self.ptr += 1;
                 let (name, pos, f) = self.func_after_kw()?;
                 Ok(Decl { kind: DeclKind::Func, name, pos, visible, node: DeclNode::Func(Box::new(f)) })
+            }
+            Some(Tok::Ident(s)) if s == "extern" => {
+                let pos = self.pos();
+                self.ptr += 1;
+                self.extern_func(pos)
             }
             Some(Tok::Ident(s)) if s == "var" || s == "let" => self.var_let_decl(visible),
             Some(Tok::Ident(s)) if s == "class" => self.class_decl(visible),
@@ -354,11 +359,53 @@ impl Parser {
             None
         };
         let body = self.block()?;
-        Ok((
+            Ok((
             name,
             pos,
-            FuncDef { type_params, params, variadic, ret, body: Box::new(body) },
+            FuncDef { type_params, params, variadic, ret, body: Box::new(body), is_extern: false },
         ))
+    }
+
+    /// extern func declaration: `extern func name(params): ret;`
+    fn extern_func(&mut self, pos: Pos) -> PResult<Decl> {
+        self.expect_kw("func")?;
+        let (name, _) = self.ident("extern function name")?;
+        let type_params = self.type_params()?;
+        let (params, variadic) = self.params()?;
+        let ret = if self.eat(Tok::Arrow) || self.eat(Tok::Colon) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect(Tok::Semi, "';' after extern func")?;
+        if !type_params.is_empty() {
+            return Err(self.err("extern func cannot be generic"));
+        }
+        if variadic.is_some() {
+            return Err(self.err("extern func cannot be variadic"));
+        }
+        for p in &params {
+            if p.ty.is_none() {
+                return Err(self.err("extern func parameters must have explicit types"));
+            }
+        }
+        Ok(Decl {
+            kind: DeclKind::Func,
+            name,
+            pos,
+            visible: true,
+            node: DeclNode::Func(Box::new(FuncDef {
+                type_params,
+                params,
+                variadic,
+                ret,
+                body: Box::new(Stmt {
+                    pos: pos.clone(),
+                    node: StmtNode::Expr(Expr { pos: pos.clone(), node: ExprNode::Int(0) }),
+                }),
+                is_extern: true,
+            })),
+        })
     }
 
     fn class_decl(&mut self, visible: bool) -> PResult<Decl> {
