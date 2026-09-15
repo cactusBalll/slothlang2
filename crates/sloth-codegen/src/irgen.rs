@@ -644,6 +644,22 @@ impl ModEmitter {
             _ => false,
         }
     }
+
+    /// typed-bound lint in builtin positions with a clearer message context
+    fn satisfies_bound_check(&mut self, pos: &Pos, t: &TyId, bound: &str, ctx: &str) {
+        let ok = self.satisfies_bound(*t, bound);
+        if !ok {
+            self.err(
+                pos,
+                format!(
+                    "`{}` requires trait bound `{}` (`{}` does not satisfy it)",
+                    ctx,
+                    bound,
+                    sloth_frontend::ty::ty_name(self.r.get(*t)),
+                ),
+            );
+        }
+    }
 }
 
 /// mangle: module_scope_name for top-level, class method _Class_method
@@ -2966,17 +2982,42 @@ impl ModEmitter {
             "print" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
                 let mty = mlir_word_ty(t, &self.r);
-                let sym = match self.r.get(t) {
-                    Ty::Str => "sloth_rt_print_str",
-                    Ty::F64 => "sloth_rt_print_f64",
-                    Ty::Bool => "sloth_rt_print_bool",
-                    _ => "sloth_rt_print_i64",
-                };
-                fw.op(&format!(
-                    "    {} = call @{}({}) : ({}) -> i64",
-                    r, sym, v, mty
-                ));
-                (r, self.r.mk(Ty::Unit))
+                match self.r.get(t).clone() {
+                    // Display-plumbed print: user class needs impl Display + to_str()
+                    Ty::Named(ref cls, _) => {
+                        self.satisfies_bound_check(pos, &t, "Display", "print");
+                        let sfd = self.find_method(cls, "to_str").ok_or_else(|| ()).ok();
+                        if let Some((defcls, fd)) = sfd {
+                            let (sv, _st) = self.emit_method_call(
+                                fw, &defcls, "to_str", &fd, false,
+                                &vec![(v.clone(), t.clone())],
+                                &vec!["i64".to_string()], pos,
+                            );
+                            let r2 = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_rt_print_str({}) : (i64) -> i64",
+                                r2, sv
+                            ));
+                            (r2, self.r.mk(Ty::Unit))
+                        } else {
+                            self.err(pos, "`print` on class requires impl Display with `to_str`".to_string());
+                            (r, self.r.mk(Ty::Unit))
+                        }
+                    }
+                    _ => {
+                        let sym = match self.r.get(t) {
+                            Ty::Str => "sloth_rt_print_str",
+                            Ty::F64 => "sloth_rt_print_f64",
+                            Ty::Bool => "sloth_rt_print_bool",
+                            _ => "sloth_rt_print_i64",
+                        };
+                        fw.op(&format!(
+                            "    {} = call @{}({}) : ({}) -> i64",
+                            r, sym, v, mty
+                        ));
+                        (r, self.r.mk(Ty::Unit))
+                    }
+                }
             }
             "int" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();

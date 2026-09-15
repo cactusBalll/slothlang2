@@ -1245,6 +1245,7 @@ mod irgen_p15 {
         let src = r#"
             trait Hashable { func hashKey(): int; }
             class Point impl Hashable {
+                var x: int = 42;
                 func __init__(): unit { return; }
                 func hashKey(): int { return 7; }
             }
@@ -1254,7 +1255,7 @@ mod irgen_p15 {
             }
             func main(): unit {
                 print(pick(7));
-                print(pick(Point()));
+                print(pick(Point()).x);
             }
         "#;
         run_src(src, "main").unwrap();
@@ -1485,6 +1486,59 @@ mod irgen_p18a {
         "#;
         // class without eq uses the default body; dyn dispatch ABI-checked
         run_src(src, "main").unwrap();
+    }
+}
+
+// ---------------- patch #18b: Display-plumbed print ----------------
+mod irgen_p18b {
+    use super::*;
+
+    /// print(usr-class) routes to impl-Display to_str() then prints the string
+    #[test]
+    fn print_display_to_str() {
+        let src = r#"
+            trait Display {
+                func to_str(): str;
+            }
+            class Pt impl Display {
+                var x: int;
+                var y: int;
+                func __init__(x: int, y: int): unit {
+                    this.x = x;
+                    this.y = y;
+                    return;
+                }
+                func to_str(): str {
+                    return "Pt(${this.x}, ${this.y})";
+                }
+            }
+            func main(): unit {
+                print(Pt(1, 2));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// no Display impl: print refuses diagnostically
+    #[test]
+    fn print_display_missing_diag() {
+        let src = r#"
+            class Plain {
+                func __init__(): unit { return; }
+            }
+            func main(): unit {
+                let q = Plain();
+                print(q);
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("class print without Display accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("requires trait bound `Display`"),
+            "unexpected: {}", e
+        );
     }
 }
 
