@@ -1738,6 +1738,38 @@ impl ModEmitter {
         mut map: std::collections::HashMap<String, TyId>,
     ) -> (String, TyId) {
         let tnames: Vec<String> = fd.type_params.iter().map(|p| p.name.clone()).collect();
+        // unbound type params: infer from the expected return type hint (let
+        // annotation / assignment target surface — patch #38)
+        if tnames.iter().any(|n| !map.contains_key(n)) {
+            if let Some(&hint) = self.exp_ret.last() {
+                if !matches!(self.r.get(hint), Ty::Unit) {
+                    let pat = self.shape_of_retched(fd.ret.clone(), &tnames);
+                    self.unify_tp(&fd.type_params, pat, hint, &mut map);
+                    // declared Result<T,E> surface: the registered instance's
+                    // class frame provides the concrete T/E bindings
+                    if let Ty::Named(hn, _) = self.r.get(hint).clone() {
+                        if self.result_insts.contains(&hn) {
+                            let frame = self.class_frames.get(&hn).cloned();
+                            if let Some(frame) = frame {
+                                if let Some(Type::Simple(SimpleType::Named(_, ra))) =
+                                    fd.ret.as_ref()
+                                {
+                                    for ra_arg in ra.iter() {
+                                        if let Type::Simple(SimpleType::Ident(rn)) = ra_arg {
+                                            if tnames.contains(rn) {
+                                                if let Some(&bt) = frame.get(rn) {
+                                                    map.entry(rn.clone()).or_insert(bt);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for tn in &tnames {
             if !map.contains_key(tn) {
                 self.err(pos, format!("cannot infer type parameter `{}`", tn));

@@ -2996,3 +2996,64 @@ mod irgen_p37 {
         );
     }
 }
+
+// ---------------- patch #38: return-driven generic inference ----------------
+mod irgen_p38 {
+    use super::*;
+
+    /// T appears only in the return surface: annotation/assign-target face
+    /// binds it (`func fail<T, E>(e: E): Result<T, E>` — no T-bearing param)
+    #[test]
+    fn let_annotation_infer_return() {
+        let src = r#"
+            func fail<T, E>(e: E): Result<T, E> {
+                return err(e);
+            }
+            func main(): unit {
+                var r: Result<int, str> = fail("boom");
+                print(r.err());          // expect: boom
+
+                var q: Result<float, str> = fail("na");
+                print(q.err());          // expect: na
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// no expected-type context for the leftover T: diagnosed (Plan convention)
+    #[test]
+    fn infer_without_hint_diag() {
+        let src = r#"
+            func fail<T, E>(e: E): Result<T, E> {
+                return err(e);
+            }
+            func main(): unit {
+                print(fail("boom"));
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("unhinted T accepted silently"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("cannot infer type parameter"),
+            "unexpected: {}",
+            e
+        );
+    }
+
+    /// explicit type args still win and the inference path changes nothing
+    #[test]
+    fn explicit_targs_kept() {
+        let src = r#"
+            func fail<T, E>(e: E): Result<T, E> {
+                return err(e);
+            }
+            func main(): unit {
+                let r = fail<int, str>("boom");
+                print(r.err());          // expect: boom
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}

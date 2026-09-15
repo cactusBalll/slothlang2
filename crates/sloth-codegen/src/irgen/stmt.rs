@@ -81,7 +81,15 @@ impl ModEmitter {
                 };
                 let (v, t) = match &pre {
                     Some((w, tt)) => (w.clone(), *tt),
-                    None => self.emit_expr(fw, init),
+                    None => {
+                        // expected-type hint from the declared annotation
+                        // (return-driven generic inference, patch #38)
+                        let hint = ty.as_ref().map(|te| self.ty_of(te));
+                        self.exp_ret.push(hint.unwrap_or(self.r.mk(Ty::Unit)));
+                        let out = self.emit_expr(fw, init);
+                        self.exp_ret.pop();
+                        out
+                    }
                 };
                 // declared `dyn T` / trait positions coerce the binding's type
                 let t = match ty {
@@ -210,7 +218,21 @@ impl ModEmitter {
                 }
                 let (mut v, vty) = match pre {
                     Some((w, tt)) => (w, tt),
-                    None => self.emit_expr(fw, value),
+                    None => {
+                        let hint = if let (Some(PathSeg::Name(h)), _) =
+                            (target.first(), target.last())
+                        {
+                            fw.lookup(&h.clone())
+                                .map(|x| x.1)
+                                .unwrap_or_else(|| self.r.mk(Ty::Unit))
+                        } else {
+                            self.r.mk(Ty::Unit)
+                        };
+                        self.exp_ret.push(hint);
+                        let out = self.emit_expr(fw, value);
+                        self.exp_ret.pop();
+                        out
+                    }
                 };
                 // super.x = v: store into an inherited field slot of this
                 if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) =

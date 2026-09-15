@@ -72,6 +72,10 @@ pub struct ModEmitter {
     pub stat_dcalls: usize,
     pub stat_dyncalls: usize,
     pub stat_ginsts: usize,
+    /// expected-type hint stack for return-driven inference (patch #38):
+    /// let/var annotation & assignment target surface pushed around emitting
+    /// the init/target value
+    pub(crate) exp_ret: Vec<TyId>,
     pub stat_extdecls: usize,
     pub stat_vtbuilds: usize,
     /// registration order of classes (deterministic dyn-dispatch chain)
@@ -140,6 +144,7 @@ impl ModEmitter {
             stat_dcalls: 0,
             stat_dyncalls: 0,
             stat_ginsts: 0,
+            exp_ret: Vec::new(),
             stat_extdecls: 0,
             stat_vtbuilds: 0,
             pending_insts: Vec::new(),

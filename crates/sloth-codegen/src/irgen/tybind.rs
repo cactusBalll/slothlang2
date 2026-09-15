@@ -465,3 +465,14 @@ impl ModEmitter {
         }
     }
 }
+
+impl ModEmitter {
+    /// declared return surface as a matchable pie shape with T holes
+    /// (patch #38 return-driven inference)
+    pub(crate) fn shape_of_retched(&mut self, ret: Option<Type>, tnames: &[String]) -> TyId {
+        match ret {
+            Some(t) => self.shape_of(&t, tnames),
+            None => self.r.mk(Ty::Unit),
+        }
+    }
+}
