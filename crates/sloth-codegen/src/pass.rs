@@ -3097,3 +3097,55 @@ mod irgen_p39 {
         run_src(src, "main").unwrap();
     }
 }
+
+// ---------------- patch #41: multi-error diag batch ----------------
+mod irgen_p41 {
+    use super::*;
+
+    /// several unrelated semantic errors in one pass all get reported
+    /// (numbered batch, no first-error short-circuit)
+    #[test]
+    fn multi_errors_all_reported() {
+        let src = r#"
+            func main(): unit {
+                var x = 1;
+                x = "s";
+                var y = 2;
+                y = 1.5;
+                if 3 {
+                    print(0);
+                }
+            }
+        "#;
+        let prog = sloth_frontend::parser::parse(src).unwrap();
+        let mut me = ModEmitter::new("main");
+        me.emit_module(&prog);
+        assert!(me.diags.len() >= 3, "want >= 3 diags, got {:?}", me.diags);
+        let rep = crate::irgen::format_diags(&me);
+        assert!(rep.contains("L4:C17"), "unexpected: {}", rep);
+        assert!(rep.contains("L7:C17"), "unexpected: {}", rep);
+        assert!(rep.contains("3 error(s)"), "unexpected: {}", rep);
+    }
+
+    /// an unknown identifier does not stop later statements from checking
+    #[test]
+    fn err_does_not_short_circuit() {
+        let src = r#"
+            func main(): unit {
+                print(nope);
+                var q = 2;
+                q = "s";
+            }
+        "#;
+        let prog = sloth_frontend::parser::parse(src).unwrap();
+        let mut me = ModEmitter::new("main");
+        me.emit_module(&prog);
+        assert!(
+            me.diags.len() >= 2
+                && me.diags.iter().any(|d| d.msg.contains("unknown identifier `nope`"))
+                && me.diags.iter().any(|d| d.msg.contains("assignment to `q`")),
+            "unexpected: {:?}",
+            me.diags
+        );
+    }
+}

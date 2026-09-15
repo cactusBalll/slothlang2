@@ -124,7 +124,7 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     let mut me = ModEmitter::new(mod_name);
     me.emit_module(&prog);
     if !me.diags.is_empty() {
-        return Err(format!("codegen diags: {:?}", me.diags));
+        return Err(format_diags(&me));
     }
     let ir0 = ModEmitter::take_ir(&mut me);
     Ok(normalize_indices(&ir0))
@@ -140,7 +140,7 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     // hmm: root module runs under @sloth_main through emit_module
     me.emit_module(&root);
     if !me.diags.is_empty() {
-        return Err(format!("codegen diags: {:?}", me.diags));
+        return Err(format_diags(&me));
     }
     let ir0 = ModEmitter::take_ir(&mut me);
     Ok(normalize_indices(&ir0))
@@ -226,4 +226,17 @@ fn rename_plain_calls(t: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// full-compilation diagnostic batch report (patch #41): numbered with
+/// line/col tags instead of a Debug dump; multi-error scenarios surface
+/// every collected diag of the whole pass
+pub fn format_diags(me: &ModEmitter) -> String {
+    let mut s = String::from("codegen diags:\n");
+    for d in &me.diags {
+        s.push_str(&format!("  [L{}:C{}] {}\n", d.line, d.col, d.msg));
+        s.push('\n');
+    }
+    s.push_str(&format!("  ({} error(s))", me.diags.len()));
+    s
 }
