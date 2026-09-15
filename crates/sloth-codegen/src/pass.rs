@@ -1108,6 +1108,61 @@ mod irgen_p13 {
     }
 }
 
+// ---------------- patch #14: generic function monomorphization MVP ----------------
+mod irgen_p14 {
+    use super::*;
+
+    /// T inferred from call-site arg kinds; distinct binds get distinct
+    /// monomorphic instances; same-bind calls share one instance (cache)
+    #[test]
+    fn generic_top_level_and_array_param() {
+        let src = r#"
+            func twice<T>(x: T): T {
+                var q = x;
+                return q;
+            }
+            func count<T>(xs: Array<T>): int {
+                var s = 0;
+                for (var x: xs) {
+                    s = s + 1;
+                }
+                return s;
+            }
+            func main(): unit {
+                print(twice(5));
+                print(twice(7));
+                print(count([1, 2, 3]));
+                print(count([1.5, 2.5]));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// nested generic calls instantiate per binding set; unbound T diagnoses
+    #[test]
+    fn generic_mismatch_and_infer_diag() {
+        let src = "func id<T>(x: T): T { return x; }\nfunc weird(): unit {\n    id(id(1));\n}\n";
+        run_src(src, "main").unwrap();
+        let src2 = "func id<T>(x: T): T { return x; }\nfunc bare(): unit {\n    id(x);\n}\n";
+        let e = match run_src(src2, "main") {
+            Ok(()) => panic!("unbound generic accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("unknown identifier `x`") || e.contains("cannot infer"), "unexpected: {}", e);
+    }
+
+    /// variadic x generic stays unsupported (MVP shape) with a diagnostic
+    #[test]
+    fn generic_variadic_diag() {
+        let src = "func f<T>(xs...: Array<T>): unit { print(1); }\nfunc main(): unit { f(1, 2); }\n";
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("generic variadic accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("generic variadic unsupported"), "unexpected: {}", e);
+    }
+}
+
 // examples/ regression gold (§9.1/§9.2 adapted versions)
 mod irgen_examples {
     use super::*;

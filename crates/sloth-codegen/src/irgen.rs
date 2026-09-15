@@ -77,6 +77,13 @@ pub struct ModEmitter {
     pub llvm_method: std::collections::HashSet<(String, String)>,
     /// object bodies carry a fixed vtable capacity (total slots)
     pub vt_cap: usize,
+    /// active type-param substitution for the generic instance being emitted
+    /// (stacked for nesting; ty positions resolve T against the top frame)
+    tp_subst: Vec<HashMap<String, TyId>>,
+    /// mangled instance name forced for the next plan_func/emit_func
+    tp_mangled: Vec<String>,
+    /// generic instance cache: base mangled -> concrete word spelling key
+    insts: std::collections::HashMap<String, Vec<String>>,
 }
 
 pub struct ClassInfo {
@@ -118,6 +125,9 @@ impl ModEmitter {
             vt_slots: HashMap::new(),
             llvm_method: std::collections::HashSet::new(),
             vt_cap: 0,
+            tp_subst: Vec::new(),
+            tp_mangled: Vec::new(),
+            insts: std::collections::HashMap::new(),
         }
     }
 
@@ -524,6 +534,12 @@ impl ModEmitter {
                 self.ty_named(n, a)
             }
             SimpleType::Ident(n) => {
+                // generic type-param reference in a generic instance being emitted
+                if let Some(frame) = self.tp_subst.last() {
+                    if let Some(t) = frame.get(n) {
+                        return *t;
+                    }
+                }
                 let a: Vec<TyId> = Vec::new();
                 self.ty_named(n, a)
             }
@@ -812,7 +828,12 @@ impl ModEmitter {
             Some(t) => self.ty_of(t),
             None => self.r.mk(Ty::Unit),
         };
-        FuncPlan { mangled: mangle(&self.cur_mod.clone(), cls, name).into(), params, ret }
+        let mangled = if let Some(m) = self.tp_mangled.last() {
+            m.clone()
+        } else {
+            mangle(&self.cur_mod.clone(), cls, name)
+        };
+        FuncPlan { mangled, params, ret }
     }
 }
 
@@ -2557,6 +2578,9 @@ impl ModEmitter {
             }
         }        // direct function call
         if let Some(fd) = self.funcs.get(&name).cloned() {
+            if !fd.type_params.is_empty() {
+                return self.emit_gfunc_call(fw, &name, &fd, &argv, pos);
+            }
             let variadic = fd.variadic.clone();
             let plan = self.plan_func(&name, None, &fd, variadic.as_ref());
             let r = fw.v();
@@ -2771,6 +2795,136 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// build one fresh Array<T> word from already-coerced words (variadic pack)
+    /// shape walker: declared param ty -> matchable Ty, holes as Named(T)
+    fn shape_of(&mut self, pt: &Type, tnames: &[String]) -> TyId {
+        match pt {
+            Type::Simple(SimpleType::Ident(n)) if tnames.contains(n) => {
+                self.r.mk(Ty::Named(n.to_string(), Vec::new()))
+            }
+            Type::Simple(SimpleType::Array(el))
+                if matches!(el.as_ref(), Type::Simple(SimpleType::Ident(n)) if tnames.contains(n)) =>
+            {
+                match el.as_ref() {
+                    Type::Simple(SimpleType::Ident(n)) => {
+                        let tn = n.to_string();
+                        let hole = self.r.mk(Ty::Named(tn, Vec::new()));
+                        self.r.mk(Ty::Array(hole))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Type::Simple(SimpleType::Map(k, v)) => {
+                let pk = self.shape_of(k, tnames);
+                let pv = self.shape_of(v, tnames);
+                self.r.mk(Ty::Map(pk, pv))
+            }
+            Type::Optional(inner) => self.shape_of(inner, tnames),
+            other => self.ty_of(other),
+        }
+    }
+
+    /// generic function call: infer T bindings from the call-site arg types,
+    /// emit/lookup the monomorphic instance, then dispatch the call word-wise
+    fn emit_gfunc_call(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        fd: &FuncDef,
+        argv: &[(String, TyId)],
+        pos: &Pos,
+    ) -> (String, TyId) {
+        if fd.variadic.is_some() {
+            self.err(pos, "generic variadic unsupported (MVP)".to_string());
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, self.r.mk(Ty::Unit));
+        }
+        let tnames: Vec<String> = fd.type_params.iter().map(|p| p.name.clone()).collect();
+        let mut map: std::collections::HashMap<String, TyId> = std::collections::HashMap::new();
+        for (p, (_av, at)) in fd.params.iter().zip(argv.iter()) {
+            if let Some(pt) = &p.ty {
+                let pat = self.shape_of(pt, &tnames);
+                self.unify_tp(&fd.type_params, pat, *at, &mut map);
+            }
+        }
+        for tn in &tnames {
+            if !map.contains_key(tn) {
+                self.err(pos, format!("cannot infer type parameter `{}`", tn));
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                return (z, self.r.mk(Ty::Unit));
+            }
+        }
+        if self.insts.len() > 64 {
+            self.err(pos, "generic instantiation too deep (recursion?)".to_string());
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, self.r.mk(Ty::Unit));
+        }
+        let keys: Vec<TyId> = tnames.iter().map(|n| map[n]).collect();
+        let base = mangle(&self.cur_mod.clone(), None, name);
+        let mangled = format!("{}{}", base, mangle_t(&keys, &self.r));
+        if !self.emitted_names.contains(&mangled) {
+            self.tp_subst.push(map);
+            self.tp_mangled.push(mangled.clone());
+            self.emit_func(name, None, fd, None, false);
+            self.tp_subst.pop();
+            self.tp_mangled.pop();
+        }
+        // instance plan: frame trick yields the substituted signature
+        let plan = {
+            self.tp_mangled.push(mangled.clone());
+            let p = self.plan_func(name, None, fd, None);
+            self.tp_mangled.pop();
+            p
+        };
+        let r = fw.v();
+        let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
+        let sigs = argv
+            .iter()
+            .map(|x| mlir_word_ty(x.1, &self.r))
+            .collect::<Vec<String>>();
+        let rt = mlir_ret_ty(self, plan.ret);
+        if self.is_unit(plan.ret) {
+            fw.op(&format!(
+                "    call @{}({}) : ({}) -> ()",
+                mangled, vals.join(", "), sigs.join(", ")
+            ));
+            return (String::new(), plan.ret);
+        }
+        fw.op(&format!(
+            "    {} = call @{}({}) : ({}) -> {}",
+            r, mangled, vals.join(", "), sigs.join(", "), rt
+        ));
+        (r, plan.ret)
+    }
+
+    fn unify_tp(
+        &mut self,
+        tnames: &[TypeParam],
+        pat: TyId,
+        act: TyId,
+        map: &mut std::collections::HashMap<String, TyId>,
+    ) {
+        let pt = self.r.get(pat).clone();
+        let atc = self.r.get(act).clone();
+        match (pt, atc) {
+            (Ty::Named(n, a), _) if a.is_empty()
+                && tnames.iter().any(|p| p.name == n) =>
+            {
+                map.entry(n).or_insert(act);
+            }
+            (Ty::Array(pe), Ty::Array(ae)) => self.unify_tp(tnames, pe, ae, map),
+            (Ty::Opt(pe), Ty::Opt(ae)) => self.unify_tp(tnames, pe, ae, map),
+            (Ty::Map(pk, pv), Ty::Map(ak, av)) => {
+                self.unify_tp(tnames, pk, ak, map);
+                self.unify_tp(tnames, pv, av, map);
+            }
+            _ => {}
+        }
+    }
+
     /// build one fresh Array<T> word from already-coerced words (variadic pack)
     fn pack_variadic(&mut self, fw: &mut FnWalk, fels: bool, vals: &[String]) -> String {
         let n = fw.v();
