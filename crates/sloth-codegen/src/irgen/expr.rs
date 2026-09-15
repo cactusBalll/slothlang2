@@ -953,16 +953,65 @@ impl ModEmitter {
                     m, kv0
                 ));
                 for (kev, vev) in kevs.iter().zip(vevs.iter()) {
+                    // object keys route the monomorphized hash() into the map
+                    // (patch #35); pointer identity remains without one
+                    let mut use_h: Option<String> = None;
+                    if anyk_obj {
+                        if let Ty::Named(kcls, _) = self.r.get(kev.1).clone() {
+                            match self.find_map_key_hash(&kcls) {
+                                Some((hmname, defcls, hfd)) => {
+                                    let oargv = vec![(kev.0.clone(), kev.1)];
+                                    let osig = vec![mlir_word_ty(kev.1, &self.r)];
+                                    let (hv, ht) = self.emit_method_call(
+                                        fw,
+                                        &defcls,
+                                        &hmname,
+                                        &hfd,
+                                        false,
+                                        &oargv,
+                                        &osig,
+                                        &e.pos,
+                                    );
+                                    let _ = ht;
+                                    use_h = Some(hv);
+                                }
+                                None => {
+                                    self.err(
+                                        &e.pos,
+                                        format!(
+                                            "map key `{}` implements no `hash()`-family method — keyed by pointer identity (Hashable surface needs `hash()`/`hashKey()`/`__hash__()`)",
+                                            kcls
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let (setsym, vsig) = match (anyk_str, anyf) {
                         (true, true) => ("sloth_map_str_set_f64", "f64"),
                         (true, false) => ("sloth_map_str_set", "i64"),
                         (false, true) => ("sloth_map_set_f64", "f64"),
                         (false, false) => ("sloth_map_set", "i64"),
                     };
-                    fw.op(&format!(
-                        "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
-                        setsym, m, kev.0, vev.0, vsig
-                    ));
+                    match use_h {
+                        Some(h) => {
+                            let (setsym, vsig) = if anyf {
+                                ("sloth_map_set_h_f64", "f64")
+                            } else {
+                                ("sloth_map_set_h", "i64")
+                            };
+                            fw.op(&format!(
+                                "    call @{}({}, {}, {}, {}) : (i64, i64, i64, {}) -> i64",
+                                setsym, m, kev.0, h, vev.0, vsig
+                            ));
+                        }
+                        None => {
+                            fw.op(&format!(
+                                "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
+                                setsym, m, kev.0, vev.0, vsig
+                            ));
+                        }
+                    }
                 }
                 (m, self.r.mk(Ty::Map(kty, vty)))
             }
@@ -971,6 +1020,8 @@ impl ModEmitter {
                 let (iv, it) = self.emit_expr(fw, idx);
                 let _ = it;
                 let ats = self.r.get(at).clone();
+                let early: std::cell::RefCell<Option<(String, TyId)>> =
+                    std::cell::RefCell::new(None);
                 let (el, getsym, retty) = match &ats {
                     Ty::Array(e) => {
                         if self.is_float(*e) {
@@ -982,13 +1033,73 @@ impl ModEmitter {
                     Ty::Map(k, v) => {
                         let kkind = matches!(self.r.get(*k), Ty::Str);
                         let _ = it;
-                        let (sym, retty) = match (kkind, self.is_float(*v)) {
-                            (true, true) => ("sloth_map_str_get_f64", "f64"),
-                            (true, false) => ("sloth_map_str_get", "i64"),
-                            (false, true) => ("sloth_map_get_f64", "f64"),
-                            (false, false) => ("sloth_map_get", "i64"),
-                        };
-                        (*v, sym, retty)
+                        // object keys call the monomorphized hash() at the
+                        // call site (patch #35) and route the _h ops
+                        if let Ty::Named(kcls, _) = self.r.get(*k).clone() {
+                            if self.class_ids.contains_key(&kcls) {
+                                match self.find_map_key_hash(&kcls) {
+                                    Some((hmname, defcls, hfd)) => {
+                                        let oargv = vec![(iv.clone(), it)];
+                                        let osig = vec![mlir_word_ty(it, &self.r)];
+                                        let (hv, _ht) = self.emit_method_call(
+                                            fw,
+                                            &defcls,
+                                            &hmname,
+                                            &hfd,
+                                            false,
+                                            &oargv,
+                                            &osig,
+                                            &e.pos,
+                                        );
+                                        let (sym, retty) = if self.is_float(*v) {
+                                            ("sloth_map_get_h_f64", "f64")
+                                        } else {
+                                            ("sloth_map_get_h", "i64")
+                                        };
+                                        let r = fw.v();
+                                        fw.op(&format!(
+                                            "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
+                                            r, sym, av, iv, hv, retty
+                                        ));
+                                        *early.borrow_mut() = Some((r, *v));
+                                        (*v, "sloth_map_get", "i64")
+                                    }
+                                    None => {
+                                        self.err(
+                                            &e.pos,
+                                            format!(
+                                                "map key `{}` implements no `hash()`-family method — keyed by pointer identity (Hashable surface needs `hash()`/`hashKey()`/`__hash__()`)",
+                                                kcls
+                                            ),
+                                        );
+                                        let (sym, retty) = match (kkind, self.is_float(*v)) {
+                                            (true, true) => ("sloth_map_str_get_f64", "f64"),
+                                            (true, false) => ("sloth_map_str_get", "i64"),
+                                            (false, true) => ("sloth_map_get_f64", "f64"),
+                                            (false, false) => ("sloth_map_get", "i64"),
+                                        };
+                                        (*v, sym, retty)
+                                    }
+                                }
+                            } else {
+                                // generic type-param key surface: word route
+                                let (sym, retty) = match (kkind, self.is_float(*v)) {
+                                    (true, true) => ("sloth_map_str_get_f64", "f64"),
+                                    (true, false) => ("sloth_map_str_get", "i64"),
+                                    (false, true) => ("sloth_map_get_f64", "f64"),
+                                    (false, false) => ("sloth_map_get", "i64"),
+                                };
+                                (*v, sym, retty)
+                            }
+                        } else {
+                            let (sym, retty) = match (kkind, self.is_float(*v)) {
+                                (true, true) => ("sloth_map_str_get_f64", "f64"),
+                                (true, false) => ("sloth_map_str_get", "i64"),
+                                (false, true) => ("sloth_map_get_f64", "f64"),
+                                (false, false) => ("sloth_map_get", "i64"),
+                            };
+                            (*v, sym, retty)
+                        }
                     }
                     Ty::Named(cn, _) => {
                         // Indexable overload: a[i] ≡ a.__index__(i); element
@@ -1026,6 +1137,9 @@ impl ModEmitter {
                         (self.r.mk(Ty::Unit), "sloth_arr_get", "i64")
                     }
                 };
+                if let Some((r, rtv)) = early.borrow_mut().take() {
+                    return (r, rtv);
+                }
                 let r = fw.v();
                 fw.op(&format!(
                     "    {} = call @{}({}, {}) : (i64, i64) -> {}",

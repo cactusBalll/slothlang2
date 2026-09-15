@@ -208,6 +208,10 @@ pub fn rt_decls() -> String {
   func.func private @sloth_map_get_f64(i64, i64) -> f64
   func.func private @sloth_map_set(i64, i64, i64) -> i64
   func.func private @sloth_map_set_f64(i64, i64, f64) -> i64
+  func.func private @sloth_map_get_h(i64, i64, i64) -> i64
+  func.func private @sloth_map_get_h_f64(i64, i64, i64) -> f64
+  func.func private @sloth_map_set_h(i64, i64, i64, i64) -> i64
+  func.func private @sloth_map_set_h_f64(i64, i64, i64, f64) -> i64
   func.func private @sloth_map_str_get(i64, i64) -> i64
   func.func private @sloth_map_str_get_f64(i64, i64) -> f64
   func.func private @sloth_map_str_set(i64, i64, i64) -> i64

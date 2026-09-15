@@ -351,6 +351,22 @@ impl ModEmitter {
             "int" | "i64" | "float" | "f64" | "str" | "bool" | "range"
         )
     }
+
+    /// map-key hash method (patch #35): the class chain's `hash()`/`hashKey`/
+    /// `__hash__` (0 params, int return) per the Hashable contract
+    pub(crate) fn find_map_key_hash(&mut self, cls: &str) -> Option<(String, String, FuncDef)> {
+        for m in ["hash", "hashKey", "__hash__"] {
+            if let Some((defcls, fd)) =
+                self.find_method(cls, m)
+            {
+                if fd.params.is_empty() && fd.ret.as_ref().map(|t| matches!(t, Type::Simple(SimpleType::Int))).unwrap_or(false)
+                {
+                    return Some((m.to_string(), defcls, fd));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl ModEmitter {

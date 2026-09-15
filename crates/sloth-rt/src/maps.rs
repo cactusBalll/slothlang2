@@ -1,10 +1,12 @@
 //! Open-addressing hash map (linear probing).
 //! Header layout: `[cap, used, kkind, buckets_ptr]` — the header stays put
 //! across growth, only the bucket array is reallocated, so stored map handles
-//! remain valid. Each bucket slot = 3 words `[used, key, value]`.
+//! remain valid. Each bucket slot = 4 words `[used, key, value, hash]`:
+//! `hash` caches the caller-provided content hash for object keys (kkind: 2),
+//! so growth rehashes without re-calling the monomorphized hash() (patch #35).
 //! kkind: 0 = i64 keys, 1 = str keys (interned str handles compared by
-//! content), 2 = object keys (pointer identity + hashed pointer; MVP
-//! wp for Hashable)
+//! content), 2 = object keys (content hash via the `hash()`-family call at
+//! the call site; the legacy plain ops keep pointer identity as fallback)
 
 use crate::arrays::{sloth_arr_new, sloth_arr_push};
 use crate::gc::sloth_gc_alloc;
@@ -12,7 +14,7 @@ use crate::strings::StrT;
 use crate::panics;
 
 const MAP_HDR_W: i64 = 4;
-const MAP_SLOT_W: i64 = 3;
+const MAP_SLOT_W: i64 = 4;
 
 fn map_slot(m: i64, i: i64) -> *mut i64 {
     unsafe {
@@ -77,6 +79,16 @@ fn map_key_eq(kkind: i64, ka: i64, kb: i64) -> bool {
     }
 }
 
+/// object-key equality: pointer identity, or cached-hash equality (the
+/// Hashable⇒Equatable contract of the design: equal hash ⇒ equal value;
+/// reserved-0 h is the fallback route and never implies equality)
+fn map_key_eq_h(kkind: i64, ka: i64, ha: i64, kb: i64, hb: i64) -> bool {
+    if kkind != 2 {
+        return map_key_eq(kkind, ka, kb);
+    }
+    ka == kb || (ha != 0 && ha == hb)
+}
+
 fn map_alloc_buckets(cap: i64) -> *mut i64 {
     unsafe { sloth_gc_alloc(((cap * MAP_SLOT_W) * 8) as libc::size_t) as *mut i64 }
 }
@@ -99,19 +111,31 @@ pub extern "C" fn sloth_map_len(m: i64) -> i64 {
     unsafe { *(m as *mut i64).offset(1) }
 }
 
-/// place a used pair into the table (always the current m; no growth here)
-fn map_insert_raw(m: i64, key: i64, val: i64) {
+/// bucket index for a lookup/insert: object keys use the caller-provided
+/// content hash h (mixed for distribution); builtin keys hash internally
+fn map_bucket_i(kkind: i64, key: i64, h: i64, cap: i64) -> u64 {
+    if kkind == 2 {
+        mix64(h as u64) % (cap as u64)
+    } else {
+        map_key_hash(kkind, key) % (cap as u64)
+    }
+}
+
+/// place a used pair with its cached hash into the table (always the current
+/// m; no growth here)
+fn map_insert_raw(m: i64, key: i64, val: i64, h: i64) {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
         let kkind = *p.offset(2);
-        let mut i = map_key_hash(kkind, key) % (cap as u64);
+        let mut i = map_bucket_i(kkind, key, h, cap);
         loop {
             let s = map_slot(m, i as i64);
             if *s == 0 {
                 *s = 1;
                 *s.offset(1) = key;
                 *s.offset(2) = val;
+                *s.offset(3) = h;
                 *p.offset(1) += 1;
                 return;
             }
@@ -136,20 +160,27 @@ unsafe fn map_grow(m: i64) {
     let mut k = 0i64;
     while k < old_words {
         if *old_bp.offset(k as isize) == 1 {
-            map_insert_raw(m, *old_bp.offset((k + 1) as isize), *old_bp.offset((k + 2) as isize));
+            map_insert_raw(
+                m,
+                *old_bp.offset((k + 1) as isize),
+                *old_bp.offset((k + 2) as isize),
+                *old_bp.offset((k + 3) as isize),
+            );
         }
         k += MAP_SLOT_W;
     }
+    let _ = (kkind, used);
 }
 
-/// find or create the slot for `key`; returns the slot pointer
-fn map_upsert(m: i64, key: i64) -> *mut i64 {
+/// find or create the slot for `key` (h = cached content hash for obj keys);
+/// returns the slot pointer
+fn map_upsert(m: i64, key: i64, h: i64) -> *mut i64 {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
         let kkind = *p.offset(2);
         let used = *p.offset(1);
-        let mut i = map_key_hash(kkind, key) % (cap as u64);
+        let mut i = map_bucket_i(kkind, key, h, cap);
         let mut rounds = 0u64;
         loop {
             let s = map_slot(m, i as i64);
@@ -157,14 +188,15 @@ fn map_upsert(m: i64, key: i64) -> *mut i64 {
                 // free slot: new pair (grow first if load too high)
                 if used * 4 >= cap * 3 {
                     map_grow(m);
-                    return map_upsert(m, key);
+                    return map_upsert(m, key, h);
                 }
                 *s = 1;
                 *s.offset(1) = key;
+                *s.offset(3) = h;
                 *p.offset(1) = used + 1;
                 return s;
             }
-            if map_key_eq(kkind, *s.offset(1), key) {
+            if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, h) {
                 return s;
             }
             i = (i + 1) % (cap as u64);
@@ -172,7 +204,7 @@ fn map_upsert(m: i64, key: i64) -> *mut i64 {
             if rounds > cap as u64 {
                 // table exhausted: grow and retry
                 map_grow(m);
-                return map_upsert(m, key);
+                return map_upsert(m, key, h);
             }
         }
     }
@@ -186,7 +218,7 @@ macro_rules! map_get_impl {
                 let p = m as *mut i64;
                 let cap = *p;
                 let kkind = *p.offset(2);
-                let mut i = map_key_hash(kkind, key) % (cap as u64);
+                let mut i = map_bucket_i(kkind, key, 0, cap);
                 let mut rounds = 0u64;
                 loop {
                     let s = map_slot(m, i as i64);
@@ -194,7 +226,35 @@ macro_rules! map_get_impl {
                         let _ = panics::sloth_panic_nokey(key);
                         std::process::exit(1);
                     }
-                    if map_key_eq(kkind, *s.offset(1), key) {
+                    if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, 0) {
+                        return *(s.offset(2) as *const $valty);
+                    }
+                    i = (i + 1) % (cap as u64);
+                    rounds += 1;
+                }
+            }
+        }
+    };
+}
+
+/// object-key get with a caller-provided content hash (patch #35)
+macro_rules! map_get_h_impl {
+    ($name:ident, $valty:ty) => {
+        #[no_mangle]
+        pub extern "C" fn $name(m: i64, key: i64, h: i64) -> $valty {
+            unsafe {
+                let p = m as *mut i64;
+                let cap = *p;
+                let kkind = *p.offset(2);
+                let mut i = map_bucket_i(kkind, key, h, cap);
+                let mut rounds = 0u64;
+                loop {
+                    let s = map_slot(m, i as i64);
+                    if *s == 0 || rounds > cap as u64 {
+                        let _ = panics::sloth_panic_nokey(key);
+                        std::process::exit(1);
+                    }
+                    if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, h) {
                         return *(s.offset(2) as *const $valty);
                     }
                     i = (i + 1) % (cap as u64);
@@ -210,7 +270,21 @@ macro_rules! map_set_impl {
         #[no_mangle]
         pub extern "C" fn $name(m: i64, key: i64, v: $valty) -> i64 {
             unsafe {
-                let s = map_upsert(m, key);
+                let s = map_upsert(m, key, 0);
+                *(s.offset(2) as *mut $valty) = v;
+                0
+            }
+        }
+    };
+}
+
+/// object-key set with a caller-provided content hash (patch #35)
+macro_rules! map_set_h_impl {
+    ($name:ident, $valty:ty) => {
+        #[no_mangle]
+        pub extern "C" fn $name(m: i64, key: i64, h: i64, v: $valty) -> i64 {
+            unsafe {
+                let s = map_upsert(m, key, h);
                 *(s.offset(2) as *mut $valty) = v;
                 0
             }
@@ -226,6 +300,10 @@ map_set_impl!(sloth_map_set, i64);
 map_set_impl!(sloth_map_set_f64, f64);
 map_set_impl!(sloth_map_str_set, i64);
 map_set_impl!(sloth_map_str_set_f64, f64);
+map_get_h_impl!(sloth_map_get_h, i64);
+map_get_h_impl!(sloth_map_get_h_f64, f64);
+map_set_h_impl!(sloth_map_set_h, i64);
+map_set_h_impl!(sloth_map_set_h_f64, f64);
 
 /// array of key words
 #[no_mangle]
@@ -316,6 +394,27 @@ mod tests {
             }
             assert_eq!(s50, 1, "key 5 present");
             assert_eq!(s60, 1, "key 6 present");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_h {
+    use crate::maps::*;
+
+    /// patch #35: content-hash keyed object slots; equal hash ⇒ equal slot
+    #[test]
+    fn obj_key_getset_h() {
+        unsafe {
+            let m = sloth_map_new(2);
+            let _ = sloth_map_set_h(m, 1001, 31, 10);
+            assert_eq!(sloth_map_len(m), 1);
+            // distinct key word, same cached content hash: contract lookup
+            assert_eq!(sloth_map_get_h(m, 555, 31), 10);
+            // same-hash set overwrites the same slot
+            let _ = sloth_map_set_h(m, 999, 31, 42);
+            assert_eq!(sloth_map_len(m), 1);
+            assert_eq!(sloth_map_get_h(m, 999, 31), 42);
         }
     }
 }

@@ -2781,3 +2781,116 @@ mod irgen_p34 {
         );
     }
 }
+
+// ---------------- patch #35: Map keys via monomorphized hash() ----------------
+mod irgen_p35 {
+    use super::*;
+
+    /// class keys route the monomorphized hash() at every map call site:
+    /// literal construction, index get, index assignment, Entry loop value
+    /// fetch — all on the same content-hash bucket line
+    #[test]
+    fn map_object_key_hash_route() {
+        let src = r#"
+            trait Hashable { func hashKey(): int; }
+            trait Equatable { func __eq__(other: Pt): bool; }
+            class Pt impl Hashable, Equatable {
+                var x: int;
+                func __init__(x: int): unit { this.x = x; return; }
+                func hashKey(): int { return this.x * 31; }
+                func __eq__(other: Pt): bool { return this.x == other.x; }
+            }
+            func main(): unit {
+                var m = @(Pt(1): 10, Pt(2): 20);
+                print(m.len());          // expect: 2
+                let a = Pt(1);
+                print(m[a]);             // expect: 10
+                let b = Pt(2);
+                print(m[b]);             // expect: 20
+                m[b] = 25;               // set via content hash hits the slot
+                print(m[b]);             // expect: 25
+                var s = 0;
+                for (var e: m) {
+                    s = s + e.val;
+                }
+                print(s);                // expect: 35
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// growth-over-threshold map: cached slot hash survives the rehash
+    #[test]
+    fn map_object_key_hash_growth() {
+        let src = r#"
+            trait Hashable { func __hash__(): int; }
+            trait Equatable { func __eq__(other: K): bool; }
+            class K impl Hashable, Equatable {
+                var x: int;
+                func __init__(x: int): unit { this.x = x; return; }
+                func __hash__(): int { return this.x; }
+                func __eq__(other: K): bool { return this.x == other.x; }
+            }
+            func main(): unit {
+                var m = @(K(0): 0);
+                var i = 1;
+                while i < 40 {
+                    let k = K(i);
+                    m[k] = i * 3;
+                    i = i + 1;
+                }
+                print(m.len());          // expect: 40
+                print(m[K(3)]);          // expect: 9
+                print(m[K(39)]);         // expect: 117
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// builtin int keys keep the internal content-hash route through growth
+    #[test]
+    fn map_int_keys_route_kept() {
+        let src = r#"
+            func main(): unit {
+                var m = @(1: 10);
+                var i = 1;
+                while i < 50 {
+                    m[i] = i;
+                    i = i + 1;
+                }
+                print(m.len());
+                print(m[13]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// Hashable class without any hash()-family method: compile-time hint
+    /// (pointer-identity fallback emission still produced)
+    #[test]
+    fn hashable_without_hash_fn_hint() {
+        let src = r#"
+            trait Hashable { func hid(): int; }
+            trait Equatable { func __eq__(other: Weird): bool; }
+            class Weird impl Hashable, Equatable {
+                var x: int = 3;
+                func __init__(): unit { return; }
+                func hid(): int { return 9; }
+                func __eq__(other: Weird): bool { return this.x == other.x; }
+            }
+            func main(): unit {
+                var m = @(Weird(): 5);
+                print(m.len());
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("hash-less Hashable map key accepted silently"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("implements no `hash()`-family method"),
+            "unexpected: {}",
+            e
+        );
+    }
+}

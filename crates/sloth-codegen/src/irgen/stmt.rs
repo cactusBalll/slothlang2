@@ -293,12 +293,40 @@ impl ModEmitter {
                                         Ty::Map(k, v2) => {
                                             let kkind = matches!(self.r.get(k), Ty::Str);
                                             let vf = self.is_float(v2);
-                                            let sym = match (kkind, vf) {
-                                                (true, true) => "sloth_map_str_set_f64",
-                                                (true, false) => "sloth_map_str_set",
-                                                (false, true) => "sloth_map_set_f64",
-                                                (false, false) => "sloth_map_set",
-                                            };
+                                            // object keys: monomorphized hash()
+                                            // routed into the call (patch #35)
+                                            let mut use_h: Option<String> = None;
+                                            if let Ty::Named(kcls, _) = self.r.get(k).clone() {
+                                                if self.class_ids.contains_key(&kcls) {
+                                                    match self.find_map_key_hash(&kcls) {
+                                                    Some((hmname, defcls, hfd)) => {
+                                                        let oargv =
+                                                            vec![(iv.clone(), self.r.mk(Ty::I64))];
+                                                        let osig = vec!["i64".to_string()];
+                                                        let (hv, _ht) = self.emit_method_call(
+                                                            fw,
+                                                            &defcls,
+                                                            &hmname,
+                                                            &hfd,
+                                                            false,
+                                                            &oargv,
+                                                            &osig,
+                                                            &s.pos,
+                                                        );
+                                                        use_h = Some(hv);
+                                                    }
+                                                    None => {
+                                                        self.err(
+                                                            &s.pos,
+                                                            format!(
+                                                                "map key `{}` implements no `hash()`-family method — keyed by pointer identity (Hashable surface needs `hash()`/`hashKey()`/`__hash__()`)",
+                                                                kcls
+                                                            ),
+                                                        );
+                                                    }
+                                                    }
+                                                }
+                                            }
                                             let vsig = if vf { "f64" } else { "i64" };
                                             if vf && !self.is_float(vty) {
                                                 let cv = fw.v();
@@ -308,10 +336,31 @@ impl ModEmitter {
                                                 ));
                                                 v = cv;
                                             }
-                                            fw.op(&format!(
-                                                "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
-                                                sym, av, iv, v, vsig
-                                            ));
+                                            match use_h {
+                                                Some(hv) => {
+                                                    let sym = if vf {
+                                                        "sloth_map_set_h_f64"
+                                                    } else {
+                                                        "sloth_map_set_h"
+                                                    };
+                                                    fw.op(&format!(
+                                                        "    call @{}({}, {}, {}, {}) : (i64, i64, i64, {}) -> i64",
+                                                        sym, av, iv, hv, v, vsig
+                                                    ));
+                                                }
+                                                None => {
+                                                    let sym = match (kkind, vf) {
+                                                        (true, true) => "sloth_map_str_set_f64",
+                                                        (true, false) => "sloth_map_str_set",
+                                                        (false, true) => "sloth_map_set_f64",
+                                                        (false, false) => "sloth_map_set",
+                                                    };
+                                                    fw.op(&format!(
+                                                        "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
+                                                        sym, av, iv, v, vsig
+                                                    ));
+                                                }
+                                            }
                                         }
                                         Ty::Named(cn, _) => {
                                             // Indexable overload: a[i] = v ≡ a.__assign__(i, v)
@@ -859,18 +908,80 @@ impl ModEmitter {
             "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
             kw, ks, iv
         ));
-        // value word: same map-read family as indexing (kkind routed by table)
-        let (getfn, getty) = match (is_str, vf) {
-            (true, true) => ("sloth_map_str_get_f64", "(i64, i64) -> f64"),
-            (true, false) => ("sloth_map_str_get", "(i64, i64) -> i64"),
-            (false, true) => ("sloth_map_get_f64", "(i64, i64) -> f64"),
-            (false, false) => ("sloth_map_get", "(i64, i64) -> i64"),
+        // value word: same map-read family as indexing (kkind routed by table);
+        // object keys fetch through the cached-hash _h call (patch #35)
+        let vw = if !is_str {
+            if let Ty::Named(kcls, _) = self.r.get(k).clone() {
+                match self.find_map_key_hash(&kcls) {
+                    Some((hmname, defcls, hfd)) => {
+                        let oargv = vec![(kw.clone(), k)];
+                        let osig = vec![mlir_word_ty(k, &self.r)];
+                        let (hv, _ht) = self.emit_method_call(
+                            fw,
+                            &defcls,
+                            &hmname,
+                            &hfd,
+                            false,
+                            &oargv,
+                            &osig,
+                            pos,
+                        );
+                        let getfn = if vf {
+                            "sloth_map_get_h_f64"
+                        } else {
+                            "sloth_map_get_h"
+                        };
+                        let vw = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
+                            vw,
+                            getfn,
+                            mav,
+                            kw,
+                            hv,
+                            if vf { "f64" } else { "i64" }
+                        ));
+                        vw
+                    }
+                    None => {
+                        // diag already reported at literal/lookup sites; keep
+                        // the legacy pointer-identity fetch
+                        let vw = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @{}({}, {}) : {}",
+                            vw,
+                            if vf { "sloth_map_get_f64" } else { "sloth_map_get" },
+                            mav,
+                            kw,
+                            if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+                        ));
+                        vw
+                    }
+                }
+            } else {
+                let vw = fw.v();
+                fw.op(&format!(
+                    "    {} = call @{}({}, {}) : {}",
+                    vw,
+                    if vf { "sloth_map_get_f64" } else { "sloth_map_get" },
+                    mav,
+                    kw,
+                    if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+                ));
+                vw
+            }
+        } else {
+            let vw = fw.v();
+            fw.op(&format!(
+                "    {} = call @{}({}, {}) : {}",
+                vw,
+                if vf { "sloth_map_str_get_f64" } else { "sloth_map_str_get" },
+                mav,
+                kw,
+                if vf { "(i64, i64) -> f64" } else { "(i64, i64) -> i64" }
+            ));
+            vw
         };
-        let vw = fw.v();
-        fw.op(&format!(
-            "    {} = call @{}({}, {}) : {}",
-            vw, getfn, mav, kw, getty
-        ));
         // build the Entry record: plain object + fields (no user ctor)
         let (obj, _ot) = self.emit_new_obj(fw, &ename, &Vec::new(), &Vec::new(), &pos);
         let ki = fw.v();

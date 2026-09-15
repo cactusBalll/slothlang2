@@ -29,8 +29,9 @@ func main(): unit {
     print("${k}");               // expect: K3
     var m = @(Key(1): 10, Key(2): 20);
     print(len(m));               // expect: 2
-    m[Key(3)] = 30;
+    m[Key(3)] = 30;              // content hash: fresh equal Key(3) hits Key(3)'s slot
     print(len(m));               // expect: 3
+    print(m[Key(3)]);            // expect: 30
     var s = 0;
     for (var e: m) {
         s = s + e.val;
