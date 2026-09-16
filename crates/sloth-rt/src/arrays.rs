@@ -1,6 +1,8 @@
 //! Arrays of i64/f64 words. Layout: `[len, cap, e0, e1, ...]` (cap >= len;
 //! push grows past cap by realloc). f64 accesses are routed via the `_f64` ops.
 
+use crate::rc::{track_user, transfer};
+
 /// bounds-checked element pointer
 fn arr_index(a: i64, i: i64) -> *mut i64 {
     unsafe {
@@ -21,6 +23,7 @@ pub extern "C" fn sloth_arr_new(len: i64) -> i64 {
         let o = crate::gc::sloth_gc_alloc((cap + 2) * 8) as *mut i64;
         *o = n as i64;
         *o.offset(1) = cap as i64;
+        track_user(o as usize);
         o as i64
     }
 }
@@ -47,6 +50,8 @@ pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
                 (nc + 2) as libc::size_t * 8,
             );
             base = raw as i64;
+            // count ownership follows the relocated chunk
+            transfer(a as usize, base as usize);
             let p2 = base as *mut i64;
             *p2.offset(1) = nc;
         }
@@ -86,6 +91,8 @@ pub extern "C" fn sloth_arr_push_f64(a: i64, w: f64) -> i64 {
                 (nc + 2) as libc::size_t * 8,
             );
             base = raw as i64;
+            // count ownership follows the relocated chunk
+            transfer(a as usize, base as usize);
             let p2 = base as *mut i64;
             *p2.offset(1) = nc;
         }

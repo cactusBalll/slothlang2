@@ -122,6 +122,33 @@ fn main() {
             );
         }
 
+        // ---- reference counts + weak boxes (patch A) ----
+        let before = sloth_rt::rc::sloth_rc_live();
+        let o = sloth_rt::objects::sloth_obj_new(0, 4);
+        assert_eq!(sloth_rt::rc::sloth_rc_live(), before + 1, "obj tracked");
+        let w = sloth_rt::rc::sloth_weak_new(o);
+        assert_eq!(
+            sloth_rt::rc::sloth_weak_upgrade(w),
+            o,
+            "weak upgrade on live target"
+        );
+        sloth_rt::rc::sloth_rc_retain(o);
+        sloth_rt::rc::sloth_rc_release(o);
+        assert_eq!(
+            sloth_rt::rc::sloth_weak_upgrade(w),
+            o,
+            "shared count keeps target alive"
+        );
+        sloth_rt::rc::sloth_rc_release(o);
+        assert_eq!(sloth_rt::rc::sloth_weak_upgrade(w), 0, "dead target");
+        sloth_rt::rc::sloth_weak_release(w);
+        assert_eq!(sloth_rt::rc::sloth_rc_live(), before, "table fully drained");
+
+        // unknown words are inert no-ops
+        sloth_rt::rc::sloth_rc_retain(1);
+        sloth_rt::rc::sloth_rc_release(1);
+        assert_eq!(sloth_rt::rc::sloth_rc_live(), before, "untracked words inert");
+
         println!("rt smoke OK");
     }
 }

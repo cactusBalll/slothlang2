@@ -6,6 +6,7 @@ pub mod arrays;
 pub mod console;
 pub mod externs;
 pub mod gc;
+pub mod rc;
 pub mod maps;
 pub mod objects;
 pub mod panics;

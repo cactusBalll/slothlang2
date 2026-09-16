@@ -1,6 +1,7 @@
 //! Object model: allocation, class type headers, header-resident fields.
 
 use crate::gc::sloth_gc_alloc;
+use crate::rc::track_user;
 
 #[repr(C)]
 pub(crate) struct ObjInfo {
@@ -25,6 +26,7 @@ pub extern "C" fn sloth_obj_new(info_ptr: i64, n_words: i64) -> i64 {
         let n = n_words.max(2) as libc::size_t;
         let o = sloth_gc_alloc(n * 8) as *mut i64;
         *o = info_ptr;
+        track_user(o as usize);
         o as i64
     }
 }

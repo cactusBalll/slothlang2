@@ -11,6 +11,7 @@
 use crate::arrays::{sloth_arr_new, sloth_arr_push};
 use crate::gc::sloth_gc_alloc;
 use crate::panics;
+use crate::rc::{track_owned, track_user};
 use crate::strings::StrT;
 
 const MAP_HDR_W: i64 = 4;
@@ -89,8 +90,11 @@ fn map_key_eq_h(kkind: i64, ka: i64, ha: i64, kb: i64, hb: i64) -> bool {
     ka == kb || (ha != 0 && ha == hb)
 }
 
-fn map_alloc_buckets(cap: i64) -> *mut i64 {
-    sloth_gc_alloc(((cap * MAP_SLOT_W) * 8) as libc::size_t) as *mut i64
+fn map_alloc_buckets(m: i64, cap: i64) -> *mut i64 {
+    let b = sloth_gc_alloc(((cap * MAP_SLOT_W) * 8) as libc::size_t) as *mut i64;
+    // bucket buffer is an internal chunk owned by the map header
+    track_owned(b as usize, m as usize);
+    b
 }
 
 #[no_mangle]
@@ -101,7 +105,9 @@ pub extern "C" fn sloth_map_new(kkind: i64) -> i64 {
         *o = cap;
         *o.offset(1) = 0;
         *o.offset(2) = kkind;
-        *o.offset(3) = map_alloc_buckets(cap) as i64;
+        *o.offset(3) = 0;
+        track_user(o as usize);
+        *o.offset(3) = map_alloc_buckets(o as i64, cap) as i64;
         o as i64
     }
 }
@@ -154,7 +160,9 @@ unsafe fn map_grow(m: i64) {
     let old_bp = *p.offset(3) as *mut i64;
     let old_words = cap * MAP_SLOT_W;
     // swap out the bucket array first so reinserts land in the fresh table
-    *p.offset(3) = map_alloc_buckets(ncap) as i64;
+    // (fresh buffer is owned by the same header; the stale buffer's count
+    // entry dies with the header)
+    *p.offset(3) = map_alloc_buckets(m, ncap) as i64;
     *p = ncap;
     *p.offset(1) = 0; // reinserts re-count
     let mut k = 0i64;
