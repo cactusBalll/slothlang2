@@ -1,9 +1,12 @@
 //! Interned strings (str32), string builders (StrB), and str printing.
+//! Handles cross the boundary as tagged words; the StrT payload internals
+//! (len/data) are raw. String builders stay untracked libc chunks (they
+//! exist only inside a single expression and are finalized by finish).
 
-use crate::alloc::sloth_rt_alloc;
-use crate::rc::track_user;
+use crate::rc;
+use crate::rc::{rc_addr, w_ref, w_unref};
 
-// ---------------- string builders ----------------
+// ---------------- string builders (untracked internal chunks) ----------------
 
 /// 8-byte packed words; total length known at compile time.
 #[repr(C)]
@@ -15,16 +18,14 @@ pub(crate) struct StrB {
 
 /// builder lifecycle: push chunks in,收回 handle; finalize interns the pool.
 #[no_mangle]
-pub extern "C" fn sloth_str_push(b: i64, w: i64, n: i64) -> i64 {
+pub extern "C" fn sloth_str_push(b_w: i64, w: i64, n_w: i64) -> i64 {
     unsafe {
-        let p: *mut StrB = if b == 0 {
-            let raw = libc::calloc(1, std::mem::size_of::<StrB>()) as *mut StrB;
-            (*raw).cap = 0;
-            raw as *mut StrB
+        let p: *mut StrB = if b_w == 0 {
+            libc::calloc(1, std::mem::size_of::<StrB>()) as *mut StrB
         } else {
-            b as *mut StrB
+            w_unref(b_w) as *mut StrB
         };
-        let un = (n as usize).min(8);
+        let un = (rc::dec_i(n_w) as usize).min(8);
         if (*p).cap < (*p).len + un {
             let nc = ((*p).len + un + 16).next_power_of_two();
             (*p).data = libc::realloc((*p).data, nc);
@@ -38,7 +39,7 @@ pub extern "C" fn sloth_str_push(b: i64, w: i64, n: i64) -> i64 {
             un,
         );
         (*p).len += un;
-        p as i64
+        w_ref(p as usize)
     }
 }
 
@@ -50,35 +51,39 @@ pub struct StrT {
     pub data: *mut libc::c_void,
 }
 
-/// interned string handle from raw bytes; used by string literals
+/// interned string handle word from raw bytes; word-plane route (the
+/// source pointer arrives tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_intern(ptr: i64, len: i64) -> i64 {
+pub extern "C" fn sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
+    intern_bytes(w_unref(ptr_w), rc::dec_i(len_w))
+}
+
+/// raw internal intern entry (returns the tagged handle word)
+fn intern_bytes(ptr: usize, len: i64) -> i64 {
     unsafe {
-        let t = sloth_rt_alloc(std::mem::size_of::<StrT>() + len as libc::size_t + 1)
-            as *mut libc::c_void;
-        track_user(t as usize);
-        let td = t as *mut StrT;
+        let p = rc_addr(std::mem::size_of::<StrT>() + len as usize + 1, None) as *mut libc::c_void;
+        let td = p as *mut StrT;
         (*td).len = len as usize;
-        let data = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
+        let data = (p as *mut u8).offset(std::mem::size_of::<StrT>() as isize);
         if len != 0 {
-            libc::memcpy(data, ptr as *const libc::c_void, len as usize);
+            libc::memcpy(
+                data as *mut libc::c_void,
+                ptr as *const libc::c_void,
+                len as usize,
+            );
         }
         // NUL terminate for easy C display
-        libc::memset(
-            (data as *mut libc::c_char).offset(len as isize) as *mut libc::c_void,
-            0,
-            1,
-        );
-        (*td).data = data;
-        t as i64
+        *data.offset(len as isize) = 0;
+        (*td).data = data as *mut libc::c_void;
+        w_ref(p as usize)
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_str(p: i64) -> i64 {
+pub extern "C" fn sloth_rt_print_str(p_w: i64) -> i64 {
     use std::io::Write;
     unsafe {
-        let td = p as *mut StrT;
+        let td = w_unref(p_w) as *const StrT;
         let sl = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
         let mut so = std::io::stdout();
         let _ = so.write_all(sl);
@@ -88,20 +93,22 @@ pub extern "C" fn sloth_rt_print_str(p: i64) -> i64 {
     0
 }
 
+/// string length (the word plane carries it tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_len(p: i64) -> i64 {
-    unsafe { (*(p as *mut StrT)).len as i64 }
+pub extern "C" fn sloth_str_len(p_w: i64) -> i64 {
+    unsafe { rc::enc_i((*(w_unref(p_w) as *const StrT)).len as i64) }
 }
 
 /// single-character string for iteration: `for (var c: "str")`
 #[no_mangle]
-pub extern "C" fn sloth_str_char(s: i64, i: i64) -> i64 {
+pub extern "C" fn sloth_str_char(s_w: i64, i_w: i64) -> i64 {
     unsafe {
-        let td = s as *mut StrT;
-        let b = *(((*td).data as *const u8).offset(i as isize)) as u8;
-        let t = sloth_rt_alloc(std::mem::size_of::<StrT>() + 2) as *mut StrT;
-        track_user(t as usize);
-        let dat = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
+        let td = w_unref(s_w) as *const StrT;
+        let b = *(((*td).data as *const u8).offset(rc::dec_i(i_w) as isize)) as u8;
+        let p = rc_addr(std::mem::size_of::<StrT>() + 2, None) as *mut libc::c_void;
+        let t = p as *mut StrT;
+        let dat = (p as *mut libc::c_char).offset(std::mem::size_of::<StrT>() as isize)
+            as *mut libc::c_void;
         *(dat as *mut u8) = b;
         libc::memset(
             (dat as *mut libc::c_char).offset(1) as *mut libc::c_void,
@@ -110,7 +117,7 @@ pub extern "C" fn sloth_str_char(s: i64, i: i64) -> i64 {
         );
         (*t).len = 1;
         (*t).data = dat;
-        t as i64
+        w_ref(p as usize)
     }
 }
 
@@ -128,87 +135,103 @@ pub(crate) unsafe fn strb_append(p: *mut StrB, src: *const libc::c_void, n: usiz
     (*p).len += n;
 }
 
-pub(crate) unsafe fn strb_or_new(b: i64) -> *mut StrB {
-    if b == 0 {
+pub(crate) unsafe fn strb_or_new(b_w: i64) -> *mut StrB {
+    if b_w == 0 {
         let raw = libc::calloc(1, std::mem::size_of::<StrB>()) as *mut StrB;
         (*raw).cap = 0;
         raw
     } else {
-        b as *mut StrB
+        w_unref(b_w) as *mut StrB
     }
 }
 
 /// push an interned (pooled) string's bytes onto a builder
 #[no_mangle]
-pub extern "C" fn sloth_str_pushp(b: i64, h: i64) -> i64 {
+pub extern "C" fn sloth_str_pushp(b_w: i64, h_w: i64) -> i64 {
     unsafe {
-        let p = strb_or_new(b);
-        let td = h as *mut StrT;
+        let p = strb_or_new(b_w);
+        let td = w_unref(h_w) as *mut StrT;
         let n = (*td).len;
         strb_append(p, (*td).data, n);
-        p as i64
+        w_ref(p as usize)
     }
 }
 
-/// push an i64 rendered in decimal
+/// push an i64 rendered in decimal (value arrives tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_i(b: i64, v: i64) -> i64 {
+pub extern "C" fn sloth_str_push_i(b_w: i64, v_w: i64) -> i64 {
+    unsafe {
+        let s = format!("{}", rc::dec_i(v_w));
+        let p = strb_or_new(b_w);
+        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        w_ref(p as usize)
+    }
+}
+
+/// push an f64 rendered with one decimal (raw f64 route: callers decode)
+#[no_mangle]
+pub extern "C" fn sloth_str_push_f(b_w: i64, v: f64) -> i64 {
     unsafe {
         let s = format!("{}", v);
-        let p = strb_or_new(b);
+        let p = strb_or_new(b_w);
         strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
-        p as i64
+        w_ref(p as usize)
     }
 }
 
-/// push an f64 rendered with one decimal
+/// push a bool rendered as true/false (value arrives tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_f(b: i64, v: f64) -> i64 {
+pub extern "C" fn sloth_str_push_b(b_w: i64, v_w: i64) -> i64 {
     unsafe {
-        let s = format!("{}", v);
-        let p = strb_or_new(b);
+        let s = if rc::dec_i(v_w) != 0 { "true" } else { "false" };
+        let p = strb_or_new(b_w);
         strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
-        p as i64
-    }
-}
-
-/// push a bool rendered as true/false
-#[no_mangle]
-pub extern "C" fn sloth_str_push_b(b: i64, v: i64) -> i64 {
-    unsafe {
-        let s = if v != 0 { "true" } else { "false" };
-        let p = strb_or_new(b);
-        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
-        p as i64
+        w_ref(p as usize)
     }
 }
 
 /// value-optional box interpolation (kind: 0 = int, 1 = float, 2 = bool):
 /// nil renders as "nil" — 0/0.0/false inside a box never collide
+/// (the box handle arrives tagged; payload words are decoded)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_opt(b: i64, h: i64, kind: i64) -> i64 {
+pub extern "C" fn sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
     unsafe {
-        if h == 0 {
-            let p = strb_or_new(b);
+        if h_w == 0 {
+            let p = strb_or_new(b_w);
             strb_append(p, b"nil\0".as_ptr() as *const libc::c_void, 3);
-            return p as i64;
+            return w_ref(p as usize);
         }
+        let kind = rc::dec_i(kind_w);
+        let p = strb_or_new(b_w);
         match kind {
-            1 => sloth_str_push_f(b, *(h as *const f64)),
-            2 => sloth_str_push_b(b, *(h as *const i64)),
-            _ => sloth_str_push_i(b, *(h as *const i64)),
+            1 => {
+                let bits = *(w_unref(h_w) as *const i64);
+                let s = format!("{}", f64::from_bits((bits as u64) << 1));
+                strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+            }
+            2 => {
+                let b = rc::dec_i(*(w_unref(h_w) as *const i64));
+                let s = if b != 0 { "true" } else { "false" };
+                strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+            }
+            _ => {
+                let i = rc::dec_i(*(w_unref(h_w) as *const i64));
+                let s = format!("{}", i);
+                strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+            }
         }
+        w_ref(p as usize)
     }
 }
 
 /// finalize: return the pooled interned string for a built byte buffer
 #[no_mangle]
-pub extern "C" fn sloth_str_finish(b: i64) -> i64 {
+pub extern "C" fn sloth_str_finish(b_w: i64) -> i64 {
     unsafe {
         // b == 0 (no chunks pushed at all, e.g. the `""` literal) makes a
         // fresh empty builder instead of dereferencing a NULL handle
-        let p: *mut StrB = strb_or_new(b);
-        let h = sloth_str_intern((*p).data as i64, (*p).len as i64);
+        let p: *mut StrB = strb_or_new(b_w);
+        let h = intern_bytes((*p).data as usize, (*p).len as i64);
         libc::free((*p).data);
         libc::free(p as *mut libc::c_void);
         h
@@ -218,10 +241,10 @@ pub extern "C" fn sloth_str_finish(b: i64) -> i64 {
 /// concatenate two pooled strings; the result is interned by content so
 /// equal-content handles are identical (patch #36 intern-unification)
 #[no_mangle]
-pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
+pub extern "C" fn sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
     unsafe {
-        let ta = a as *const StrT;
-        let tb = b as *const StrT;
+        let ta = w_unref(a_w) as *const StrT;
+        let tb = w_unref(b_w) as *const StrT;
         let la = (*ta).len;
         let lb = (*tb).len;
         let n = la + lb;
@@ -233,7 +256,7 @@ pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
             lb,
         );
         *(buf.offset(n as isize)) = 0;
-        let h = sloth_str_intern(buf as i64, n as i64);
+        let h = intern_bytes(buf as usize, n as i64);
         libc::free(buf as *mut libc::c_void);
         h
     }
@@ -241,11 +264,12 @@ pub extern "C" fn sloth_str_concat(a: i64, b: i64) -> i64 {
 
 /// content equality of two pooled str words (patch #36): len + memcmp
 #[no_mangle]
-pub extern "C" fn sloth_str_eq(a: i64, b: i64) -> i64 {
+pub extern "C" fn sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
     unsafe {
-        let ta = a as *const StrT;
-        let tb = b as *const StrT;
-        ((*ta).len == (*tb).len
-            && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0) as i64
+        let ta = w_unref(a_w) as *const StrT;
+        let tb = w_unref(b_w) as *const StrT;
+        let eq = (*ta).len == (*tb).len
+            && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0;
+        rc::enc_i(eq as i64)
     }
 }

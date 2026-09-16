@@ -128,10 +128,8 @@ impl ModEmitter {
                         let vf = self.is_float(t);
 
                         if df && !vf {
-                            // promote the int word to f64 spelling
-                            let cv = fw.v();
-                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-                            (cv, dt)
+                            // promote the int word to an f64 word
+                            (iw_to_f64_word(fw, &v), dt)
                         } else if !df && vf && self.opt_inner(dt).is_none() {
                             self.err_diff(
                                 &s.pos,
@@ -278,7 +276,11 @@ impl ModEmitter {
                                     },
                                 );
                                 let zi = fw.v();
-                                fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                                fw.op(&format!(
+                                    "    {} = arith.constant {} : i64",
+                                    zi,
+                                    enc_i_lit(idx as i64)
+                                ));
                                 let fty = self.field_type(&cur, f);
                                 self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
                                 fw.rc_flush();
@@ -300,34 +302,27 @@ impl ModEmitter {
                                 // receiver word: alloca stores the object pointer word
                                 let z = fw.v();
                                 let recv = fw.v();
-                                let mty = if self.is_float(rty) {
-                                    "memref<1xf64>"
-                                } else {
-                                    "memref<1xi64>"
-                                };
+                                let _ = rty;
                                 fw.op(&format!("    {} = arith.constant 0 : index", z));
                                 fw.op(&format!(
-                                    "    {} = memref.load {}[{}] : {}",
-                                    recv, at, z, mty
+                                    "    {} = memref.load {}[{}] : memref<1xi64>",
+                                    recv, at, z
                                 ));
                                 let idx = self.field_index(&c, &f.clone());
                                 let zi = fw.v();
-                                fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                                fw.op(&format!(
+                                    "    {} = arith.constant {} : i64",
+                                    zi,
+                                    enc_i_lit(idx as i64)
+                                ));
                                 // f64 field route: int words promote; float->i64 rejects
                                 let fty = self.field_type(&c, f);
                                 let mut vc = v.clone();
                                 let mut vct = vty;
                                 let dfo = !self.is_float(fty)
                                     && matches!(self.opt_inner(fty), Some((_, true)));
-                                if self.is_float(fty) && !self.is_float(vty) {
-                                    let cv = fw.v();
-                                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-                                    vc = cv;
-                                    vct = self.r.mk(Ty::F64);
-                                } else if dfo && !self.is_float(vty) {
-                                    let cv = fw.v();
-                                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-                                    vc = cv;
+                                if (self.is_float(fty) || dfo) && !self.is_float(vty) {
+                                    vc = iw_to_f64_word(fw, &v);
                                     vct = self.r.mk(Ty::F64);
                                 } else if !dfo && !self.is_float(fty) && self.is_float(vty) {
                                     self.err_diff(
@@ -381,38 +376,28 @@ impl ModEmitter {
                                     let (iv, _it) = self.emit_expr(fw, ix);
                                     match ats {
                                         Ty::Array(el) => {
-                                            if self.is_float(el) {
-                                                if !self.is_float(vty) {
-                                                    let cv = fw.v();
-                                                    fw.op(&format!(
-                                                        "    {} = arith.sitofp {} : i64 to f64",
-                                                        cv, v
-                                                    ));
-                                                    v = cv;
-                                                }
-                                                fw.op(&format!(
-                                                    "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
-                                                    av, iv, v
-                                                ));
-                                            } else {
-                                                // rc patch B: release the old elem
-                                                // (scalar/nil words no-op in rt),
-                                                // retain the new one if ref-typed
-                                                if self.is_ref(el) {
-                                                    let old = fw.v();
-                                                    fw.op(&format!(
-                                                        "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
-                                                        old, av, iv
-                                                    ));
-                                                    self.emit_release(fw, &old);
-                                                    let rv2 = self.emit_retain(fw, &v);
-                                                    v = rv2;
-                                                }
-                                                fw.op(&format!(
-                                                    "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                                                    av, iv, v
-                                                ));
+                                            // tag migration: single word route;
+                                            // int words promote for float slots
+                                            if self.is_float(el) && !self.is_float(vty) {
+                                                v = iw_to_f64_word(fw, &v);
                                             }
+                                            // rc patch B: release the old elem
+                                            // (scalar/nil words no-op in rt),
+                                            // retain the new one if ref-typed
+                                            if self.is_ref(el) {
+                                                let old = fw.v();
+                                                fw.op(&format!(
+                                                    "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                                                    old, av, iv
+                                                ));
+                                                self.emit_release(fw, &old);
+                                                let rv2 = self.emit_retain(fw, &v);
+                                                v = rv2;
+                                            }
+                                            fw.op(&format!(
+                                                "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                                                av, iv, v
+                                            ));
                                         }
                                         Ty::Map(k, v2) => {
                                             let kkind = matches!(self.r.get(k), Ty::Str);
@@ -447,14 +432,9 @@ impl ModEmitter {
                                                     }
                                                 }
                                             }
-                                            let vsig = if vf { "f64" } else { "i64" };
                                             if vf && !self.is_float(vty) {
-                                                let cv = fw.v();
-                                                fw.op(&format!(
-                                                    "    {} = arith.sitofp {} : i64 to f64",
-                                                    cv, v
-                                                ));
-                                                v = cv;
+                                                // int word -> f64 word
+                                                v = iw_to_f64_word(fw, &v);
                                             }
                                             // rc patch B: the map slot owns its
                                             // key (str/object) and value copy;
@@ -473,26 +453,20 @@ impl ModEmitter {
                                             }
                                             match use_h {
                                                 Some(hv) => {
-                                                    let sym = if vf {
-                                                        "sloth_map_set_h_f64"
-                                                    } else {
-                                                        "sloth_map_set_h"
-                                                    };
                                                     fw.op(&format!(
-                                                        "    call @{}({}, {}, {}, {}) : (i64, i64, i64, {}) -> i64",
-                                                        sym, av, iv, hv, v, vsig
+                                                        "    call @sloth_map_set_h({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                                                        av, iv, hv, v
                                                     ));
                                                 }
                                                 None => {
-                                                    let sym = match (kkind, vf) {
-                                                        (true, true) => "sloth_map_str_set_f64",
-                                                        (true, false) => "sloth_map_str_set",
-                                                        (false, true) => "sloth_map_set_f64",
-                                                        (false, false) => "sloth_map_set",
+                                                    let sym = if kkind {
+                                                        "sloth_map_str_set"
+                                                    } else {
+                                                        "sloth_map_set"
                                                     };
                                                     fw.op(&format!(
-                                                        "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
-                                                        sym, av, iv, v, vsig
+                                                        "    call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                                                        sym, av, iv, v
                                                     ));
                                                 }
                                             }
@@ -512,12 +486,7 @@ impl ModEmitter {
                                                             .unwrap_or(false)
                                                     };
                                                     if retf && !self.is_float(vty) {
-                                                        let cv = fw.v();
-                                                        fw.op(&format!(
-                                                            "    {} = arith.sitofp {} : i64 to f64",
-                                                            cv, v
-                                                        ));
-                                                        vc = cv;
+                                                        vc = iw_to_f64_word(fw, &v);
                                                     }
                                                     let oargv = vec![
                                                         (av.clone(), at),
@@ -607,28 +576,16 @@ impl ModEmitter {
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
         if !self.is_unit(fw.ret) {
+            // word plane: every return slot holds one tagged i64 word (0 is
+            // the nil/zero spell for both int and f64)
             let zret = fw.v();
-            let fl = self.is_float(fw.ret);
             fw.op(&format!("    {} = arith.constant 0 : i64", zret));
-            let mz = fw.v();
-            fw.op(&format!("    {} = arith.constant 0 : i64", mz));
-            if fl {
-                let z = fw.v();
-                fw.op(&format!("    {} = arith.constant 0.0 : f64", z));
-                let fzi = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", fzi));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xf64>",
-                    z, fw.ret_alloca, fzi
-                ));
-            } else {
-                let fzi = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", fzi));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    zret, fw.ret_alloca, fzi
-                ));
-            }
+            let fzi = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", fzi));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                zret, fw.ret_alloca, fzi
+            ));
         }
         let st = fw.v();
         fw.op(&format!("    {} = arith.constant 1 : i64", st));
@@ -698,17 +655,10 @@ impl ModEmitter {
         let fl = self.is_float(t);
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
-        if fl {
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xf64>",
-                v, fw.ret_alloca, zi
-            ));
-        } else {
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xi64>",
-                v, fw.ret_alloca, zi
-            ));
-        }
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            v, fw.ret_alloca, zi
+        ));
         let st = fw.v();
         fw.op(&format!("    {} = arith.constant 1 : i64", st));
         fw.op(&format!(
@@ -832,13 +782,13 @@ impl ModEmitter {
                     let (u, _ut) = self.unwrap_opt_word(fw, &w, ot);
                     fw.push_scope();
                     let sa = fw.v();
-                    let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
-                    fw.op(&format!("    {} = memref.alloca() : {}", sa, mty));
+                    let _ = fl;
+                    fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", sa));
                     let zz2 = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : index", zz2));
                     fw.op(&format!(
-                        "    memref.store {}, {}[{}] : {}",
-                        u, sa, zz2, mty
+                        "    memref.store {}, {}[{}] : memref<1xi64>",
+                        u, sa, zz2
                     ));
                     fw.scopes.last_mut().unwrap().insert(x.clone(), (sa, nty));
                     self.walk_body(fw, then_);
@@ -920,8 +870,13 @@ impl ModEmitter {
                 let hi = if !*inclusive {
                     hi0.clone()
                 } else {
+                    // both bounds are encoded words: +1 == +enc(1)
                     let one = fw.v();
-                    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        one,
+                        enc_i_lit(1)
+                    ));
                     let h = fw.v();
                     fw.op(&format!("    {} = arith.addi {}, {} : i64", h, hi0, one));
                     h
@@ -949,7 +904,7 @@ impl ModEmitter {
                 let c = fw.v();
                 fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, hi));
                 let c1 = fw.v();
-                fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+                fw.op(&format!("    {} = arith.extui {} : i1 to i64", c1, c));
                 fw.cjump(&c1, &doo, &done);
                 fw.label(&doo);
                 // continue lands on the increment, not the head test
@@ -971,9 +926,13 @@ impl ModEmitter {
                 fw.loopvars.pop();
                 fw.loops.pop();
                 fw.label_br(&cont);
-                // idx += 1
+                // idx += 1 (encoded word: the loop var holds a tagged int)
                 let one2 = fw.v();
-                fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    one2,
+                    enc_i_lit(1)
+                ));
                 let nx = fw.v();
                 fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
                 fw.op(&format!(
@@ -1081,7 +1040,7 @@ impl ModEmitter {
             c, iv, lenv
         ));
         let c1 = fw.v();
-        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", c1, c));
         fw.cjump(&c1, &doo, &done);
         fw.label(&doo);
         // continue lands on the increment, not the head test
@@ -1104,20 +1063,11 @@ impl ModEmitter {
                         let (hv, _ht) = self.emit_method_call(
                             fw, &defcls, &hmname, &hfd, false, &oargv, &osig, pos,
                         );
-                        let getfn = if vf {
-                            "sloth_map_get_h_f64"
-                        } else {
-                            "sloth_map_get_h"
-                        };
+                        let _ = vf;
                         let vw = fw.v();
                         fw.op(&format!(
-                            "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
-                            vw,
-                            getfn,
-                            mav,
-                            kw,
-                            hv,
-                            if vf { "f64" } else { "i64" }
+                            "    {} = call @sloth_map_get_h({}, {}, {}) : (i64, i64, i64) -> i64",
+                            vw, mav, kw, hv
                         ));
                         vw
                     }
@@ -1126,20 +1076,8 @@ impl ModEmitter {
                         // the legacy pointer-identity fetch
                         let vw = fw.v();
                         fw.op(&format!(
-                            "    {} = call @{}({}, {}) : {}",
-                            vw,
-                            if vf {
-                                "sloth_map_get_f64"
-                            } else {
-                                "sloth_map_get"
-                            },
-                            mav,
-                            kw,
-                            if vf {
-                                "(i64, i64) -> f64"
-                            } else {
-                                "(i64, i64) -> i64"
-                            }
+                            "    {} = call @sloth_map_get({}, {}) : (i64, i64) -> i64",
+                            vw, mav, kw
                         ));
                         vw
                     }
@@ -1147,50 +1085,34 @@ impl ModEmitter {
             } else {
                 let vw = fw.v();
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}) : {}",
-                    vw,
-                    if vf {
-                        "sloth_map_get_f64"
-                    } else {
-                        "sloth_map_get"
-                    },
-                    mav,
-                    kw,
-                    if vf {
-                        "(i64, i64) -> f64"
-                    } else {
-                        "(i64, i64) -> i64"
-                    }
+                    "    {} = call @sloth_map_get({}, {}) : (i64, i64) -> i64",
+                    vw, mav, kw
                 ));
                 vw
             }
         } else {
             let vw = fw.v();
             fw.op(&format!(
-                "    {} = call @{}({}, {}) : {}",
-                vw,
-                if vf {
-                    "sloth_map_str_get_f64"
-                } else {
-                    "sloth_map_str_get"
-                },
-                mav,
-                kw,
-                if vf {
-                    "(i64, i64) -> f64"
-                } else {
-                    "(i64, i64) -> i64"
-                }
+                "    {} = call @sloth_map_str_get({}, {}) : (i64, i64) -> i64",
+                vw, mav, kw
             ));
             vw
         };
         // build the Entry record: plain object + fields (no user ctor)
         let (obj, _ot) = self.emit_new_obj(fw, &ename, &Vec::new(), &Vec::new(), &pos);
         let ki = fw.v();
-        fw.op(&format!("    {} = arith.constant {} : i64", ki, kidxf));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            ki,
+            enc_i_lit(kidxf as i64)
+        ));
         self.op_set_field(fw, &obj, &ki, &kw, k, k, pos.clone());
         let vi = fw.v();
-        fw.op(&format!("    {} = arith.constant {} : i64", vi, vidxf));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            vi,
+            enc_i_lit(vidxf as i64)
+        ));
         self.op_set_field(fw, &obj, &vi, &vw, v2, v2, pos.clone());
         let vs = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
@@ -1208,8 +1130,13 @@ impl ModEmitter {
         fw.loopvars.pop();
         fw.loops.pop();
         fw.label_br(&cont);
+        // counter is an encoded word: +1 == +enc(1)
         let one2 = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            one2,
+            enc_i_lit(1)
+        ));
         let nx = fw.v();
         fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
         fw.op(&format!(
@@ -1234,13 +1161,8 @@ impl ModEmitter {
         _pos: &Pos,
     ) {
         let (countfn, getfn, getty) = match kind {
-            IdxKind::Arr => {
-                if self.is_float(el) {
-                    ("sloth_arr_len", "sloth_arr_get_f64", "(i64, i64) -> f64")
-                } else {
-                    ("sloth_arr_len", "sloth_arr_get", "(i64, i64) -> i64")
-                }
-            }
+            // tag migration: one word route (float elements ride the word)
+            IdxKind::Arr => ("sloth_arr_len", "sloth_arr_get", "(i64, i64) -> i64"),
             IdxKind::StrChar => ("sloth_str_len", "sloth_str_char", "(i64, i64) -> i64"),
         };
         let lenv = fw.v();
@@ -1275,7 +1197,7 @@ impl ModEmitter {
             c, iv, lenv
         ));
         let c1 = fw.v();
-        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", c1, c));
         fw.cjump(&c1, &doo, &done);
         fw.label(&doo);
         // continue lands on the increment, not the head test
@@ -1292,20 +1214,13 @@ impl ModEmitter {
         } else {
             el
         };
+        let _ = gety;
         let vs = fw.v();
-        if self.is_float(gety) {
-            fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xf64>",
-                gtv, vs, z
-            ));
-        } else {
-            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xi64>",
-                gtv, vs, z
-            ));
-        }
+        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            gtv, vs, z
+        ));
         fw.scopes
             .last_mut()
             .unwrap()
@@ -1313,9 +1228,13 @@ impl ModEmitter {
         self.walk_body(fw, body);
         fw.loops.pop();
         fw.label_br(&cont);
-        // idx += 1
+        // idx += 1 (encoded word)
         let one2 = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one2));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            one2,
+            enc_i_lit(1)
+        ));
         let nx = fw.v();
         fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
         fw.op(&format!(
@@ -1438,7 +1357,7 @@ impl ModEmitter {
             nc, ov, znil
         ));
         let nc1 = fw.v();
-        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", nc1, nc));
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", nc1, nc));
         fw.cjump(&nc1, &done, &doo);
         fw.label(&doo);
         fw.loops.push((done.clone(), head.clone()));
@@ -1447,27 +1366,17 @@ impl ModEmitter {
         if el_boxed {
             // boxed payload: unwrap the copy and let the consumed box die
             let (u, _ut) = self.unwrap_opt_word(fw, &ov, nplan.ret);
-            if self.is_float(el) {
-                fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xf64>",
-                    u, vs, z
-                ));
-            } else {
-                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    u, vs, z
-                ));
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                u, vs, z
+            ));
+            // non-ref payloads (scalars/box-less) still drop the consumed box
+            if !self.is_ref(el) {
                 self.emit_release(fw, &ov);
             }
-        } else if self.is_float(el) {
-            fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xf64>",
-                ov, vs, z
-            ));
         } else {
+            // tag migration: the iterator word (handle or nil) is the value
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
             fw.op(&format!(
                 "    memref.store {}, {}[{}] : memref<1xi64>",

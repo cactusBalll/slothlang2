@@ -1,4 +1,7 @@
-//! Small shared helpers: mangling, word types, super-init scanners.
+//! Small shared helpers: mangling, word types, super-init scanners, and
+//! the tagged-word encode/decode emit points (word plane: LSB = tag bit;
+//! ref = `ptr | 1`, int = `v << 1` 63-bit, f64 = the f64 bits with the
+//! mantissa LSB cleared and shifted right once, nil = 0).
 
 #[allow(unused_imports)]
 use super::*;
@@ -12,6 +15,109 @@ use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
 use std::collections::{HashMap, HashSet};
 
 pub const WW: usize = 8;
+
+// ---------------- tagged-word encode/decode emit points ----------------
+
+/// int literal -> tagged word form (63-bit)
+pub(crate) fn enc_i_lit(v: i64) -> i64 {
+    v << 1
+}
+
+/// f64 literal -> tagged word form (mantissa LSB sacrificed)
+pub(crate) fn enc_f_lit(v: f64) -> i64 {
+    ((v.to_bits() & !1) as i64) >> 1
+}
+
+/// tag an int scalar into a word (encode)
+pub(crate) fn emit_enc_int(fw: &mut FnWalk, v: &str) -> String {
+    let one = fw.v();
+    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+    let r = fw.v();
+    fw.op(&format!("    {} = arith.shli {}, {} : i64", r, v, one));
+    r
+}
+
+/// decode a word into a raw int scalar (63-bit arithmetic)
+pub(crate) fn emit_dec_int(fw: &mut FnWalk, w: &str) -> String {
+    let one = fw.v();
+    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+    let r = fw.v();
+    fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, w, one));
+    r
+}
+
+/// tag an f64 scalar into a word: bitcast to the bit pattern, clear the
+/// mantissa LSB, shift right
+pub(crate) fn emit_enc_f(fw: &mut FnWalk, v: &str) -> String {
+    let b = fw.v();
+    fw.op(&format!("    {} = llvm.bitcast {} : f64 to i64", b, v));
+    let mask = fw.v();
+    fw.op(&format!("    {} = arith.constant -3 : i64", mask));
+    let m = fw.v();
+    fw.op(&format!("    {} = arith.andi {}, {} : i64", m, b, mask));
+    let one = fw.v();
+    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+    let r = fw.v();
+    fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, m, one));
+    r
+}
+
+/// decode a word into an f64 scalar: shift left once and bitcast back
+pub(crate) fn emit_dec_f(fw: &mut FnWalk, w: &str) -> String {
+    let one = fw.v();
+    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+    let s = fw.v();
+    fw.op(&format!("    {} = arith.shli {}, {} : i64", s, w, one));
+    let r = fw.v();
+    fw.op(&format!("    {} = llvm.bitcast {} : i64 to f64", r, s));
+    r
+}
+
+/// decode a word into a scalar by target type (refs stay words: only the
+/// num valuations below reach the scalar plane)
+#[allow(dead_code)]
+pub(crate) fn w_dec_word(me: &mut ModEmitter, fw: &mut FnWalk, w: &str, ty: TyId) -> String {
+    if me.is_float(ty) {
+        emit_dec_f(fw, w)
+    } else {
+        emit_dec_int(fw, w)
+    }
+}
+
+/// i1 -> encoded bool word (0 / enc(1)); bool words ride the int codec
+pub(crate) fn ext_bool(fw: &mut FnWalk, c: &str) -> String {
+    let z = fw.v();
+    // zero-extend: an i1 `true` sign-extends to -1, which would corrupt
+    // the encoded bool word (we need exactly 1)
+    fw.op(&format!("    {} = arith.extui {} : i1 to i64", z, c));
+    emit_enc_int(fw, &z)
+}
+
+/// convert an int word into an f64 word (decode, promote, re-encode);
+/// replaces the legacy bare `sitofp` int-word boundary
+pub(crate) fn iw_to_f64_word(fw: &mut FnWalk, w: &str) -> String {
+    let d = emit_dec_int(fw, w);
+    let f = fw.v();
+    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", f, d));
+    emit_enc_f(fw, &f)
+}
+
+/// convert an int word into an f64 *scalar* (decode, promote): for use on
+/// the scalar flank of a typed arith op, not for a word-plane result
+pub(crate) fn iw_to_f64_scalar(fw: &mut FnWalk, w: &str) -> String {
+    let d = emit_dec_int(fw, w);
+    let f = fw.v();
+    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", f, d));
+    f
+}
+
+/// convert an f64 word into an int word (decode, truncate, encode)
+pub(crate) fn f64w_to_iw(fw: &mut FnWalk, w: &str) -> String {
+    let f = emit_dec_f(fw, w);
+    let d = fw.v();
+    fw.op(&format!("    {} = arith.fptosi {} : f64 to i64", d, f));
+    emit_enc_int(fw, &d)
+}
 
 pub(crate) fn expr_is_super_init(e: &Expr) -> bool {
     match &e.node {
@@ -82,22 +188,17 @@ pub(crate) fn mangle_t(args: &[TyId], r: &Reg) -> String {
 pub(crate) fn mlir_ret_ty(me: &ModEmitter, t: TyId) -> String {
     match me.r.get(t) {
         Ty::Unit => "()".to_string(),
-        Ty::F64 => "f64".to_string(),
+        // tag migration: every word-plane return carries the tagged word
         _ => "i64".to_string(),
     }
 }
 
-pub(crate) fn mlir_word_ty(t: TyId, r: &Reg) -> String {
-    match r.get(t) {
-        Ty::F64 => "f64".to_string(),
-        _ => "i64".to_string(),
-    }
+pub(crate) fn mlir_word_ty(_t: TyId, _r: &Reg) -> String {
+    // word plane: i64 tagged words for values and refs alike
+    "i64".to_string()
 }
 
-pub(crate) fn memref_cell_ty(me: &ModEmitter, t: TyId) -> &'static str {
-    if me.is_float(t) {
-        "memref<1xf64>"
-    } else {
-        "memref<1xi64>"
-    }
+pub(crate) fn memref_cell_ty(_me: &ModEmitter, _t: TyId) -> &'static str {
+    // tag migration: every slot holds one tagged i64 word
+    "memref<1xi64>"
 }

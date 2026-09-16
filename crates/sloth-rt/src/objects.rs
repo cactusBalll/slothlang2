@@ -1,55 +1,61 @@
-//! Object model: allocation, class type headers, header-resident fields.
+//! Object model: allocation, class type headers, tag-driven field cascade.
+//! Object layout: word 0 = raw ObjInfo pointer, word 1 = raw vtable pointer
+//! (rt-internal metadata, never tagged words), fields from word 2 on — each
+//! field is a tagged user word; the death cascade releases every word with
+//! the tag bit set (no per-class mask needed any more).
 
-use crate::alloc::sloth_rt_alloc;
+use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
 
 #[repr(C)]
 pub(crate) struct ObjInfo {
     super_info: *mut libc::c_void,
     cls_id: i64,
-    /// rc migration patch C: per-field ref mask (bit i = field i is a
-    /// refcounted word); drives the cascade on instance death
-    refmask: u64,
+    /// tag migration: the per-class ref mask is gone (death cascade is
+    /// tag-driven); the class keeps only structural metadata
     n_fields: i64,
 }
+pub(crate) const OBJ_FIELD_OFFSET: isize = 2;
 
 #[no_mangle]
-pub extern "C" fn sloth_cls_info(super_ptr: i64, cls_id: i64) -> i64 {
+pub extern "C" fn sloth_cls_info(super_w: i64, cls_id_w: i64) -> i64 {
     unsafe {
-        let o = sloth_rt_alloc(std::mem::size_of::<ObjInfo>()) as *mut ObjInfo;
-        (*o).super_info = super_ptr as *mut libc::c_void;
-        (*o).cls_id = cls_id;
-        (*o).refmask = 0;
+        let o = crate::alloc::sloth_rt_alloc(std::mem::size_of::<ObjInfo>()) as *mut ObjInfo;
+        (*o).super_info = if w_is_ref(super_w) {
+            w_unref(super_w) as *mut libc::c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        (*o).cls_id = crate::rc::dec_i(cls_id_w);
         (*o).n_fields = 0;
-        o as i64
+        // class metadata is never freed: the word is representational only
+        // (not rc-tracked) — still tagged so the word plane stays uniform
+        w_ref(o as usize)
     }
 }
 
-/// mark the refcounted fields of a class (codegen knows the field kinds);
-/// `mask` bit i = field i (base-class-first layout) is a ref word
+/// legacy ref-mask registration: retired by the tag bit (no-op)
 #[no_mangle]
-pub extern "C" fn sloth_cls_refmask(info_ptr: i64, mask: i64, n_fields: i64) -> i64 {
-    unsafe {
-        let o = info_ptr as *mut ObjInfo;
-        (*o).refmask = mask as u64;
-        (*o).n_fields = n_fields;
-        0
-    }
+pub extern "C" fn sloth_cls_refmask(_info_w: i64, _mask: i64, _n: i64) -> i64 {
+    0
 }
 
-/// object layout: word 0 = ObjInfo header, word 1 = vtable pointer, fields after
 #[no_mangle]
-pub extern "C" fn sloth_obj_new(info_ptr: i64, n_words: i64) -> i64 {
+pub extern "C" fn sloth_obj_new(info_w: i64, n_fields_w: i64) -> i64 {
     unsafe {
-        let n = n_words.max(2) as libc::size_t;
-        let o = sloth_rt_alloc(n * 8) as *mut i64;
-        *o = info_ptr;
-        // death cascade: release each ref-typed field via the class mask
-        crate::rc::track_user_dtor(o as usize, obj_dtor);
-        o as i64
+        let n_words = crate::rc::dec_i(n_fields_w).max(0) + 2;
+        let info = if w_is_ref(info_w) {
+            w_unref(info_w) as usize
+        } else {
+            0
+        };
+        let o = rc_addr(n_words as usize * 8, Some(obj_dtor)) as *mut i64;
+        *o = info as i64;
+        // word 1 (vtable) is set separately; fields start zeroed (nil)
+        w_ref(o as usize)
     }
 }
 
-/// death cascade: release every ref-masked field word of the dying instance
+/// death cascade: release every tagged field word of the dying instance
 fn obj_dtor(p: usize, _aux: u64) {
     unsafe {
         let o = p as *mut i64;
@@ -57,15 +63,12 @@ fn obj_dtor(p: usize, _aux: u64) {
         if info.is_null() {
             return;
         }
-        let mask = (*info).refmask;
         let nf = (*info).n_fields;
         let mut i = 0i64;
         while i < nf {
-            if mask & (1u64 << i) != 0 {
-                let w = *o.offset(i as isize + 2);
-                if w != 0 {
-                    crate::rc::sloth_rc_release(w);
-                }
+            let w = *o.offset(i as isize + OBJ_FIELD_OFFSET);
+            if w != 0 && w_is_ref(w) {
+                crate::rc::sloth_rc_release(w);
             }
             i += 1;
         }
@@ -73,32 +76,30 @@ fn obj_dtor(p: usize, _aux: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_obj_field(obj: i64, idx: i64) -> i64 {
-    unsafe { *(obj as *mut i64).offset(idx as isize + 2) }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_obj_field_f64(obj: i64, idx: i64) -> f64 {
-    unsafe { *(obj as *mut f64).offset(idx as isize + 2) }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_obj_set_field(obj: i64, idx: i64, val: i64) -> i64 {
-    unsafe { *(obj as *mut i64).offset(idx as isize + 2) = val }
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_obj_set_field_f64(obj: i64, idx: i64, val: f64) -> i64 {
-    unsafe { *(obj as *mut f64).offset(idx as isize + 2) = val }
-    0
-}
-
-/// runtime class id of an object (from its type header), used by dyn dispatch
-#[no_mangle]
-pub extern "C" fn sloth_obj_cls_id(obj: i64) -> i64 {
+pub extern "C" fn sloth_obj_field(obj_w: i64, idx_w: i64) -> i64 {
     unsafe {
-        let info = *(obj as *mut *mut libc::c_void);
-        (*(info as *mut ObjInfo)).cls_id
+        let o = w_unref(obj_w) as *mut i64;
+        let i = crate::rc::dec_i(idx_w);
+        *o.offset(i as isize + OBJ_FIELD_OFFSET)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_obj_set_field(obj_w: i64, idx_w: i64, val: i64) -> i64 {
+    unsafe {
+        let o = w_unref(obj_w) as *mut i64;
+        let i = crate::rc::dec_i(idx_w);
+        *o.offset(i as isize + OBJ_FIELD_OFFSET) = val;
+        0
+    }
+}
+
+/// runtime class id of an object (raw from the type header, decoded at the
+/// boundary since the word plane carries it tagged)
+#[no_mangle]
+pub extern "C" fn sloth_obj_cls_id(obj_w: i64) -> i64 {
+    unsafe {
+        let info = *(w_unref(obj_w) as *mut *mut ObjInfo);
+        crate::rc::enc_i((*info).cls_id)
     }
 }

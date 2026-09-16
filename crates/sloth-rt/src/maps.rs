@@ -1,35 +1,29 @@
-//! Open-addressing hash map (linear probing).
-//! Header layout: `[cap, used, kkind, buckets_ptr]` — the header stays put
-//! across growth, only the bucket array is reallocated, so stored map handles
-//! remain valid. Each bucket slot = 4 words `[used, key, value, hash]`:
-//! `hash` caches the caller-provided content hash for object keys (kkind: 2),
-//! so growth rehashes without re-calling the monomorphized hash() (patch #35).
-//! kkind: 0 = i64 keys, 1 = str keys (interned str handles compared by
-//! content), 2 = object keys (content hash via the `hash()`-family call at
-//! the call site; the legacy plain ops keep pointer identity as fallback)
+//! Open-addressing hash map (linear probing) over tagged words.
+//! Header layout: `[cap, used, kflag, buckets_ptr]` — the header stays put
+//! across growth, only the bucket array is reallocated, so stored map
+//! handles remain valid. Each bucket slot = 4 words
+//! `[used, key, value, hash]`: `hash` caches the caller-provided content
+//! hash for object keys (kkind: 2), so growth rehashes without re-calling
+//! the monomorphized hash(). kflag low bits = key kind (0 int / 1 str /
+//! 2 object); the old vref bit is gone — death cascades are tag-driven.
+//! Bucket buffers are untracked internal chunks freed by the map itself
+//! (grow frees the stale buffer directly, dying with the header otherwise).
 
 use crate::alloc::sloth_rt_alloc;
 use crate::arrays::{sloth_arr_new_k, sloth_arr_push};
 use crate::panics;
-use crate::rc::{track_owned, track_user_dtor};
+use crate::rc;
+use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
 use crate::strings::StrT;
 
 const MAP_HDR_W: i64 = 4;
 const MAP_SLOT_W: i64 = 4;
 
-/// kkind encoding (patch C): low bits = key kind (0 int / 1 str / 2 object),
-/// bit 8 = value words are refcounted (class/array/map/str values)
-const MK_VREF: i64 = 1 << 8;
-
-fn map_vref(kflag: i64) -> bool {
-    kflag & MK_VREF != 0
-}
-
-fn map_kkind(kflag: i64) -> i64 {
+fn map_kkind_raw(kflag: i64) -> i64 {
     kflag & 3
 }
 
-fn map_slot(m: i64, i: i64) -> *mut i64 {
+fn map_slot(m: usize, i: i64) -> *mut i64 {
     unsafe {
         let bp = *(m as *mut i64).offset(3) as *mut i64;
         bp.offset((i * MAP_SLOT_W) as isize)
@@ -49,10 +43,11 @@ fn map_hash_i(k: i64) -> u64 {
     mix64(k as u64)
 }
 
-/// FNV-1a over an interned string's bytes
+/// FNV-1a over an interned string's bytes (the key arrives as a tagged
+/// handle word; the payload internals are raw)
 fn map_hash_s(h: i64) -> u64 {
     unsafe {
-        let td = h as *const StrT;
+        let td = w_unref(h) as *const StrT;
         let len = (*td).len;
         let mut p = (*td).data as *const u8;
         let mut hash: u64 = 0xcbf29ce484222325;
@@ -68,8 +63,6 @@ fn map_hash_s(h: i64) -> u64 {
 fn map_key_hash(kkind: i64, key: i64) -> u64 {
     if kkind == 1 {
         map_hash_s(key)
-    } else if kkind == 2 {
-        mix64(key as u64)
     } else {
         map_hash_i(key)
     }
@@ -77,8 +70,8 @@ fn map_key_hash(kkind: i64, key: i64) -> u64 {
 
 fn map_streq(a: i64, b: i64) -> bool {
     unsafe {
-        let ta = a as *const StrT;
-        let tb = b as *const StrT;
+        let ta = w_unref(a) as *const StrT;
+        let tb = w_unref(b) as *const StrT;
         (*ta).len == (*tb).len
             && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0
     }
@@ -102,68 +95,61 @@ fn map_key_eq_h(kkind: i64, ka: i64, ha: i64, kb: i64, hb: i64) -> bool {
     ka == kb || (ha != 0 && ha == hb)
 }
 
-fn map_alloc_buckets(m: i64, cap: i64) -> *mut i64 {
-    let b = sloth_rt_alloc(((cap * MAP_SLOT_W) * 8) as libc::size_t) as *mut i64;
-    // bucket buffer is an internal chunk owned by the map header
-    track_owned(b as usize, m as usize);
-    b
+fn map_alloc_buckets(cap: i64) -> *mut i64 {
+    sloth_rt_alloc(((cap * MAP_SLOT_W) * 8) as libc::size_t) as *mut i64
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_map_new(kkind: i64) -> i64 {
+pub extern "C" fn sloth_map_new(kflag_w: i64) -> i64 {
     unsafe {
         let cap = 8i64;
-        let o = sloth_rt_alloc((MAP_HDR_W * 8) as libc::size_t) as *mut i64;
-        *o = cap;
-        *o.offset(1) = 0;
-        *o.offset(2) = kkind;
-        *o.offset(3) = 0;
-        // death cascade: release ref-typed keys (kkind != 0), ref-typed
-        // values (vref bit) and the bucket buffer
-        track_user_dtor(o as usize, map_dtor);
-        *o.offset(3) = map_alloc_buckets(o as i64, cap) as i64;
-        o as i64
+        let p = rc_addr((MAP_HDR_W * 8) as usize, Some(map_dtor)) as *mut i64;
+        *p = cap;
+        *p.offset(1) = 0;
+        // the vref bit is retired; only the kkind low bits are meaningful
+        *p.offset(2) = rc::dec_i(kflag_w) & 3;
+        *p.offset(3) = map_alloc_buckets(cap) as i64;
+        w_ref(p as usize)
     }
 }
 
-/// death cascade: release each live pair's key/value words, then the pair
-/// owns nothing; the Owned(parent) bucket buffers detach separately
+/// death cascade: release each live pair's key/value words (tag-driven,
+/// inert for value words), then free the bucket buffer (internal, untracked)
 fn map_dtor(p: usize, _aux: u64) {
     unsafe {
         let m = p as *mut i64;
         let cap = *m;
-        let kflag = *m.offset(2);
-        let kkind = map_kkind(kflag);
-        let vref = map_vref(kflag);
+        let kflag = map_kflag_raw(p);
+        let _kkind = map_kkind_raw(kflag);
         let bp = *m.offset(3) as *mut i64;
-        if bp.is_null() {
-            return;
-        }
-        let mut i = 0i64;
-        while i < cap {
-            let s = bp.offset((i * MAP_SLOT_W) as isize);
-            if *s == 1 {
-                if kkind != 0 {
+        if !bp.is_null() {
+            let mut i = 0i64;
+            while i < cap {
+                let s = bp.offset((i * MAP_SLOT_W) as isize);
+                if *s == 1 {
                     let k = *s.offset(1);
                     if k != 0 {
                         crate::rc::sloth_rc_release(k);
                     }
-                }
-                if vref {
                     let v = *s.offset(2);
                     if v != 0 {
                         crate::rc::sloth_rc_release(v);
                     }
                 }
+                i += 1;
             }
-            i += 1;
+            libc::free(bp as *mut libc::c_void);
         }
     }
 }
 
+fn map_kflag_raw(p: usize) -> i64 {
+    unsafe { *(p as *mut i64).offset(2) }
+}
+
 #[no_mangle]
-pub extern "C" fn sloth_map_len(m: i64) -> i64 {
-    unsafe { *(m as *mut i64).offset(1) }
+pub extern "C" fn sloth_map_len(m_w: i64) -> i64 {
+    unsafe { rc::enc_i(*(w_unref(m_w) as *mut i64).offset(1)) }
 }
 
 /// bucket index for a lookup/insert: object keys use the caller-provided
@@ -178,12 +164,12 @@ fn map_bucket_i(kkind: i64, key: i64, h: i64, cap: i64) -> u64 {
 
 /// place a used pair with its cached hash into the table (always the current
 /// m; no growth here)
-fn map_insert_raw(m: i64, key: i64, val: i64, h: i64) {
+fn map_insert_raw(m: usize, key: i64, val: i64, h: i64) {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
         let kflag = *p.offset(2);
-        let kkind = map_kkind(kflag);
+        let kkind = map_kkind_raw(kflag);
         let mut i = map_bucket_i(kkind, key, h, cap);
         loop {
             let s = map_slot(m, i as i64);
@@ -200,20 +186,18 @@ fn map_insert_raw(m: i64, key: i64, val: i64, h: i64) {
     }
 }
 
-/// grow: rehash into a fresh bucket array; the map handle stays valid
-unsafe fn map_grow(m: i64) {
+/// grow: rehash into a fresh bucket array; the map handle stays valid; the
+/// stale buffer is freed directly (no stale count entries any more)
+unsafe fn map_grow(m: usize) {
     let p = m as *mut i64;
     let cap = *p;
     let kflag = *p.offset(2);
-    let kkind = map_kkind(kflag);
-    let used = *p.offset(1);
+    let kkind = map_kkind_raw(kflag);
     let ncap = cap * 2;
     let old_bp = *p.offset(3) as *mut i64;
     let old_words = cap * MAP_SLOT_W;
     // swap out the bucket array first so reinserts land in the fresh table
-    // (fresh buffer is owned by the same header; the stale buffer's count
-    // entry dies with the header)
-    *p.offset(3) = map_alloc_buckets(m, ncap) as i64;
+    *p.offset(3) = map_alloc_buckets(ncap) as i64;
     *p = ncap;
     *p.offset(1) = 0; // reinserts re-count
     let mut k = 0i64;
@@ -228,17 +212,18 @@ unsafe fn map_grow(m: i64) {
         }
         k += MAP_SLOT_W;
     }
-    let _ = (kkind, used);
+    let _ = (kkind, old_bp);
+    libc::free(old_bp as *mut libc::c_void);
 }
 
 /// find or create the slot for `key` (h = cached content hash for obj keys);
 /// returns the slot pointer
-fn map_upsert(m: i64, key: i64, h: i64) -> *mut i64 {
+fn map_upsert(m: usize, key: i64, h: i64) -> *mut i64 {
     unsafe {
         let p = m as *mut i64;
         let cap = *p;
         let kflag = *p.offset(2);
-        let kkind = map_kkind(kflag);
+        let kkind = map_kkind_raw(kflag);
         let used = *p.offset(1);
         let mut i = map_bucket_i(kkind, key, h, cap);
         let mut rounds = 0u64;
@@ -257,20 +242,19 @@ fn map_upsert(m: i64, key: i64, h: i64) -> *mut i64 {
                 return s;
             }
             if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, h) {
-                // overwrite: evict the old pair's counts (kkind != 0 => ref
-                // key; vref => ref value)
-                let kflag2 = *p.offset(2);
-                if map_kkind(kflag2) != 0 {
-                    let ok = *s.offset(1);
-                    if ok != 0 {
-                        crate::rc::sloth_rc_release(ok);
-                    }
+                // overwrite: the caller handed us a +1 on the new key, so
+                // release the old key and swap the new one into the slot
+                // (leaving the stale pointer behind would double-free it);
+                // then evict the old value's count
+                let ok = *s.offset(1);
+                if ok != 0 {
+                    crate::rc::sloth_rc_release(ok);
                 }
-                if map_vref(kflag2) {
-                    let ov = *s.offset(2);
-                    if ov != 0 {
-                        crate::rc::sloth_rc_release(ov);
-                    }
+                *s.offset(1) = key;
+                *s.offset(3) = h;
+                let ov = *s.offset(2);
+                if ov != 0 {
+                    crate::rc::sloth_rc_release(ov);
                 }
                 return s;
             }
@@ -286,24 +270,24 @@ fn map_upsert(m: i64, key: i64, h: i64) -> *mut i64 {
 }
 
 macro_rules! map_get_impl {
-    ($name:ident, $valty:ty) => {
+    ($name:ident) => {
         #[no_mangle]
-        pub extern "C" fn $name(m: i64, key: i64) -> $valty {
+        pub extern "C" fn $name(m_w: i64, key: i64) -> i64 {
             unsafe {
-                let p = m as *mut i64;
-                let cap = *p;
-                let kflag = *p.offset(2);
-                let kkind = map_kkind(kflag);
+                let m = w_unref(m_w);
+                let cap = *(m as *mut i64);
+                let kflag = *(m as *mut i64).offset(2);
+                let kkind = map_kkind_raw(kflag);
                 let mut i = map_bucket_i(kkind, key, 0, cap);
                 let mut rounds = 0u64;
                 loop {
                     let s = map_slot(m, i as i64);
                     if *s == 0 || rounds > cap as u64 {
-                        let _ = panics::sloth_panic_nokey(key);
+                        let _ = panics::sloth_panic_nokey(crate::rc::dec_i(key));
                         std::process::exit(1);
                     }
                     if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, 0) {
-                        return *(s.offset(2) as *const $valty);
+                        return *(s.offset(2) as *const i64);
                     }
                     i = (i + 1) % (cap as u64);
                     rounds += 1;
@@ -315,24 +299,24 @@ macro_rules! map_get_impl {
 
 /// object-key get with a caller-provided content hash (patch #35)
 macro_rules! map_get_h_impl {
-    ($name:ident, $valty:ty) => {
+    ($name:ident) => {
         #[no_mangle]
-        pub extern "C" fn $name(m: i64, key: i64, h: i64) -> $valty {
+        pub extern "C" fn $name(m_w: i64, key: i64, h: i64) -> i64 {
             unsafe {
-                let p = m as *mut i64;
-                let cap = *p;
-                let kflag = *p.offset(2);
-                let kkind = map_kkind(kflag);
+                let m = w_unref(m_w);
+                let cap = *(m as *mut i64);
+                let kflag = *(m as *mut i64).offset(2);
+                let kkind = map_kkind_raw(kflag);
                 let mut i = map_bucket_i(kkind, key, h, cap);
                 let mut rounds = 0u64;
                 loop {
                     let s = map_slot(m, i as i64);
                     if *s == 0 || rounds > cap as u64 {
-                        let _ = panics::sloth_panic_nokey(key);
+                        let _ = panics::sloth_panic_nokey(crate::rc::dec_i(key));
                         std::process::exit(1);
                     }
                     if map_key_eq_h(kkind, *s.offset(1), *s.offset(3), key, h) {
-                        return *(s.offset(2) as *const $valty);
+                        return *(s.offset(2) as *const i64);
                     }
                     i = (i + 1) % (cap as u64);
                     rounds += 1;
@@ -343,12 +327,13 @@ macro_rules! map_get_h_impl {
 }
 
 macro_rules! map_set_impl {
-    ($name:ident, $valty:ty) => {
+    ($name:ident) => {
         #[no_mangle]
-        pub extern "C" fn $name(m: i64, key: i64, v: $valty) -> i64 {
+        pub extern "C" fn $name(m_w: i64, key: i64, v: i64) -> i64 {
             unsafe {
+                let m = w_unref(m_w);
                 let s = map_upsert(m, key, 0);
-                *(s.offset(2) as *mut $valty) = v;
+                *(s.offset(2) as *mut i64) = v;
                 0
             }
         }
@@ -357,47 +342,42 @@ macro_rules! map_set_impl {
 
 /// object-key set with a caller-provided content hash (patch #35)
 macro_rules! map_set_h_impl {
-    ($name:ident, $valty:ty) => {
+    ($name:ident) => {
         #[no_mangle]
-        pub extern "C" fn $name(m: i64, key: i64, h: i64, v: $valty) -> i64 {
+        pub extern "C" fn $name(m_w: i64, key: i64, h: i64, v: i64) -> i64 {
             unsafe {
+                let m = w_unref(m_w);
                 let s = map_upsert(m, key, h);
-                *(s.offset(2) as *mut $valty) = v;
+                *(s.offset(2) as *mut i64) = v;
                 0
             }
         }
     };
 }
 
-map_get_impl!(sloth_map_get, i64);
-map_get_impl!(sloth_map_get_f64, f64);
-map_get_impl!(sloth_map_str_get, i64);
-map_get_impl!(sloth_map_str_get_f64, f64);
-map_set_impl!(sloth_map_set, i64);
-map_set_impl!(sloth_map_set_f64, f64);
-map_set_impl!(sloth_map_str_set, i64);
-map_set_impl!(sloth_map_str_set_f64, f64);
-map_get_h_impl!(sloth_map_get_h, i64);
-map_get_h_impl!(sloth_map_get_h_f64, f64);
-map_set_h_impl!(sloth_map_set_h, i64);
-map_set_h_impl!(sloth_map_set_h_f64, f64);
+map_get_impl!(sloth_map_get);
+map_get_impl!(sloth_map_str_get);
+map_set_impl!(sloth_map_set);
+map_set_impl!(sloth_map_str_set);
+map_get_h_impl!(sloth_map_get_h);
+map_set_h_impl!(sloth_map_set_h);
 
 /// array of key words
 #[no_mangle]
-pub extern "C" fn sloth_map_keys(m: i64) -> i64 {
+pub extern "C" fn sloth_map_keys(m_w: i64) -> i64 {
     unsafe {
-        let p = m as *mut i64;
-        let cap = *p;
-        let kkind = map_kkind(*p.offset(2));
-        // keys are refcounted words for str/object key kinds (patch C)
-        let mut arr = sloth_arr_new_k(0, (kkind != 0) as i64);
+        let m = w_unref(m_w);
+        let cap = *(m as *mut i64);
+        let kflag = map_kflag_raw(m);
+        let _kkind = map_kkind_raw(kflag);
+        let mut arr = sloth_arr_new_k(0, 0);
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
                 let k = *s.offset(1);
                 // the result array owns its copy of each ref key
-                if kkind != 0 && k != 0 {
+                if k != 0 && w_is_ref(k) {
                     crate::rc::sloth_rc_retain(k);
                 }
                 arr = sloth_arr_push(arr, k);
@@ -409,21 +389,18 @@ pub extern "C" fn sloth_map_keys(m: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_map_values(m: i64) -> i64 {
+pub extern "C" fn sloth_map_values(m_w: i64) -> i64 {
     unsafe {
-        let p = m as *mut i64;
-        let cap = *p;
-        let vref = map_vref(*p.offset(2));
-        // values re-own their slots (values never change hands: released on
-        // map death; the array retains each extracted value)
-        let mut arr = sloth_arr_new_k(0, map_vref(*p.offset(2)) as i64);
-        let _ = vref;
+        let m = w_unref(m_w);
+        let cap = *(m as *mut i64);
+        // values re-own their slots; tag-driven cascade needs no vref mask
+        let mut arr = sloth_arr_new_k(0, 0);
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
                 let v = *s.offset(2);
-                if map_vref(*p.offset(2)) && v != 0 {
+                if v != 0 {
                     crate::rc::sloth_rc_retain(v);
                 }
                 arr = sloth_arr_push(arr, v);

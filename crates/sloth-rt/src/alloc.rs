@@ -1,20 +1,29 @@
-//! Deterministic behind-the-rc allocator (ARC migration: replaces Boehm).
+//! Deterministic behind-the-rc allocator (tagged-word header migration).
 //!
-//! Every container chunk is plain libc memory: fresh chunks come from
-//! `calloc` (zeroed words — nil fields/unused slots contract), growth from
-//! `realloc`. There is no collector and no background thread; chunk memory
-//! is freed by the rc core (rc.rs) when an owner's count reaches zero, so
-//! the kept C-ABI aliases below only translate sizes.
+//! Tracked chunks are allocated by the rc core (`rc_addr`): a hidden 48-byte
+//! header followed by the user payload; the payload pointer (tagged word) is
+//! the rt handle. Untracked allocations (class metadata, vtables, map bucket
+//! buffers) stay plain calloc'd memory with no header and no counts.
+//!
+//! All C-ABI symbols keep their names; `sloth_rt_realloc` now relocates the
+//! header+payload pair through the rc core (the counts and the weak chain
+//! follow the chunk) and returns the new tagged handle word.
+
+use crate::panics::panic_msg;
+use crate::rc::{relocate, w_is_ref};
 
 #[no_mangle]
 pub extern "C" fn sloth_rt_alloc(n: libc::size_t) -> *mut libc::c_void {
     unsafe { libc::calloc(1, n) }
 }
 
-/// contents-preserving growth (arrays push path); the returned pointer
-/// supersedes the old one immediately (realloc moves) — the rc core's
-/// `transfer` follows the count entry to the new address
+/// contents-preserving growth for tracked chunks (arrays push path);
+/// `p` is the old handle word (tagged), `n` the new payload byte size
+/// — the returned word supersedes the old one immediately
 #[no_mangle]
-pub extern "C" fn sloth_rt_realloc(p: *mut libc::c_void, n: libc::size_t) -> *mut libc::c_void {
-    unsafe { libc::realloc(p, n) }
+pub extern "C" fn sloth_rt_realloc(p: i64, n: usize) -> i64 {
+    if !w_is_ref(p) {
+        panic_msg("realloc of a value word");
+    }
+    unsafe { relocate(p, n) }
 }

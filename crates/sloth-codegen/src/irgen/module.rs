@@ -183,10 +183,9 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_weak_upgrade(i64) -> i64\n");
     s.push_str("  func.func private @sloth_weak_release(i64) -> i64\n");
     // patch 42: value-optional payload boxes + nil-aware print/interp faces
+    // (tag migration: the box holds one tagged word; the f64 faces are gone)
     s.push_str("  func.func private @sloth_box_new(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_box_new_f64(f64) -> i64\n");
     s.push_str("  func.func private @sloth_box_get(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_box_get_f64(i64) -> f64\n");
     s.push_str("  func.func private @sloth_rt_print_opt(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_push_opt(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_i64(i64) -> i64\n");
@@ -198,9 +197,7 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
     s.push_str(
         "  func.func private @sloth_arr_push(i64, i64) -> i64
-  func.func private @sloth_arr_push_f64(i64, f64) -> i64
   func.func private @sloth_arr_pop(i64) -> i64
-  func.func private @sloth_arr_pop_f64(i64) -> f64
   func.func private @sloth_str_finish(i64) -> i64
   func.func private @sloth_str_pushp(i64, i64) -> i64
   func.func private @sloth_str_push_i(i64, i64) -> i64
@@ -214,24 +211,16 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_len(i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_get(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_get_f64(i64, i64) -> f64\n");
     s.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_set_f64(i64, i64, f64) -> i64\n");
     s.push_str(
         "  func.func private @sloth_map_new(i64) -> i64
   func.func private @sloth_map_len(i64) -> i64
   func.func private @sloth_map_get(i64, i64) -> i64
-  func.func private @sloth_map_get_f64(i64, i64) -> f64
   func.func private @sloth_map_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_set_f64(i64, i64, f64) -> i64
   func.func private @sloth_map_get_h(i64, i64, i64) -> i64
-  func.func private @sloth_map_get_h_f64(i64, i64, i64) -> f64
   func.func private @sloth_map_set_h(i64, i64, i64, i64) -> i64
-  func.func private @sloth_map_set_h_f64(i64, i64, i64, f64) -> i64
   func.func private @sloth_map_str_get(i64, i64) -> i64
-  func.func private @sloth_map_str_get_f64(i64, i64) -> f64
   func.func private @sloth_map_str_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_str_set_f64(i64, i64, f64) -> i64
   func.func private @sloth_map_keys(i64) -> i64
   func.func private @sloth_map_values(i64) -> i64\n",
     );
@@ -432,11 +421,7 @@ impl ModEmitter {
         let sym = format!("sloth_{}_g_{}", modname, name);
         if self.declared_syms.insert(sym.clone()) {
             let mty = memref_cell_ty(self, t);
-            let init = if mty == "memref<1xf64>" {
-                "dense<0.0>"
-            } else {
-                "dense<0>"
-            };
+            let init = "dense<0>";
             self.global_decls.push(format!(
                 "  memref.global @{} : {} = {} {{mutable}}\n",
                 sym, mty, init
@@ -494,9 +479,7 @@ pub fn obj_rt_decls() -> String {
     let mut s = String::new();
     s.push_str("  func.func private @sloth_obj_new(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_field(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_field_f64(i64, i64) -> f64\n");
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_set_field_f64(i64, i64, f64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_refmask(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_new_k(i64, i64) -> i64\n");

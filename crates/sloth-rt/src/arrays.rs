@@ -1,12 +1,15 @@
-//! Arrays of i64/f64 words. Layout: `[len, cap, e0, e1, ...]` (cap >= len;
-//! push grows past cap by realloc). f64 accesses are routed via the `_f64` ops.
+//! Arrays of tagged words. Layout: `[len, cap, e0, e1, ...]` (cap >= len;
+//! push grows past cap by relocating through the rc core). Every element
+//! word is tagged (ref | 1, int `v<<1`, f64 `(bits&!1)>>1`, nil=0); rt
+//! treats elements as opaque tagged words, indexes are decoded ints.
 
-use crate::rc::{track_user_dtor, transfer};
+use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
 
-/// bounds-checked element pointer
-fn arr_index(a: i64, i: i64) -> *mut i64 {
+/// bounds-checked element pointer (`i` arrives as a tagged index word)
+fn arr_index(w: i64, i_w: i64) -> *mut i64 {
     unsafe {
-        let p = a as *mut i64;
+        let p = w_unref(w) as *mut i64;
+        let i = crate::rc::dec_i(i_w);
         let len = *p;
         if i < 0 || i >= len {
             crate::panics::panic_oob("array", i, len);
@@ -15,18 +18,16 @@ fn arr_index(a: i64, i: i64) -> *mut i64 {
     }
 }
 
-/// death cascade: release ref-typed elements when the array chunk dies
-fn arr_dtor(p: usize, aux: u64) {
+/// death cascade: release every element word (tag checks make value
+/// elements inert no-ops — no elref mask needed)
+fn arr_dtor(p: usize, _aux: u64) {
     unsafe {
-        if aux == 0 {
-            return;
-        }
         let a = p as *mut i64;
         let len = *a;
         let mut i = 0i64;
         while i < len {
             let w = *a.offset(i as isize + 2);
-            if w != 0 {
+            if w != 0 && w_is_ref(w) {
                 crate::rc::sloth_rc_release(w);
             }
             i += 1;
@@ -35,70 +36,61 @@ fn arr_dtor(p: usize, aux: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_arr_new(len: i64) -> i64 {
-    arr_new_impl(len, 0)
+pub extern "C" fn sloth_arr_new(len_w: i64) -> i64 {
+    arr_new_impl(len_w)
 }
 
-/// element-ref-aware array creation (patch C): elref = 1 marks elements as
-/// refcounted words → death cascade releases each element's count
+/// element-ref-aware creation signature kept (the tag bit replaced the
+/// elref mask; the parameter is ignored — callers keep shape)
 #[no_mangle]
-pub extern "C" fn sloth_arr_new_k(len: i64, elref: i64) -> i64 {
-    arr_new_impl(len, elref)
+pub extern "C" fn sloth_arr_new_k(len_w: i64, _elref: i64) -> i64 {
+    arr_new_impl(len_w)
 }
 
-fn arr_new_impl(len: i64, elref: i64) -> i64 {
+fn arr_new_impl(len_w: i64) -> i64 {
     unsafe {
-        let n = len.max(0) as libc::size_t;
+        let n = crate::rc::dec_i(len_w).max(0) as libc::size_t;
         let cap = (n * 2).next_power_of_two().max(8) as libc::size_t;
-        let o = crate::alloc::sloth_rt_alloc((cap + 2) * 8) as *mut i64;
-        *o = n as i64;
-        *o.offset(1) = cap as i64;
-        track_user_dtor(o as usize, arr_dtor);
-        // stash elref in the count table via... entries carry aux; record it
-        crate::rc::set_aux(o as usize, elref as u64);
-        o as i64
+        let p = rc_addr((cap + 2) * 8, Some(arr_dtor)) as *mut i64;
+        *p = n as i64;
+        *p.offset(1) = cap as i64;
+        w_ref(p as usize)
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_arr_len(a: i64) -> i64 {
-    unsafe { *(a as *mut i64) }
+pub extern "C" fn sloth_arr_len(w: i64) -> i64 {
+    unsafe { crate::rc::enc_i(*(w_unref(w) as *mut i64)) }
 }
 
-/// append one i64 word; returns the (possibly moved) array handle —
-/// GC_realloc relocates the buffer when growing, so callers MUST propagate
-/// the returned handle (old input is freed immediately by the collector)
+/// append one tagged word; returns the (possibly relocated) array handle —
+/// growth moves the header+payload, so callers MUST propagate the handle
 #[no_mangle]
 pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
     unsafe {
-        let p = a as *mut i64;
+        let p = w_unref(a) as *mut i64;
         let len = *p;
         let cap = *p.offset(1);
-        let mut base = a;
         if len >= cap {
             let nc = (cap * 2).max(8);
-            let raw = crate::alloc::sloth_rt_realloc(
-                a as *mut libc::c_void,
-                (nc + 2) as libc::size_t * 8,
-            );
-            base = raw as i64;
-            // count ownership follows the relocated chunk
-            transfer(a as usize, base as usize);
-            let p2 = base as *mut i64;
+            let a2 = crate::alloc::sloth_rt_realloc(a, ((nc + 2) * 8) as usize);
+            let p2 = w_unref(a2) as *mut i64;
             *p2.offset(1) = nc;
+            *p2.offset((len + 2) as isize) = w;
+            *p2 = len + 1;
+            return a2;
         }
-        let p2 = base as *mut i64;
-        *p2.offset((len + 2) as isize) = w;
-        *p2 = len + 1;
-        base
+        *p.offset((len + 2) as isize) = w;
+        *p = len + 1;
+        a
     }
 }
 
-/// remove and return the last i64 word
+/// remove and return the last tagged word
 #[no_mangle]
 pub extern "C" fn sloth_arr_pop(a: i64) -> i64 {
     unsafe {
-        let p = a as *mut i64;
+        let p = w_unref(a) as *mut i64;
         let len = *p;
         if len <= 0 {
             crate::panics::panic_oob("pop", len - 1, len);
@@ -109,68 +101,14 @@ pub extern "C" fn sloth_arr_pop(a: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_arr_push_f64(a: i64, w: f64) -> i64 {
-    unsafe {
-        let p = a as *mut i64;
-        let len = *p;
-        let cap = *p.offset(1);
-        let mut base = a;
-        if len >= cap {
-            // realloc moves the buffer: return the relocated handle
-            let nc = (cap * 2).max(8);
-            let raw = crate::alloc::sloth_rt_realloc(
-                a as *mut libc::c_void,
-                (nc + 2) as libc::size_t * 8,
-            );
-            base = raw as i64;
-            // count ownership follows the relocated chunk
-            transfer(a as usize, base as usize);
-            let p2 = base as *mut i64;
-            *p2.offset(1) = nc;
-        }
-        let p2 = base as *mut i64;
-        *(p2.offset((len + 2) as isize) as *mut f64) = w;
-        *p2 = len + 1;
-        base
-    }
-}
-
-/// remove and return the last f64 word
-#[no_mangle]
-pub extern "C" fn sloth_arr_pop_f64(a: i64) -> f64 {
-    unsafe {
-        let p = a as *mut i64;
-        let len = *p;
-        if len <= 0 {
-            crate::panics::panic_oob("pop", len - 1, len);
-        }
-        *p = len - 1;
-        *((p.offset((len - 1) as isize + 2)) as *mut f64)
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn sloth_arr_get(a: i64, i: i64) -> i64 {
     unsafe { *arr_index(a, i) }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_arr_get_f64(a: i64, i: i64) -> f64 {
-    unsafe { *(arr_index(a, i) as *mut f64) }
 }
 
 #[no_mangle]
 pub extern "C" fn sloth_arr_set(a: i64, i: i64, v: i64) -> i64 {
     unsafe {
         *arr_index(a, i) = v;
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_arr_set_f64(a: i64, i: i64, v: f64) -> i64 {
-    unsafe {
-        *(arr_index(a, i) as *mut f64) = v;
         0
     }
 }

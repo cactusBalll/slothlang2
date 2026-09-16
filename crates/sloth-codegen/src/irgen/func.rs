@@ -1,4 +1,6 @@
-//! Pass 2 core: emit a single function body.
+//! Pass 2 core: emit a single function body (tagged-word ABI: every
+//! param/return is an i64 tagged word; the only raw-typed edges left are
+//! extern C-ABI f64 targets, handled at rt).
 
 #[allow(unused_imports)]
 use super::*;
@@ -8,8 +10,7 @@ use sloth_frontend::ast::*;
 use sloth_frontend::lexer::{Pos, StrPart};
 #[allow(unused_imports)]
 use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
-#[allow(unused_imports)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl ModEmitter {
     /// emit one function; returns mangled symbol name
@@ -37,7 +38,11 @@ impl ModEmitter {
                     .map(|p| if self.is_float(p.1) { "f64" } else { "i64" })
                     .collect::<Vec<&str>>()
                     .join(", "),
-                mlir_ret_ty(self, plan.ret),
+                if self.is_float(plan.ret) {
+                    "f64"
+                } else {
+                    "i64"
+                },
             ));
             return plan.mangled;
         }
@@ -49,7 +54,6 @@ impl ModEmitter {
             })
             .unwrap_or(false);
         self.emitted_names.push(plan.mangled.clone());
-        let retf = self.is_float(plan.ret);
         let mut fw = FnWalk {
             cur: String::new(),
             vcount: 1000,
@@ -74,35 +78,21 @@ impl ModEmitter {
         fw.ret_flag = rf;
         if !self.is_unit(plan.ret) {
             let ra = fw.v();
-            let rty = if retf {
-                "memref<1xf64>"
-            } else {
-                "memref<1xi64>"
-            };
             fw.ret_alloca = ra.clone();
-            fw.op(&format!("    {} = memref.alloca() : {}", ra, rty));
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", ra));
         }
-        // function params: %pN fed through allocas; variadic packs later
+        // function params: %pN arrive as tagged words; store them raw
         let mut argtxts: Vec<String> = Vec::new();
-        for (i, (pn, pt, fl)) in plan.params.iter().enumerate() {
+        for (i, (pn, pt, _fl)) in plan.params.iter().enumerate() {
             let src = format!("%p{}", i);
-            argtxts.push(if *fl {
-                "f64".to_string()
-            } else {
-                "i64".to_string()
-            });
-            let mty = if *fl {
-                "memref<1xf64>"
-            } else {
-                "memref<1xi64>"
-            };
+            argtxts.push("i64".to_string());
             let a = fw.v();
             let zi = fw.v();
             fw.op(&format!("    {} = arith.constant 0 : i64", zi));
-            fw.op(&format!("    {} = memref.alloca() : {}", a, mty));
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", a));
             fw.op(&format!(
-                "    memref.store {}, {}[{}] : {}",
-                src, a, zi, mty
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                src, a, zi
             ));
             fw.scopes.last_mut().unwrap().insert(pn.clone(), (a, *pt));
         }
@@ -117,15 +107,10 @@ impl ModEmitter {
         if !self.is_unit(plan.ret) {
             let zi = fw.v();
             let v = fw.v();
-            let rty = if retf {
-                "memref<1xf64>"
-            } else {
-                "memref<1xi64>"
-            };
             fw.op(&format!("    {} = arith.constant 0 : index", zi));
             fw.op(&format!(
-                "    {} = memref.load {}[{}] : {}",
-                v, fw.ret_alloca, zi, rty
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                v, fw.ret_alloca, zi
             ));
             retval = format!(" {}", v);
         }
@@ -133,14 +118,12 @@ impl ModEmitter {
             if self.is_unit(plan.ret) {
                 fw.op("    llvm.return");
             } else {
-                let rt = if retf { "f64" } else { "i64" };
-                fw.op(&format!("    llvm.return {} : {}", retval.trim_start(), rt));
+                fw.op(&format!("    llvm.return {} : i64", retval.trim_start()));
             }
         } else if self.is_unit(plan.ret) {
             fw.op("    return");
         } else {
-            let rt = if retf { "f64" } else { "i64" };
-            fw.op(&format!("    return {} : {}", retval.trim_start(), rt));
+            fw.op(&format!("    return {} : i64", retval.trim_start()));
         }
         let ret_text = fw.cur.clone();
         let sigtxt: Vec<String> = argtxts

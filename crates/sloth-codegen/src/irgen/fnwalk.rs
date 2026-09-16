@@ -81,7 +81,12 @@ impl FnWalk {
         for h in pending {
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
         }
-        self.op(&format!("    {} = arith.trunci {} : i64 to i1", c1, c));
+        // tag migration: `c` is an encoded bool word (false=0, true=enc(1)=2);
+        // a trunci would read the tag bit and always yield false — compare
+        // against zero instead so both 0/1 and 0/2 conventions stay correct
+        let zc = self.v();
+        self.op(&format!("    {} = arith.constant 0 : i64", zc));
+        self.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", c1, c, zc));
         self.op(&format!("    cf.cond_br {}, {}, {}", c1, t, f));
         self.term = true;
     }
@@ -171,14 +176,14 @@ impl FnWalk {
             .insert(name.to_string(), !mutable);
         a
     }
-    pub(crate) fn declare_raw(&mut self, name: &str, t: TyId, fl: bool) -> String {
+    pub(crate) fn declare_raw(&mut self, _name: &str, _t: TyId, _fl: bool) -> String {
         let a = self.v();
-        let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
-        self.op(&format!("    {} = memref.alloca() : {}", a, mty));
+        // tag migration: every slot holds one tagged i64 word
+        self.op(&format!("    {} = memref.alloca() : memref<1xi64>", a));
         self.scopes
             .last_mut()
             .unwrap()
-            .insert(name.to_string(), (a.clone(), t));
+            .insert(_name.to_string(), (a.clone(), _t));
         a
     }
     pub(crate) fn lookup(&self, name: &str) -> Option<(String, TyId)> {
@@ -189,21 +194,14 @@ impl FnWalk {
         }
         None
     }
-    pub(crate) fn assign(&mut self, name: &str, val: &str, fl: bool) {
+    pub(crate) fn assign(&mut self, name: &str, val: &str, _fl: bool) {
         if let Some((a, _t)) = self.lookup(name) {
             let z = self.v();
             self.op(&format!("    {} = arith.constant 0 : i64", z));
-            if fl {
-                self.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xf64>",
-                    val, a, z
-                ));
-            } else {
-                self.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    val, a, z
-                ));
-            }
+            self.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                val, a, z
+            ));
         }
     }
 }

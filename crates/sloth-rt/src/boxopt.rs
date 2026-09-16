@@ -1,56 +1,31 @@
-//! Value-optional boxes: immutable one-word payload cells (int / float /
-//! bool PVOID-lifted from the "word + 0 = nil" convention).
+//! Value-optional boxes: immutable one-word payload cells (tag migration).
 //!
 //! An optional of a value type is a 1-word slot holding either 0 (= nil, the
-//! same word null set every other optional surface uses) or the handle of a
-//! heap box holding the payload. A box is an rc-managed user value: every
-//! copy counts (retain/release via the rc core), and reaching zero frees
-//! the chunk. Because the payload never shares storage with the box handle,
-//! an `int?` value 0 is a real box pointer and never confuses with nil.
+//! same word null set every other optional surface uses) or the tagged
+//! handle of a heap box holding the payload word. Value 0 inside a box is a
+//! real handle word and never confuses with nil. The f64 payload routes are
+//! gone: callers encode/decode at the codec boundary, so a box is a plain
+//! tagged-word cell.
 
-use crate::alloc::sloth_rt_alloc;
-use crate::rc::track_user;
+use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
 
-/// allocate a box holding an integer payload
+/// allocate a box holding a tagged payload word
 #[no_mangle]
 pub extern "C" fn sloth_box_new(v: i64) -> i64 {
     unsafe {
-        let b = sloth_rt_alloc(8) as *mut i64;
+        let b = rc_addr(8, None) as *mut i64;
         *b = v;
-        track_user(b as usize);
-        b as i64
+        w_ref(b as usize)
     }
 }
 
-/// allocate a box holding a float payload
-#[no_mangle]
-pub extern "C" fn sloth_box_new_f64(v: f64) -> i64 {
-    unsafe {
-        let b = sloth_rt_alloc(8) as *mut i64;
-        *(b as *mut f64) = v;
-        track_user(b as usize);
-        b as i64
-    }
-}
-
-/// payload read (integer route; 0 = nil reads as 0 — callers that matter
-/// never dereference a nil box: non-nil was checked or the value is consumed
+/// payload read (nil reads 0 — callers never dereference a nil box except
 /// under unwrap-or-0 semantics)
 #[no_mangle]
-pub extern "C" fn sloth_box_get(h: i64) -> i64 {
-    if h == 0 {
+pub extern "C" fn sloth_box_get(h_w: i64) -> i64 {
+    if w_is_ref(h_w) {
+        unsafe { *(w_unref(h_w) as *const i64) }
+    } else {
         0
-    } else {
-        unsafe { *(h as *const i64) }
-    }
-}
-
-/// payload read (float route; nil reads 0.0)
-#[no_mangle]
-pub extern "C" fn sloth_box_get_f64(h: i64) -> f64 {
-    if h == 0 {
-        0.0
-    } else {
-        unsafe { *(h as *const f64) }
     }
 }

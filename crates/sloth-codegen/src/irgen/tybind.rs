@@ -198,6 +198,7 @@ impl ModEmitter {
             _ => None,
         }
     }
+    #[allow(dead_code)]
     pub(crate) fn is_weak(&self, t: TyId) -> bool {
         self.weak_inner(t).is_some()
     }
@@ -264,6 +265,7 @@ impl ModEmitter {
 
     /// assignment to a declared name: release the overload word first, then
     /// store (unconditional — rt no-ops for non-ref/nil words)
+    #[allow(dead_code)]
     pub(crate) fn rc_assign_slot(&mut self, fw: &mut FnWalk, a: &str) {
         let old = self.load_slot(fw, a);
         self.emit_release(fw, &old);
@@ -271,6 +273,7 @@ impl ModEmitter {
 
     /// declare bookkeeping (call at fw.declare sites): a ref-typed local's
     /// alloca joins this scope's release set
+    #[allow(dead_code)]
     pub(crate) fn declare_rc(
         &mut self,
         fw: &mut FnWalk,
@@ -309,7 +312,7 @@ impl ModEmitter {
         from: TyId,
         to: TyId,
     ) -> (String, TyId) {
-        let (inner, fli) = match self.opt_inner(to) {
+        let (_inner, fli) = match self.opt_inner(to) {
             Some(x) => x,
             None => return (v.to_string(), from),
         };
@@ -317,34 +320,27 @@ impl ModEmitter {
         if matches!(froms, Ty::Unit) || from == to {
             return (v.to_string(), to);
         }
-        let bare_scalar = matches!(froms, Ty::I64 | Ty::Bool | Ty::F64);
-        let _ = bare_scalar;
-        if matches!(froms, Ty::I64 | Ty::Bool) && !fli {
+        if matches!(froms, Ty::I64 | Ty::Bool) {
+            // int/bool word boxes as-is; into a float? surface promote first
+            let payload = if fli {
+                iw_to_f64_word(fw, v)
+            } else {
+                v.to_string()
+            };
             let r = fw.v();
             fw.op(&format!(
                 "    {} = call @sloth_box_new({}) : (i64) -> i64",
-                r, v
-            ));
-            self.dangling_producer(fw, &r, to);
-            return (r, to);
-        }
-        if matches!(froms, Ty::I64 | Ty::Bool) && fli {
-            // int/bool word into a float? surface: promote payload then box
-            let cv = fw.v();
-            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-            let r = fw.v();
-            fw.op(&format!(
-                "    {} = call @sloth_box_new_f64({}) : (f64) -> i64",
-                r, cv
+                r, payload
             ));
             self.dangling_producer(fw, &r, to);
             return (r, to);
         }
         if froms == Ty::F64 {
             if fli {
+                // f64 word boxes as-is (the box holds the encoded word)
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_box_new_f64({}) : (f64) -> i64",
+                    "    {} = call @sloth_box_new({}) : (i64) -> i64",
                     r, v
                 ));
                 self.dangling_producer(fw, &r, to);
@@ -371,16 +367,12 @@ impl ModEmitter {
             Some(x) => x,
             None => return (v.to_string(), t),
         };
-        let fty = if fli { "f64" } else { "i64" };
-        let sym = if fli {
-            "sloth_box_get_f64"
-        } else {
-            "sloth_box_get"
-        };
+        let _ = fli;
+        // tag migration: the box holds one tagged payload word
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @{}({}) : (i64) -> {}",
-            r, sym, v, fty
+            "    {} = call @sloth_box_get({}) : (i64) -> i64",
+            r, v
         ));
         (r, inner)
     }
@@ -557,8 +549,8 @@ impl ModEmitter {
             if self.is_float(vty) {
                 fw.assign(name, &v, true);
             } else {
-                let cv = fw.v();
-                fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                // int word -> f64 word (slot storage is always the word plane)
+                let cv = iw_to_f64_word(fw, &v);
                 fw.assign(name, &cv, true);
             }
             return;

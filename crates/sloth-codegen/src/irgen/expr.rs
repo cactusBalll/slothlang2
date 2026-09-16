@@ -66,7 +66,11 @@ impl ModEmitter {
                         // relocated chunk; a release here would drop the
                         // field's own count (same address = live handle)
                         let zi = fw.v();
-                        fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            zi,
+                            enc_i_lit(idx)
+                        ));
                         fw.op(&format!(
                             "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                             rv, zi, handle
@@ -91,24 +95,27 @@ impl ModEmitter {
         match &e.node {
             ExprNode::Int(v) => {
                 let r = fw.v();
-                fw.op(&format!("    {} = arith.constant {} : i64", r, v));
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    r,
+                    enc_i_lit(*v)
+                ));
                 let t = self.r.mk(Ty::I64);
                 (r, t)
             }
             ExprNode::Float(v) => {
+                // tag migration: the word plane carries the encoded f64 bits
                 let r = fw.v();
-                let mut s = format!("{}", v);
-                if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("nan")
-                {
-                    s.push_str(".0");
-                }
-                let t = self.r.mk(Ty::F64);
-                fw.op(&format!("    {} = arith.constant {} : f64", r, s));
-                (r, t)
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    r,
+                    enc_f_lit(*v)
+                ));
+                (r, self.r.mk(Ty::F64))
             }
             ExprNode::Bool(v) => {
                 let r = fw.v();
-                let b = if *v { 1 } else { 0 };
+                let b = enc_i_lit(if *v { 1 } else { 0 });
                 fw.op(&format!("    {} = arith.constant {} : i64", r, b));
                 let t = self.r.mk(Ty::Bool);
                 (r, t)
@@ -158,7 +165,8 @@ impl ModEmitter {
                                     let c2 = fw.v();
                                     fw.op(&format!(
                                         "    {} = arith.constant {} : i64",
-                                        c2, tail as i64
+                                        c2,
+                                        enc_i_lit(tail as i64)
                                     ));
                                     let r = fw.v();
                                     fw.op(&format!(
@@ -177,9 +185,10 @@ impl ModEmitter {
                                         r, curw, v
                                     ));
                                 } else if self.is_float(t) {
+                                    let vf = emit_dec_f(fw, &v);
                                     fw.op(&format!(
                                         "    {} = call @sloth_str_push_f({}, {}) : (i64, f64) -> i64",
-                                        r, curw, v
+                                        r, curw, vf
                                     ));
                                 } else if self.is_opt_val(t) {
                                     // patch 42: boxed optional interpolation
@@ -201,7 +210,11 @@ impl ModEmitter {
                                     };
                                     let _ = kind;
                                     let kc = fw.v();
-                                    fw.op(&format!("    {} = arith.constant {} : i64", kc, kind));
+                                    fw.op(&format!(
+                                        "    {} = arith.constant {} : i64",
+                                        kc,
+                                        enc_i_lit(kind)
+                                    ));
                                     fw.op(&format!(
                                         "    {} = call @sloth_str_push_opt({}, {}, {}) : (i64, i64, i64) -> i64",
                                         r, curw, v, kc
@@ -289,7 +302,11 @@ impl ModEmitter {
                         fw.op(&format!("    {} = arith.constant {} : i64", c1, w as i64));
                         let n = std::cmp::min(8usize, len - i * 8);
                         let c2 = fw.v();
-                        fw.op(&format!("    {} = arith.constant {} : i64", c2, n));
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            c2,
+                            enc_i_lit(n as i64)
+                        ));
                         let r = fw.v();
                         fw.op(&format!(
                             "    {} = call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
@@ -316,17 +333,18 @@ impl ModEmitter {
                     let b = name == "true";
                     let t = self.r.mk(Ty::Bool);
                     let r = fw.v();
-                    let bv = if b { 1 } else { 0 };
+                    let bv = enc_i_lit(if b { 1 } else { 0 });
                     fw.op(&format!("    {} = arith.constant {} : i64", r, bv));
                     return (r, t);
                 }
                 if let Some((a, t)) = fw.lookup(name) {
                     let z = fw.v();
                     let v = fw.v();
-                    let fl = self.is_float(t);
-                    let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
                     fw.op(&format!("    {} = arith.constant 0 : i64", z));
-                    fw.op(&format!("    {} = memref.load {}[{}] : {}", v, a, z, mty));
+                    fw.op(&format!(
+                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                        v, a, z
+                    ));
                     (v, t)
                 } else if let Some((gsym, t, _)) = self.globals.get(name).cloned() {
                     let (v, _vt) = self.emit_global_read(fw, &gsym, t);
@@ -360,12 +378,15 @@ impl ModEmitter {
                     fw.op(&format!("    {} = arith.constant 0 : i64", zc));
                     let c = fw.v();
                     fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", c, lv, zc));
-                    let c1 = fw.v();
-                    fw.op(&format!("    {} = arith.extsi {} : i1 to i64", c1, c));
+                    let c1 = ext_bool(fw, &c);
                     let r = if *negated {
                         let one = fw.v();
                         let o = fw.v();
-                        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            one,
+                            enc_i_lit(1)
+                        ));
                         fw.op(&format!("    {} = arith.xori {}, {} : i64", o, c1, one));
                         o
                     } else {
@@ -401,14 +422,17 @@ impl ModEmitter {
                                 "    {} = arith.cmpi ne, {}, {} : i64",
                                 live, lv, zc
                             ));
-                            let live1 = fw.v();
-                            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", live1, live));
+                            let live1 = ext_bool(fw, &live);
                             let r = if matches {
                                 if *negated {
-                                    // live inverted: 1 - live == xori 1
+                                    // live inverted: enc(1) - live == invert
                                     let one = fw.v();
                                     let o = fw.v();
-                                    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                                    fw.op(&format!(
+                                        "    {} = arith.constant {} : i64",
+                                        one,
+                                        enc_i_lit(1)
+                                    ));
                                     fw.op(&format!(
                                         "    {} = arith.subi {}, {} : i64",
                                         o, one, live1
@@ -435,7 +459,7 @@ impl ModEmitter {
                         fw.op(&format!(
                             "    {} = arith.constant {} : i64",
                             c,
-                            if hit { 1i64 } else { 0i64 }
+                            enc_i_lit(if hit { 1i64 } else { 0i64 })
                         ));
                         return (c, self.r.mk(Ty::Bool));
                     }
@@ -490,7 +514,11 @@ impl ModEmitter {
                     let mut acc: Option<String> = None;
                     for id in &idsv {
                         let ci = fw.v();
-                        fw.op(&format!("    {} = arith.constant {} : i64", ci, id));
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            ci,
+                            enc_i_lit(*id)
+                        ));
                         let clsid = fw.v();
                         fw.op(&format!(
                             "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
@@ -501,8 +529,7 @@ impl ModEmitter {
                             "    {} = arith.cmpi eq, {}, {} : i64",
                             eq, clsid, ci
                         ));
-                        let eq1 = fw.v();
-                        fw.op(&format!("    {} = arith.extsi {} : i1 to i64", eq1, eq));
+                        let eq1 = ext_bool(fw, &eq);
                         acc = match acc {
                             None => Some(eq1),
                             Some(a) => {
@@ -516,7 +543,11 @@ impl ModEmitter {
                     let r = if *negated {
                         let one = fw.v();
                         let o = fw.v();
-                        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            one,
+                            enc_i_lit(1)
+                        ));
                         fw.op(&format!("    {} = arith.xori {}, {} : i64", o, base, one));
                         o
                     } else {
@@ -534,23 +565,17 @@ impl ModEmitter {
                 // branch; bare float-Elvis stays rejected
                 let (u, ut) = self.unwrap_opt_word(fw, &lv, lt);
                 if self.is_float(ut) && !self.is_float(rt) {
-                    let cv = fw.v();
-                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, rv));
-                    rv = cv;
+                    rv = iw_to_f64_word(fw, &rv);
                 }
-                let fl = self.is_float(ut);
+                // encoded words select word-wise; nil/0.0 both ride word 0
                 let zc = fw.v();
                 fw.op(&format!("    {} = arith.constant 0 : i64", zc));
                 let c = fw.v();
                 fw.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", c, lv, zc));
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = arith.select {}, {}, {} : {}",
-                    r,
-                    c,
-                    u,
-                    rv,
-                    if fl { "f64" } else { "i64" }
+                    "    {} = arith.select {}, {}, {} : i64",
+                    r, c, u, rv
                 ));
                 (r, ut)
             }
@@ -598,22 +623,18 @@ impl ModEmitter {
                 }
                 let fl = self.is_float(at) || self.is_float(bt);
                 if fl {
-                    // promote int operands to f64 for float ops
+                    // tagged words -> f64 scalars for the typed op, then back
                     let a = if self.is_float(at) {
-                        a
+                        emit_dec_f(fw, &a)
                     } else {
-                        let cv = fw.v();
-                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, a));
-                        cv
+                        iw_to_f64_scalar(fw, &a)
                     };
                     let b = if self.is_float(bt) {
-                        b
+                        emit_dec_f(fw, &b)
                     } else {
-                        let cv = fw.v();
-                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, b));
-                        cv
+                        iw_to_f64_scalar(fw, &b)
                     };
-                    let r = fw.v();
+                    let rf = fw.v();
                     let ao = match op {
                         ArithOp::Add => "arith.addf",
                         ArithOp::Sub => "arith.subf",
@@ -621,10 +642,16 @@ impl ModEmitter {
                         ArithOp::Div => "arith.divf",
                         ArithOp::Mod => "arith.remf",
                     };
-                    fw.op(&format!("    {} = {} {}, {} : f64", r, ao, a, b));
+                    fw.op(&format!("    {} = {} {}, {} : f64", rf, ao, a, b));
+                    let r = emit_enc_f(fw, &rf);
                     return (r, self.r.mk(Ty::F64));
                 }
-                let r = fw.v();
+                // int route: decode both sides, compute raw, encode once
+                // (mul/div/mod must decode; add/sub stay algebraic but we
+                // keep the uniform decode for simpler correctness)
+                let ad = emit_dec_int(fw, &a);
+                let bd = emit_dec_int(fw, &b);
+                let rr = fw.v();
                 let ao = match op {
                     ArithOp::Add => "arith.addi",
                     ArithOp::Sub => "arith.subi",
@@ -632,7 +659,8 @@ impl ModEmitter {
                     ArithOp::Div => "arith.divsi",
                     ArithOp::Mod => "arith.remsi",
                 };
-                fw.op(&format!("    {} = {} {}, {} : i64", r, ao, a, b));
+                fw.op(&format!("    {} = {} {}, {} : i64", rr, ao, ad, bd));
+                let r = emit_enc_int(fw, &rr);
                 (r, self.r.mk(Ty::I64))
             }
             ExprNode::Pipe { lhs, rhs } => {
@@ -698,23 +726,30 @@ impl ModEmitter {
                         };
                         let _ = &r;
                         if fl {
-                            fw.op(&format!("    {} = arith.constant 0.0 : f64", r));
+                            let vd = emit_dec_f(fw, &v);
+                            let zf = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0.0 : f64", zf));
                             let nz = fw.v();
-                            fw.op(&format!("    {} = arith.subf {}, {} : f64", nz, r, v));
-                            return (nz, t);
+                            fw.op(&format!("    {} = arith.subf {}, {} : f64", nz, zf, vd));
+                            let r2 = emit_enc_f(fw, &nz);
+                            return (r2, t);
                         }
+                        let vd = emit_dec_int(fw, &v);
                         let zi = fw.v();
                         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
                         let nr = fw.v();
-                        fw.op(&format!("    {} = arith.subi {}, {} : i64", nr, zi, v));
-                        (nr, t)
+                        fw.op(&format!("    {} = arith.subi {}, {} : i64", nr, zi, vd));
+                        (emit_enc_int(fw, &nr), t)
                     }
                     UnOp::Not => {
+                        // compute `1 - dec(w)` in raw ints, then encode once:
+                        // (enc(1) - dec(w)) would double-encode the result
                         let one = fw.v();
                         fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                        let vd = emit_dec_int(fw, &v);
                         let z2 = fw.v();
-                        fw.op(&format!("    {} = arith.subi {}, {} : i64", z2, one, v));
-                        (z2, t)
+                        fw.op(&format!("    {} = arith.subi {}, {} : i64", z2, one, vd));
+                        (emit_enc_int(fw, &z2), t)
                     }
                 }
             }
@@ -783,11 +818,12 @@ impl ModEmitter {
                 r, a, b
             ));
             let rv = if op == &BinOp::NotEq {
+                let rd = emit_dec_int(fw, &r);
                 let one = fw.v();
-                let o = fw.v();
                 fw.op(&format!("    {} = arith.constant 1 : i64", one));
-                fw.op(&format!("    {} = arith.xori {}, {} : i64", o, r, one));
-                o
+                let o = fw.v();
+                fw.op(&format!("    {} = arith.xori {}, {} : i64", o, rd, one));
+                emit_enc_int(fw, &o)
             } else {
                 r
             };
@@ -795,6 +831,9 @@ impl ModEmitter {
         }
         let fl = self.is_float(at) || self.is_float(bt);
         if fl {
+            // tagged f64 words -> raw scalars for cmpf
+            let a = emit_dec_f(fw, &a);
+            let b = emit_dec_f(fw, &b);
             let pred = match op {
                 BinOp::EqEq => "oeq",
                 BinOp::NotEq => "une",
@@ -814,9 +853,8 @@ impl ModEmitter {
                 "    {} = arith.cmpf {}, {}, {} : f64",
                 r, pred, a, b
             ));
-            let z = fw.v();
-            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", z, r));
-            (z, cmp_ty_id)
+            // bool words are encoded (0 / enc(1))
+            (ext_bool(fw, &r), cmp_ty_id)
         } else {
             let z = fw.v();
             let mk = fw.v();
@@ -843,9 +881,9 @@ impl ModEmitter {
                 "    {} = arith.cmpi {}, {}, {} : i64",
                 z, pr, a, b
             ));
-            let z2 = fw.v();
-            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", z2, z));
-            (z2, cmp_ty_id)
+            // bool words are encoded (0 / enc(1)); ordering cmps stay
+            // monotonic under the x2 map so the word pair compares as-is
+            (ext_bool(fw, &z), cmp_ty_id)
         }
     }
 }
@@ -883,7 +921,12 @@ impl ModEmitter {
                     }
                     let idx = self.field_index(&c, name);
                     let zi = fw.v();
-                    fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                    // rt decodes the field index word
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        zi,
+                        enc_i_lit(idx as i64)
+                    ));
                     let fty2 = self.field_type(&c, name);
                     match self.r.get(fty2) {
                         Ty::Str => {
@@ -895,9 +938,10 @@ impl ModEmitter {
                             return (r, self.r.mk(Ty::Str));
                         }
                         Ty::F64 => {
+                            // tag migration: f64 words ride the word route
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field_f64({}, {}) : (i64, i64) -> f64",
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, fty2);
@@ -949,10 +993,13 @@ impl ModEmitter {
                 // MVP range lit as two-word repr: [lo, hi(+1)] held as i64 lo packed
                 let (lo, _lt) = self.emit_expr(fw, low);
                 let (hi, _ht) = self.emit_expr(fw, high);
+                // dec + add + enc: encoded word algebra (add is bijective)
+                let hd = emit_dec_int(fw, &hi);
                 let one = fw.v();
                 fw.op(&format!("    {} = arith.constant 1 : i64", one));
-                let hi2 = fw.v();
-                fw.op(&format!("    {} = arith.addi {}, {} : i64", hi2, hi, one));
+                let hi3 = fw.v();
+                fw.op(&format!("    {} = arith.addi {}, {} : i64", hi3, hd, one));
+                let hi2 = emit_enc_int(fw, &hi3);
                 let _ = inclusive;
                 // pack lo in high word positions: MVP sloth.range helper
                 let r = fw.v();
@@ -975,13 +1022,7 @@ impl ModEmitter {
                 if anyf {
                     for (v, t) in evs.iter_mut().zip(ets.iter_mut()) {
                         if !self.is_float(*t) {
-                            let cv = fw.v();
-                            fw.op(&format!(
-                                "    {} = arith.sitofp {} : i64 to f64",
-                                cv,
-                                v.clone()
-                            ));
-                            *v = cv;
+                            *v = iw_to_f64_word(fw, v);
                             *t = self.r.mk(Ty::F64);
                         }
                     }
@@ -1007,13 +1048,20 @@ impl ModEmitter {
                     }
                 }
                 let n = fw.v();
-                fw.op(&format!("    {} = arith.constant {} : i64", n, evs.len()));
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    n,
+                    enc_i_lit(evs.len() as i64)
+                ));
                 let arr = fw.v();
-                // element refness flag → death cascade releases elements (C)
-                let elref = !anyf && ets.iter().any(|t| self.is_ref(*t));
-                if elref {
+                // element refness flag: historical no-op under the tag bit
+                if ets.iter().any(|t| self.is_ref(*t)) {
                     let k2 = fw.v();
-                    fw.op(&format!("    {} = arith.constant 1 : i64", k2));
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        k2,
+                        enc_i_lit(1)
+                    ));
                     fw.op(&format!(
                         "    {} = call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
                         arr, n, k2
@@ -1029,23 +1077,20 @@ impl ModEmitter {
                 self.dangling_producer(fw, &arr, at2);
                 for (i, v) in evs.iter().enumerate() {
                     let zi = fw.v();
-                    fw.op(&format!("    {} = arith.constant {} : i64", zi, i));
-                    if anyf {
-                        fw.op(&format!(
-                            "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
-                            arr, zi, v
-                        ));
-                    } else {
-                        // rc patch B: array owns ref-typed elements
-                        let mut vv = v.clone();
-                        if !anyf && self.is_ref(ets[i]) {
-                            vv = self.emit_retain(fw, v);
-                        }
-                        fw.op(&format!(
-                            "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                            arr, zi, vv
-                        ));
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        zi,
+                        enc_i_lit(i as i64)
+                    ));
+                    // rc patch B: array owns ref-typed elements
+                    let mut vv = v.clone();
+                    if !anyf && self.is_ref(ets[i]) {
+                        vv = self.emit_retain(fw, v);
                     }
+                    fw.op(&format!(
+                        "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                        arr, zi, vv
+                    ));
                 }
                 let ty = if !ets.is_empty() && {
                     let first = *ets.first().unwrap();
@@ -1120,9 +1165,7 @@ impl ModEmitter {
                 if anyf {
                     for x in vevs.iter_mut() {
                         if !self.is_float(x.1) {
-                            let cv = fw.v();
-                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, x.0));
-                            x.0 = cv;
+                            x.0 = iw_to_f64_word(fw, &x.0);
                             x.1 = self.r.mk(Ty::F64);
                         }
                     }
@@ -1164,15 +1207,13 @@ impl ModEmitter {
                 } else {
                     0i64
                 };
-                // value refness rides the high bit (patch C): death cascade
-                // releases ref-typed values on map death
-                let kkv = if !anyf && self.is_ref(vty) {
-                    kk | (1 << 8)
-                } else {
-                    kk
-                };
+                // the vref bit is retired: death cascades are tag-driven
                 let kv0 = fw.v();
-                fw.op(&format!("    {} = arith.constant {} : i64", kv0, kkv));
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    kv0,
+                    enc_i_lit(kk)
+                ));
                 let m = fw.v();
                 fw.op(&format!(
                     "    {} = call @sloth_map_new({}) : (i64) -> i64",
@@ -1208,11 +1249,10 @@ impl ModEmitter {
                             }
                         }
                     }
-                    let (setsym, vsig) = match (anyk_str, anyf) {
-                        (true, true) => ("sloth_map_str_set_f64", "f64"),
-                        (true, false) => ("sloth_map_str_set", "i64"),
-                        (false, true) => ("sloth_map_set_f64", "f64"),
-                        (false, false) => ("sloth_map_set", "i64"),
+                    let setsym = if anyk_str {
+                        "sloth_map_str_set"
+                    } else {
+                        "sloth_map_set"
                     };
                     // rc patch B: map slots own ref-typed keys/values
                     let kref = matches!(self.r.get(kev.1), Ty::Str | Ty::Named(_, _));
@@ -1225,20 +1265,15 @@ impl ModEmitter {
                     }
                     match use_h {
                         Some(h) => {
-                            let (setsym, vsig) = if anyf {
-                                ("sloth_map_set_h_f64", "f64")
-                            } else {
-                                ("sloth_map_set_h", "i64")
-                            };
                             fw.op(&format!(
-                                "    call @{}({}, {}, {}, {}) : (i64, i64, i64, {}) -> i64",
-                                setsym, m, kev.0, h, vev.0, vsig
+                                "    call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                                "sloth_map_set_h", m, kev.0, h, vev.0
                             ));
                         }
                         None => {
                             fw.op(&format!(
-                                "    call @{}({}, {}, {}) : (i64, i64, {}) -> i64",
-                                setsym, m, kev.0, vev.0, vsig
+                                "    call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                                setsym, m, kev.0, vev.0
                             ));
                         }
                     }
@@ -1253,12 +1288,9 @@ impl ModEmitter {
                 let early: std::cell::RefCell<Option<(String, TyId)>> =
                     std::cell::RefCell::new(None);
                 let (el, getsym, retty) = match &ats {
-                    Ty::Array(e) => {
-                        if self.is_float(*e) {
-                            (*e, "sloth_arr_get_f64", "f64")
-                        } else {
-                            (*e, "sloth_arr_get", "i64")
-                        }
+                    Ty::Array(_e) => {
+                        // tag migration: f64 element words ride the word route
+                        (*_e, "sloth_arr_get", "i64")
                     }
                     Ty::Map(k, v) => {
                         let kkind = matches!(self.r.get(*k), Ty::Str);
@@ -1275,11 +1307,7 @@ impl ModEmitter {
                                             fw, &defcls, &hmname, &hfd, false, &oargv, &osig,
                                             &e.pos,
                                         );
-                                        let (sym, retty) = if self.is_float(*v) {
-                                            ("sloth_map_get_h_f64", "f64")
-                                        } else {
-                                            ("sloth_map_get_h", "i64")
-                                        };
+                                        let (sym, retty) = ("sloth_map_get_h", "i64");
                                         let r = fw.v();
                                         fw.op(&format!(
                                             "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
@@ -1296,31 +1324,28 @@ impl ModEmitter {
                                                 kcls
                                             ),
                                         );
-                                        let (sym, retty) = match (kkind, self.is_float(*v)) {
-                                            (true, true) => ("sloth_map_str_get_f64", "f64"),
-                                            (true, false) => ("sloth_map_str_get", "i64"),
-                                            (false, true) => ("sloth_map_get_f64", "f64"),
-                                            (false, false) => ("sloth_map_get", "i64"),
+                                        let (sym, retty) = if kkind {
+                                            ("sloth_map_str_get", "i64")
+                                        } else {
+                                            ("sloth_map_get", "i64")
                                         };
                                         (*v, sym, retty)
                                     }
                                 }
                             } else {
                                 // generic type-param key surface: word route
-                                let (sym, retty) = match (kkind, self.is_float(*v)) {
-                                    (true, true) => ("sloth_map_str_get_f64", "f64"),
-                                    (true, false) => ("sloth_map_str_get", "i64"),
-                                    (false, true) => ("sloth_map_get_f64", "f64"),
-                                    (false, false) => ("sloth_map_get", "i64"),
+                                let (sym, retty) = if kkind {
+                                    ("sloth_map_str_get", "i64")
+                                } else {
+                                    ("sloth_map_get", "i64")
                                 };
                                 (*v, sym, retty)
                             }
                         } else {
-                            let (sym, retty) = match (kkind, self.is_float(*v)) {
-                                (true, true) => ("sloth_map_str_get_f64", "f64"),
-                                (true, false) => ("sloth_map_str_get", "i64"),
-                                (false, true) => ("sloth_map_get_f64", "f64"),
-                                (false, false) => ("sloth_map_get", "i64"),
+                            let (sym, retty) = if kkind {
+                                ("sloth_map_str_get", "i64")
+                            } else {
+                                ("sloth_map_get", "i64")
                             };
                             (*v, sym, retty)
                         }
@@ -1554,7 +1579,7 @@ impl ModEmitter {
                 _ => None,
             };
             if let Some(elid) = el_tp {
-                drop(el_tp);
+                let _ = el_tp;
                 let el = elid;
                 let fel = self.is_float(elid);
                 let _ = el;
@@ -1568,28 +1593,20 @@ impl ModEmitter {
                             }
                         };
                         if fel && !self.is_float(at) {
-                            let cv = fw.v();
-                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-                            v = cv;
+                            // int word -> f64 word
+                            v = iw_to_f64_word(fw, &v);
                         }
                         let callv = fw.v();
-                        if fel {
-                            fw.op(&format!(
-                                "    {} = call @sloth_arr_push_f64({}, {}) : (i64, f64) -> i64",
-                                callv, recvv, v
-                            ));
-                        } else {
-                            // rc patch C: the array slot owns ref-typed
-                            // elements (push of a scalar/nil word no-ops)
-                            if self.is_ref(elid) {
-                                let rv2 = self.emit_retain(fw, &v);
-                                v = rv2;
-                            }
-                            fw.op(&format!(
-                                "    {} = call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
-                                callv, recvv, v
-                            ));
+                        // rc patch C: the array slot owns ref-typed
+                        // elements (push of a scalar/nil word no-ops)
+                        if self.is_ref(elid) {
+                            let rv2 = self.emit_retain(fw, &v);
+                            v = rv2;
                         }
+                        fw.op(&format!(
+                            "    {} = call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
+                            callv, recvv, v
+                        ));
                         // GC growth may relocate the array buffer: the runtime
                         // returns the new handle — write it back to the
                         // receiver's storage (local slot or object field)
@@ -1600,23 +1617,16 @@ impl ModEmitter {
                     }
                     "pop" => {
                         let r = fw.v();
-                        if fel {
-                            fw.op(&format!(
-                                "    {} = call @sloth_arr_pop_f64({}) : (i64) -> f64",
-                                r, recvv
-                            ));
-                        } else {
-                            // rc patch C: pop of a ref element hands its
-                            // count to the caller — the value is producer-
-                            // owned (dies at statement close unless stored)
-                            if !fel && self.is_ref(elid) {
-                                self.dangling_producer(fw, &r, elid);
-                            }
-                            fw.op(&format!(
-                                "    {} = call @sloth_arr_pop({}) : (i64) -> i64",
-                                r, recvv
-                            ));
+                        // rc patch C: pop of a ref element hands its
+                        // count to the caller — the value is producer-
+                        // owned (dies at statement close unless stored)
+                        if self.is_ref(elid) {
+                            self.dangling_producer(fw, &r, elid);
                         }
+                        fw.op(&format!(
+                            "    {} = call @sloth_arr_pop({}) : (i64) -> i64",
+                            r, recvv
+                        ));
                         return (r, elid);
                     }
                     "len" => {
@@ -1714,6 +1724,55 @@ impl ModEmitter {
             } else {
                 plan.mangled.clone()
             };
+            // raw C-ABI boundary (extern func): scalar word args decode to
+            // their C spelling and scalar returns re-encode into words;
+            // opaque extern-type/pointer words pass through untouched
+            if fd.is_extern {
+                let mut vals: Vec<String> = Vec::new();
+                let mut tys: Vec<String> = Vec::new();
+                for (i, (v, t)) in argv.iter().enumerate() {
+                    let pt = plan.params.get(i).map(|p| p.1).unwrap_or(*t);
+                    let pts = self.r.get(pt).clone();
+                    if self.is_float(pt) {
+                        vals.push(emit_dec_f(fw, v));
+                        tys.push("f64".to_string());
+                    } else if matches!(pts, Ty::I64 | Ty::Bool) {
+                        vals.push(emit_dec_int(fw, v));
+                        tys.push("i64".to_string());
+                    } else {
+                        vals.push(v.clone());
+                        tys.push("i64".to_string());
+                    }
+                }
+                let sig = tys.join(", ");
+                if self.is_unit(plan.ret) {
+                    fw.op(&format!(
+                        "    call @{}({}) : ({}) -> ()",
+                        sym,
+                        vals.join(", "),
+                        sig
+                    ));
+                    return (String::new(), plan.ret);
+                }
+                let retf = self.is_float(plan.ret);
+                let ret_int = matches!(self.r.get(plan.ret).clone(), Ty::I64 | Ty::Bool);
+                let rr = fw.v();
+                fw.op(&format!(
+                    "    {} = call @{}({}) : ({}) -> {}",
+                    rr,
+                    sym,
+                    vals.join(", "),
+                    sig,
+                    if retf { "f64" } else { "i64" }
+                ));
+                if retf {
+                    return (emit_enc_f(fw, &rr), plan.ret);
+                }
+                if ret_int {
+                    return (emit_enc_int(fw, &rr), plan.ret);
+                }
+                return (rr, plan.ret);
+            }
             let (vals, tys) = match &variadic {
                 Some(vd) => {
                     // extra args pack into one Array<T> word; the declared elem
@@ -1729,9 +1788,8 @@ impl ModEmitter {
                     let mut pv: Vec<String> = Vec::new();
                     for (v, t) in &argv[fixed.min(argv.len())..] {
                         if fels && !self.is_float(*t) {
-                            let cv = fw.v();
-                            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
-                            pv.push(cv);
+                            // int word -> f64 word
+                            pv.push(iw_to_f64_word(fw, v));
                         } else if !fels && self.is_float(*t) {
                             self.err(
                                 pos,
@@ -1912,16 +1970,23 @@ impl ModEmitter {
                             ));
                             return (rv, self.r.mk(Ty::Unit));
                         }
+                        // tag migration: the f64 printer keeps its raw C-ABI
+                        // f64 face — decode the word at the call boundary
+                        if self.is_float(t) {
+                            let fv = emit_dec_f(fw, &v);
+                            fw.op(&format!(
+                                "    {} = call @sloth_rt_print_f64({}) : (f64) -> i64",
+                                r, fv
+                            ));
+                            return (r, self.r.mk(Ty::Unit));
+                        }
                         let sym = match self.r.get(t) {
                             Ty::Str => "sloth_rt_print_str",
-                            Ty::F64 => "sloth_rt_print_f64",
                             Ty::Bool => "sloth_rt_print_bool",
                             _ => "sloth_rt_print_i64",
                         };
-                        fw.op(&format!(
-                            "    {} = call @{}({}) : ({}) -> i64",
-                            r, sym, v, mty
-                        ));
+                        let _ = mty;
+                        fw.op(&format!("    {} = call @{}({}) : (i64) -> i64", r, sym, v));
                         (r, self.r.mk(Ty::Unit))
                     }
                 }
@@ -1933,8 +1998,8 @@ impl ModEmitter {
                 let ts = self.r.get(t).clone();
                 match ts {
                     Ty::F64 => {
-                        fw.op(&format!("    {} = arith.fptosi {} : f64 to i64", r, v));
-                        (r, self.r.mk(Ty::I64))
+                        let rd = f64w_to_iw(fw, &v);
+                        (rd, self.r.mk(Ty::I64))
                     }
                     Ty::Str => {
                         self.err(pos, "int() of str unsupported (MVP)".to_string());
@@ -1955,8 +2020,8 @@ impl ModEmitter {
                         (v, self.r.mk(Ty::F64))
                     }
                     _ => {
-                        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", r, v));
-                        (r, self.r.mk(Ty::F64))
+                        // int word -> f64 word
+                        (iw_to_f64_word(fw, &v), self.r.mk(Ty::F64))
                     }
                 }
             }
@@ -2177,12 +2242,16 @@ impl ModEmitter {
     pub(crate) fn pack_variadic(
         &mut self,
         fw: &mut FnWalk,
-        fels: bool,
+        _fels: bool,
         elem: TyId,
         vals: &[String],
     ) -> String {
         let n = fw.v();
-        fw.op(&format!("    {} = arith.constant {} : i64", n, vals.len()));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            n,
+            enc_i_lit(vals.len() as i64)
+        ));
         let arr = fw.v();
         fw.op(&format!(
             "    {} = call @sloth_arr_new({}) : (i64) -> i64",
@@ -2190,23 +2259,20 @@ impl ModEmitter {
         ));
         for (i, v) in vals.iter().enumerate() {
             let zi = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", zi, i));
-            if fels {
-                fw.op(&format!(
-                    "    call @sloth_arr_set_f64({}, {}, {}) : (i64, i64, f64) -> i64",
-                    arr, zi, v
-                ));
-            } else {
-                // rc patch B: the pack owns ref-typed elements
-                let mut vv = v.clone();
-                if self.is_ref(elem) {
-                    vv = self.emit_retain(fw, v);
-                }
-                fw.op(&format!(
-                    "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                    arr, zi, vv
-                ));
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                zi,
+                enc_i_lit(i as i64)
+            ));
+            // rc patch B: the pack owns ref-typed elements
+            let mut vv = v.clone();
+            if self.is_ref(elem) {
+                vv = self.emit_retain(fw, v);
             }
+            fw.op(&format!(
+                "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                arr, zi, vv
+            ));
         }
         arr
     }

@@ -56,7 +56,11 @@ impl ModEmitter {
             ));
         }
         let nf = fw.v();
-        fw.op(&format!("    {} = arith.constant {} : i64", nf, ncap));
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            nf,
+            enc_i_lit(ncap as i64)
+        ));
         let frame = fw.v();
         fw.op(&format!(
             "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
@@ -89,7 +93,11 @@ impl ModEmitter {
                 }
             };
             let zi = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", zi, j));
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                zi,
+                enc_i_lit(j as i64)
+            ));
             // rc patch B: the frame owns ref-typed captures
             if self.is_ref(ct) {
                 let rcv = self.emit_retain(fw, &cv);
