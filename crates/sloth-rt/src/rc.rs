@@ -54,14 +54,28 @@ static DROPS: AtomicU64 = AtomicU64::new(0);
 /// register a fresh user-owned handle produced by a runtime constructor
 pub(crate) fn track_user(h: usize) {
     let mut t = table().lock().unwrap();
-    t.0.insert(h, Entry { cnt: 1, kind: Kind::User, weaks: Vec::new() });
+    t.0.insert(
+        h,
+        Entry {
+            cnt: 1,
+            kind: Kind::User,
+            weaks: Vec::new(),
+        },
+    );
 }
 
 /// register an internal buffer owned by `parent`; it detaches (no cascade,
 /// the parent owns it) when the parent entry dies
 pub(crate) fn track_owned(h: usize, parent: usize) {
     let mut t = table().lock().unwrap();
-    t.0.insert(h, Entry { cnt: 1, kind: Kind::Owned(parent), weaks: Vec::new() });
+    t.0.insert(
+        h,
+        Entry {
+            cnt: 1,
+            kind: Kind::Owned(parent),
+            weaks: Vec::new(),
+        },
+    );
 }
 
 /// re-register a handle that was re-created in place (minimum viable: used by
@@ -69,7 +83,14 @@ pub(crate) fn track_owned(h: usize, parent: usize) {
 #[allow(dead_code)]
 pub(crate) fn reset(h: usize) {
     let mut t = table().lock().unwrap();
-    t.0.insert(h, Entry { cnt: 1, kind: Kind::User, weaks: Vec::new() });
+    t.0.insert(
+        h,
+        Entry {
+            cnt: 1,
+            kind: Kind::User,
+            weaks: Vec::new(),
+        },
+    );
 }
 
 /// move count ownership from `old` to `new` (realloc path: the chunk was
@@ -85,7 +106,11 @@ pub(crate) fn transfer(old: usize, new: usize) {
             t.0.entry(new).or_insert(e);
         }
         None => {
-            t.0.entry(new).or_insert(Entry { cnt: 1, kind: Kind::User, weaks: Vec::new() });
+            t.0.entry(new).or_insert(Entry {
+                cnt: 1,
+                kind: Kind::User,
+                weaks: Vec::new(),
+            });
         }
     }
 }
@@ -125,11 +150,13 @@ pub extern "C" fn sloth_rc_release(h: i64) -> i64 {
     for wb in weaks {
         unsafe { (**&wb).target = 0 };
     }
-    let kids: Vec<usize> = t.0
-        .iter()
-        .filter(|(k2, e2)| matches!(e2.kind, Kind::Owned(p) if p == h as usize) && *k2 != &(h as usize))
-        .map(|(k2, _)| *k2)
-        .collect();
+    let kids: Vec<usize> =
+        t.0.iter()
+            .filter(|(k2, e2)| {
+                matches!(e2.kind, Kind::Owned(p) if p == h as usize) && *k2 != &(h as usize)
+            })
+            .map(|(k2, _)| *k2)
+            .collect();
     for kid in kids {
         t.0.remove(&kid);
     }

@@ -19,7 +19,10 @@ fn main() {
         }
         sloth_rt::gc::sloth_gc_collect();
         let churned = sloth_rt::gc::sloth_gc_collections();
-        assert!(churned > after, "churn triggered collections: {after} -> {churned}");
+        assert!(
+            churned > after,
+            "churn triggered collections: {after} -> {churned}"
+        );
 
         // live data survived
         assert_eq!(sloth_rt::arrays::sloth_arr_get(keep, 0), 4242);
@@ -58,12 +61,7 @@ fn main() {
         }
         assert_eq!(sloth_rt::maps::sloth_map_len(m), 20, "len after 20 sets");
         for i in 0..20 {
-            assert_eq!(
-                sloth_rt::maps::sloth_map_get(m, i),
-                i * 2,
-                "key {}",
-                i
-            );
+            assert_eq!(sloth_rt::maps::sloth_map_get(m, i), i * 2, "key {}", i);
         }
         let ks = sloth_rt::maps::sloth_map_keys(m);
         assert_eq!(sloth_rt::arrays::sloth_arr_len(ks), 20, "keys array len");
@@ -114,12 +112,7 @@ fn main() {
         sloth_rt::gc::sloth_gc_collect();
         assert_eq!(sloth_rt::maps::sloth_map_len(m4), 64);
         for i in 0..64 {
-            assert_eq!(
-                sloth_rt::maps::sloth_map_get(m4, i),
-                i * 3,
-                "key {}",
-                i
-            );
+            assert_eq!(sloth_rt::maps::sloth_map_get(m4, i), i * 3, "key {}", i);
         }
 
         // ---- reference counts + weak boxes (patch A) ----
@@ -147,7 +140,11 @@ fn main() {
         // unknown words are inert no-ops
         sloth_rt::rc::sloth_rc_retain(1);
         sloth_rt::rc::sloth_rc_release(1);
-        assert_eq!(sloth_rt::rc::sloth_rc_live(), before, "untracked words inert");
+        assert_eq!(
+            sloth_rt::rc::sloth_rc_live(),
+            before,
+            "untracked words inert"
+        );
 
         println!("rt smoke OK");
     }

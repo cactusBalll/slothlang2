@@ -18,6 +18,13 @@ pub(crate) struct FnWalk {
     pub(crate) scopes: Vec<HashMap<String, (String, TyId)>>,
     /// per-scope bindovable map: value true = immutable (let)
     pub(crate) imms: Vec<HashMap<String, bool>>,
+    /// rc patch B: per-scope slots DECLARED here whose word is ref-shaped
+    /// (pre-resolved at declare time): name -> alloca; released at pop_scope
+    pub(crate) scope_decls: Vec<HashMap<String, String>>,
+    /// rc patch B: statement-dangling producer temps (fresh handles still
+    /// owned by the producer) — ref-typed only; released at statement end or
+    /// flushed before a conditional terminator
+    pub(crate) dangling: Vec<String>,
     /// loop label stack for break/continue: (break_target, continue_target)
     pub(crate) loops: Vec<(String, String)>,
     pub(crate) ret: TyId,
@@ -57,12 +64,26 @@ impl FnWalk {
         }
         self.term = true;
     }
-    /// conditional jump
+    /// conditional jump; pending statement-dangling temps are flushed HERE
+    /// (into the current block only: releasing a producer def that only
+    /// exists on one side from the merge point would be invalid SSA)
     pub(crate) fn cjump(&mut self, c: &str, t: &str, f: &str) {
         let c1 = self.v();
+        let pending = std::mem::take(&mut self.dangling);
+        for h in pending {
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+        }
         self.op(&format!("    {} = arith.trunci {} : i64 to i1", c1, c));
         self.op(&format!("    cf.cond_br {}, {}, {}", c1, t, f));
         self.term = true;
+    }
+    /// statement-close for dangling producer temps (patch B): release the
+    /// producer's +1 for temps that were not stored anywhere
+    pub(crate) fn rc_flush(&mut self) {
+        let pending = std::mem::take(&mut self.dangling);
+        for h in pending {
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+        }
     }
     /// start a new labelled block
     pub(crate) fn label(&mut self, name: &str) {
@@ -85,8 +106,29 @@ impl FnWalk {
     pub(crate) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.imms.push(HashMap::new());
+        self.scope_decls.push(HashMap::new());
     }
+    /// scope teardown: release every ref-typed slot declared in this scope
+    /// (pre-resolved into scope_decls at declare time), then pop. Params and
+    /// synthetic shadow inserts never enter scope_decls => skipped correctly.
     pub(crate) fn pop_scope(&mut self) {
+        if let Some(d) = self.scope_decls.pop() {
+            // a terminated block means control already left this scope
+            // (return/break): releases would land after the terminator and
+            // break MLIR; ownership falls to the enclosing exit path then
+            if self.noterm() {
+                for (_n, a) in d {
+                    let z = self.v();
+                    self.op(&format!("    {} = arith.constant 0 : index", z));
+                    let w = self.v();
+                    self.op(&format!(
+                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                        w, a, z
+                    ));
+                    self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+                }
+            }
+        }
         self.scopes.pop();
         self.imms.pop();
     }
@@ -230,6 +272,8 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         vcount: 1000,
         scopes: vec![HashMap::new()],
         imms: vec![HashMap::new()],
+        scope_decls: vec![HashMap::new()],
+        dangling: Vec::new(),
         loops: Vec::new(),
         ret: me.r.mk(Ty::Unit),
         ret_alloca: String::new(),

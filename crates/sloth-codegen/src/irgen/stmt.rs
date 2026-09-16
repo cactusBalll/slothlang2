@@ -33,6 +33,8 @@ impl ModEmitter {
         match &s.node {
             StmtNode::Expr(e) => {
                 let _ = self.emit_expr(fw, e);
+                // rc patch B: producer temps unused here die now
+                fw.rc_flush();
             }
             StmtNode::Let {
                 mutable,
@@ -157,8 +159,20 @@ impl ModEmitter {
                     None => (v, t),
                 };
                 let fl = self.is_float(t);
-                fw.declare(name, t, fl, *mutable);
-                fw.assign(name, &v, fl);
+                // rc patch B: declare + retain (slot ownership; nil/unknown
+                // words are rt no-ops), then flush the temp's producer +
+                let a = fw.declare(name, t, fl, *mutable);
+                if self.is_ref(t) && !fl {
+                    let rv = self.emit_retain(fw, &v);
+                    fw.assign(name, &rv, fl);
+                    fw.scope_decls
+                        .last_mut()
+                        .unwrap()
+                        .insert(name.to_string(), a);
+                } else {
+                    fw.assign(name, &v, fl);
+                }
+                fw.rc_flush();
             }
             StmtNode::Assign { target, value } => {
                 // assign-face Result ctor fast-path (patch #37): `x = ok(v)`
@@ -242,10 +256,14 @@ impl ModEmitter {
                                 );
                                 let zi = fw.v();
                                 fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                                fw.op(&format!(
-                                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-                                    rv, zi, v
-                                ));
+                                let fty = self
+                                    .classes
+                                    .get(&cur)
+                                    .and_then(|ci| ci.fields.iter().find(|fd| fd.0 == *f))
+                                    .map(|fd| fd.1)
+                                    .unwrap_or_else(|| self.r.mk(Ty::I64));
+                                self.op_set_field(fw, &rv, &zi, &v, fty, s.pos.clone());
+                                fw.rc_flush();
                                 return;
                             }
                             None => {
@@ -298,6 +316,7 @@ impl ModEmitter {
                                     );
                                 }
                                 self.op_set_field(fw, &recv, &zi, &vc, fty, s.pos.clone());
+                                fw.rc_flush();
                                 return;
                             }
                         }
@@ -354,6 +373,19 @@ impl ModEmitter {
                                                     av, iv, v
                                                 ));
                                             } else {
+                                                // rc patch B: release the old elem
+                                                // (scalar/nil words no-op in rt),
+                                                // retain the new one if ref-typed
+                                                if self.is_ref(el) {
+                                                    let old = fw.v();
+                                                    fw.op(&format!(
+                                                        "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                                                        old, av, iv
+                                                    ));
+                                                    self.emit_release(fw, &old);
+                                                    let rv2 = self.emit_retain(fw, &v);
+                                                    v = rv2;
+                                                }
                                                 fw.op(&format!(
                                                     "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
                                                     av, iv, v
@@ -401,6 +433,21 @@ impl ModEmitter {
                                                     cv, v
                                                 ));
                                                 v = cv;
+                                            }
+                                            // rc patch B: the map slot owns its
+                                            // key (str/object) and value copy;
+                                            // scalar/nil words no-op in rt.
+                                            // Overwrite-time release of evicted
+                                            // old pairs lands in patch C.
+                                            let kty = self.r.get(k).clone();
+                                            let kref = matches!(kty, Ty::Str | Ty::Named(_, _));
+                                            if kref {
+                                                self.emit_retain(fw, &iv);
+                                            }
+                                            let vref = !vf && self.is_ref(v2);
+                                            if vref {
+                                                let rv2 = self.emit_retain(fw, &v);
+                                                v = rv2;
                                             }
                                             match use_h {
                                                 Some(hv) => {
@@ -498,9 +545,13 @@ impl ModEmitter {
                         self.err(&s.pos, "unsupported assignment target".to_string());
                     }
                 }
+                // rc patch B: producer temps of this statement settle here
+                fw.rc_flush();
             }
             StmtNode::Return(None) => {
                 self.emit_ret_flag_store(fw);
+                // rc patch B: unsettled producer temps die before the jump
+                fw.rc_flush();
                 self.jump_to_ret(fw);
             }
             StmtNode::Return(Some(e)) => {
@@ -634,6 +685,9 @@ impl ModEmitter {
             "    memref.store {}, {}[{}] : memref<1xi64>",
             st, fw.ret_flag, zi
         ));
+        // rc patch B: release unused producers BEFORE the return jump (a
+        // flushed word after the terminator would break the block shape)
+        fw.rc_flush();
         self.jump_to_ret(fw);
     }
 }

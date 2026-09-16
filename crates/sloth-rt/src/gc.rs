@@ -23,7 +23,7 @@ extern "C" {
 #[repr(C)]
 struct GcStackBase {
     mem_base: *mut libc::c_char,
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     reg_base: *mut libc::c_void,
 }
 
@@ -54,7 +54,9 @@ fn init() {
                 return;
             }
             unsafe {
-                let mut base = GcStackBase { mem_base: std::ptr::null_mut() };
+                let mut base = GcStackBase {
+                    mem_base: std::ptr::null_mut(),
+                };
                 if GC_get_stack_base(&mut base) == 0 {
                     GC_register_my_thread(&base);
                 }
@@ -74,10 +76,7 @@ pub extern "C" fn sloth_gc_alloc(n: libc::size_t) -> *mut libc::c_void {
 /// GC-tracked growth (replaces libc::realloc callers); contents preserved,
 /// the returned pointer supersedes the old one immediately (realloc moves).
 #[no_mangle]
-pub extern "C" fn sloth_gc_realloc(
-    p: *mut libc::c_void,
-    n: libc::size_t,
-) -> *mut libc::c_void {
+pub extern "C" fn sloth_gc_realloc(p: *mut libc::c_void, n: libc::size_t) -> *mut libc::c_void {
     init();
     unsafe { GC_realloc(p, n) }
 }

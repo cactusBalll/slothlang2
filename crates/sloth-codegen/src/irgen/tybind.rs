@@ -192,6 +192,73 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    // ---------------- rc machinery (ARC migration, patch B) ----------------
+
+    /// emit `sloth_rc_release(h)` (nil and untracked words are rt no-ops)
+    pub(crate) fn emit_release(&mut self, fw: &mut FnWalk, h: &str) {
+        fw.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+    }
+
+    /// emit `sloth_rc_retain(h)` (value-preserving)
+    pub(crate) fn emit_retain(&mut self, fw: &mut FnWalk, h: &str) -> String {
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_rc_retain({}) : (i64) -> i64",
+            r, h
+        ));
+        r
+    }
+
+    /// load the current word stored in a slot alloca (i64 route; ref words
+    /// never live in float slots)
+    pub(crate) fn load_slot(&mut self, fw: &mut FnWalk, a: &str) -> String {
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        let w = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            w, a, z
+        ));
+        w
+    }
+
+    /// assignment to a declared name: release the overload word first, then
+    /// store (unconditional — rt no-ops for non-ref/nil words)
+    pub(crate) fn rc_assign_slot(&mut self, fw: &mut FnWalk, a: &str) {
+        let old = self.load_slot(fw, a);
+        self.emit_release(fw, &old);
+    }
+
+    /// declare bookkeeping (call at fw.declare sites): a ref-typed local's
+    /// alloca joins this scope's release set
+    pub(crate) fn declare_rc(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        t: TyId,
+        fl: bool,
+        mutable: bool,
+    ) -> String {
+        let a = fw.declare(name, t, fl, mutable);
+        if self.is_ref(t) {
+            fw.scope_decls
+                .last_mut()
+                .unwrap()
+                .insert(name.to_string(), a.clone());
+        }
+        a
+    }
+
+    /// count a freshly created handle as a statement-dangling temp: the
+    /// producer owns it; released once after the enclosing statement ends
+    pub(crate) fn dangling_producer(&mut self, fw: &mut FnWalk, h: &str, t: TyId) {
+        if self.is_ref(t) {
+            fw.dangling.push(h.to_string());
+        }
+    }
+}
+
+impl ModEmitter {
     /// structural surface compatibility (patch #22): equal-by-interning,
     /// nil (word 0) into anything, Opt target lenient (word view), dyn
     /// target accepts concrete class instances, element-wise arrays/maps.
@@ -292,13 +359,23 @@ impl ModEmitter {
         }
         let dts = self.r.get(dt).clone();
         let vts = self.r.get(vty).clone();
-        if self.surface_compat(&dts, &vts) {
-            fw.assign(name, v, false);
-        } else {
+        if !self.surface_compat(&dts, &vts) {
             let dtn = self.surface_name(&dts);
             let vtn = self.surface_name(&vts);
             self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
-            fw.assign(name, v, false);
+        }
+        // rc patch B: release the overwritten word, retain the new owner's
+        // copy (nil/untracked = rt no-ops)
+        match fw.lookup(name) {
+            Some((a, _)) => {
+                let old = self.load_slot(fw, &a);
+                self.emit_release(fw, &old);
+                let rv = self.emit_retain(fw, v);
+                fw.assign(name, &rv, false);
+            }
+            None => {
+                fw.assign(name, v, false);
+            }
         }
     }
 }

@@ -39,9 +39,19 @@ impl ModEmitter {
             "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             frame, ci, nf
         ));
+        // rc patch B: fresh frame = producer temp (released at stmt close
+        // unless stored)
+        {
+            let ftv = self.r.mk(Ty::Fn(FnTy {
+                params: Vec::new(),
+                ret,
+                lam: None,
+            }));
+            self.dangling_producer(fw, &frame, ftv);
+        }
         // snapshot each captured variable into the frame words
         for (j, cn) in caps.iter().enumerate() {
-            let (cv, _ct) = match fw.lookup(cn) {
+            let (cv, ct) = match fw.lookup(cn) {
                 Some((a, t)) => {
                     let zz = fw.v();
                     let mty = memref_cell_ty(self, t);
@@ -57,10 +67,19 @@ impl ModEmitter {
             };
             let zi = fw.v();
             fw.op(&format!("    {} = arith.constant {} : i64", zi, j));
-            fw.op(&format!(
-                "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-                frame, zi, cv
-            ));
+            // rc patch B: the frame owns ref-typed captures
+            if self.is_ref(ct) {
+                let rcv = self.emit_retain(fw, &cv);
+                fw.op(&format!(
+                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    frame, zi, rcv
+                ));
+            } else {
+                fw.op(&format!(
+                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    frame, zi, cv
+                ));
+            }
         }
         // construct the closured function body
         let mut params: Vec<Param> = caps

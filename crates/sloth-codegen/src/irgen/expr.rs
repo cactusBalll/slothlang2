@@ -39,8 +39,13 @@ impl ModEmitter {
             ExprNode::Ident(n) => match fw.lookup(n) {
                 Some((slot, ty)) => match self.r.get(ty) {
                     Ty::Array(_) => {
+                        // rc patch B: slot ownership moves to the relocated
+                        // handle — release the old slot word (scalar/nil
+                        // no-ops in rt) and store the fresh handle as-is
+                        let old = self.load_slot(fw, &slot);
+                        self.emit_release(fw, &old);
                         let z = fw.v();
-                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        fw.op(&format!("    {} = arith.constant 0 : index", z));
                         fw.op(&format!(
                             "    memref.store {}, {}[{}] : memref<1xi64>",
                             handle, slot, z
@@ -59,6 +64,15 @@ impl ModEmitter {
                         let idx = self.field_index(c, name) as i64;
                         let zi = fw.v();
                         fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
+                        // rc patch B: release the old field handle (the
+                        // relocated push handle supersedes it: same scalar
+                        // no-op story for non-ref words), then store raw
+                        let old = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                            old, rv, zi
+                        ));
+                        self.emit_release(fw, &old);
                         fw.op(&format!(
                             "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                             rv, zi, handle
@@ -70,7 +84,10 @@ impl ModEmitter {
                     ),
                 }
             }
-            _ => self.err(pos, "push receiver must be a local or object field".to_string()),
+            _ => self.err(
+                pos,
+                "push receiver must be a local or object field".to_string(),
+            ),
         }
     }
 }
@@ -229,6 +246,8 @@ impl ModEmitter {
                         fin, curw
                     ));
                     let t = self.r.mk(Ty::Str);
+                    // rc patch B: pooled str producer
+                    self.dangling_producer(fw, &fin, t);
                     return (fin, t);
                 }
                 // packed 8-byte words across the runtime; buffer token chains
@@ -266,6 +285,8 @@ impl ModEmitter {
                     fin, curw
                 ));
                 let t = self.r.mk(Ty::Str);
+                // rc patch B: pooled str producer
+                self.dangling_producer(fw, &fin, t);
                 (fin, t)
             }
             ExprNode::Lambda(l) => {
@@ -505,7 +526,10 @@ impl ModEmitter {
                         "    {} = call @sloth_str_concat({}, {}) : (i64, i64) -> i64",
                         r, a, b
                     ));
-                    return (r, self.r.mk(Ty::Str));
+                    let st = self.r.mk(Ty::Str);
+                    // rc patch B: pooled str producer
+                    self.dangling_producer(fw, &r, st);
+                    return (r, st);
                 }
                 let fl = self.is_float(at) || self.is_float(bt);
                 if fl {
@@ -892,6 +916,9 @@ impl ModEmitter {
                     "    {} = call @sloth_arr_new({}) : (i64) -> i64",
                     arr, n
                 ));
+                let ael = self.r.mk(Ty::Unit);
+                let at2 = self.r.mk(Ty::Array(ael));
+                self.dangling_producer(fw, &arr, at2);
                 for (i, v) in evs.iter().enumerate() {
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, i));
@@ -901,9 +928,14 @@ impl ModEmitter {
                             arr, zi, v
                         ));
                     } else {
+                        // rc patch B: array owns ref-typed elements
+                        let mut vv = v.clone();
+                        if !anyf && self.is_ref(ets[i]) {
+                            vv = self.emit_retain(fw, v);
+                        }
                         fw.op(&format!(
                             "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                            arr, zi, v
+                            arr, zi, vv
                         ));
                     }
                 }
@@ -1011,6 +1043,8 @@ impl ModEmitter {
                     "    {} = call @sloth_map_new({}) : (i64) -> i64",
                     m, kv0
                 ));
+                let mt2 = self.r.mk(Ty::Map(kty, vty));
+                self.dangling_producer(fw, &m, mt2);
                 for (kev, vev) in kevs.iter().zip(vevs.iter()) {
                     // object keys route the monomorphized hash() into the map
                     // (patch #35); pointer identity remains without one
@@ -1045,6 +1079,15 @@ impl ModEmitter {
                         (false, true) => ("sloth_map_set_f64", "f64"),
                         (false, false) => ("sloth_map_set", "i64"),
                     };
+                    // rc patch B: map slots own ref-typed keys/values
+                    let kref = matches!(self.r.get(kev.1), Ty::Str | Ty::Named(_, _));
+                    if kref {
+                        self.emit_retain(fw, &kev.0);
+                    }
+                    if !anyf && self.is_ref(vty) {
+                        let rv2 = self.emit_retain(fw, &vev.0);
+                        let _ = rv2;
+                    }
                     match use_h {
                         Some(h) => {
                             let (setsym, vsig) = if anyf {
@@ -1504,7 +1547,7 @@ impl ModEmitter {
                             pv.push(v.clone());
                         }
                     }
-                    let packed = self.pack_variadic(fw, fels, &pv);
+                    let packed = self.pack_variadic(fw, fels, elty, &pv);
                     vals.push(packed);
                     sigs.push("i64".to_string());
                     (vals, sigs.join(", "))
@@ -1704,6 +1747,9 @@ impl ModEmitter {
                     r, v
                 ));
                 let ei = self.r.mk(Ty::I64);
+                let at = self.r.mk(Ty::Array(ei));
+                // rc patch B: fresh keys array (producer)
+                self.dangling_producer(fw, &r, at);
                 (r, self.r.mk(Ty::Array(ei)))
             }
             "values" if !argv.is_empty() => {
@@ -1884,7 +1930,13 @@ impl ModEmitter {
 
 impl ModEmitter {
     /// build one fresh Array<T> word from already-coerced words (variadic pack)
-    pub(crate) fn pack_variadic(&mut self, fw: &mut FnWalk, fels: bool, vals: &[String]) -> String {
+    pub(crate) fn pack_variadic(
+        &mut self,
+        fw: &mut FnWalk,
+        fels: bool,
+        elem: TyId,
+        vals: &[String],
+    ) -> String {
         let n = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", n, vals.len()));
         let arr = fw.v();
@@ -1901,9 +1953,14 @@ impl ModEmitter {
                     arr, zi, v
                 ));
             } else {
+                // rc patch B: the pack owns ref-typed elements
+                let mut vv = v.clone();
+                if self.is_ref(elem) {
+                    vv = self.emit_retain(fw, v);
+                }
                 fw.op(&format!(
                     "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                    arr, zi, v
+                    arr, zi, vv
                 ));
             }
         }

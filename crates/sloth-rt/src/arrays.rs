@@ -45,10 +45,8 @@ pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
         let mut base = a;
         if len >= cap {
             let nc = (cap * 2).max(8);
-            let raw = crate::gc::sloth_gc_realloc(
-                a as *mut libc::c_void,
-                (nc + 2) as libc::size_t * 8,
-            );
+            let raw =
+                crate::gc::sloth_gc_realloc(a as *mut libc::c_void, (nc + 2) as libc::size_t * 8);
             base = raw as i64;
             // count ownership follows the relocated chunk
             transfer(a as usize, base as usize);
@@ -86,10 +84,8 @@ pub extern "C" fn sloth_arr_push_f64(a: i64, w: f64) -> i64 {
         if len >= cap {
             // GC_realloc moves the buffer: return the relocated handle
             let nc = (cap * 2).max(8);
-            let raw = crate::gc::sloth_gc_realloc(
-                a as *mut libc::c_void,
-                (nc + 2) as libc::size_t * 8,
-            );
+            let raw =
+                crate::gc::sloth_gc_realloc(a as *mut libc::c_void, (nc + 2) as libc::size_t * 8);
             base = raw as i64;
             // count ownership follows the relocated chunk
             transfer(a as usize, base as usize);

@@ -174,6 +174,14 @@ impl ModEmitter {
 
 pub fn rt_decls() -> String {
     let mut s = String::new();
+    // rc core (ARC migration patch B): counting primitives
+    s.push_str("  func.func private @sloth_rc_retain(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_rc_release(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_rc_live() -> i64\n");
+    s.push_str("  func.func private @sloth_rc_drops() -> i64\n");
+    s.push_str("  func.func private @sloth_weak_new(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_weak_upgrade(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_weak_release(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_i64(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_bool(i64) -> i64\n");
@@ -346,6 +354,8 @@ impl ModEmitter {
                 vcount: 1000,
                 scopes: vec![HashMap::new()],
                 imms: vec![HashMap::new()],
+                scope_decls: vec![HashMap::new()],
+                dangling: Vec::new(),
                 loops: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),

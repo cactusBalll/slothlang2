@@ -224,6 +224,9 @@ impl ModEmitter {
             "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             r2, cid, nfw
         ));
+        // rc patch B: fresh instance = producer temp
+        let ot2 = self.r.mk(Ty::Named(clsname.to_string(), vec![]));
+        self.dangling_producer(fw, &r2, ot2);
         self.emit_vt_build(fw, clsname, &r2);
         // field initializers run before __init__
         {
@@ -742,7 +745,10 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    /// typed field store (float fields use the f64 rt routine)
+    /// typed field store (float fields use the f64 rt routine); rc patch B:
+    /// the old field word is released BEFORE the overwrite (unconditional —
+    /// rt no-ops nil/untracked/scalars), the new value is retained (slot
+    /// ownership: the object now owns its field copy)
     pub(crate) fn op_set_field(
         &mut self,
         fw: &mut FnWalk,
@@ -753,6 +759,21 @@ impl ModEmitter {
         pos: Pos,
     ) {
         let _ = pos;
+        if !self.is_float(ft) && self.is_ref(ft) {
+            // load the old word (field index) then release it
+            let old = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                old, obj, idx
+            ));
+            self.emit_release(fw, &old);
+            let rv = self.emit_retain(fw, v);
+            fw.op(&format!(
+                "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                obj, idx, rv
+            ));
+            return;
+        }
         if self.is_float(ft) {
             fw.op(&format!(
                 "    call @sloth_obj_set_field_f64({}, {}, {}) : (i64, i64, f64) -> i64",
