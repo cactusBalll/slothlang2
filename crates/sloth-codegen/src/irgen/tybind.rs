@@ -183,11 +183,27 @@ impl ModEmitter {
     pub fn is_unit(&self, t: TyId) -> bool {
         matches!(self.r.get(t), Ty::Unit)
     }
+    /// value-optional box face (patch 42): Some((inner,
+    /// inner_is_float)) for the boxed `int? / float? / bool?` surfaces;
+    /// reference optionals (str?/class?) stay word-view handle-or-0
+    pub(crate) fn opt_inner(&self, t: TyId) -> Option<(TyId, bool)> {
+        match self.r.get(t).clone() {
+            Ty::Opt(e) => match self.r.get(e).clone() {
+                Ty::F64 => Some((e, true)),
+                Ty::I64 | Ty::Bool => Some((e, false)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    pub(crate) fn is_opt_val(&self, t: TyId) -> bool {
+        self.opt_inner(t).is_some()
+    }
     pub fn is_ref(&self, t: TyId) -> bool {
         matches!(
             self.r.get(t),
             Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) | Ty::Named(_, _) | Ty::Dyn(_)
-        )
+        ) || self.opt_inner(t).is_some()
     }
 }
 
@@ -255,6 +271,115 @@ impl ModEmitter {
         if self.is_ref(t) {
             fw.dangling.push(h.to_string());
         }
+    }
+
+    // -------- value-optional box coercions (patch 42) --------
+
+    /// wrap a produced word into its value-optional surface (`int?` etc):
+    /// a nil/Unit word passes through as nil (0); a bare scalar is boxed
+    /// (`sloth_box_new[_f64]`), an already-opt word passes through (idempotent)
+    pub(crate) fn coerce_into_opt(
+        &mut self,
+        fw: &mut FnWalk,
+        v: &str,
+        from: TyId,
+        to: TyId,
+    ) -> (String, TyId) {
+        let (inner, fli) = match self.opt_inner(to) {
+            Some(x) => x,
+            None => return (v.to_string(), from),
+        };
+        let froms = self.r.get(from).clone();
+        if matches!(froms, Ty::Unit) || from == to {
+            return (v.to_string(), to);
+        }
+        let bare_scalar = matches!(froms, Ty::I64 | Ty::Bool | Ty::F64);
+        let _ = bare_scalar;
+        if matches!(froms, Ty::I64 | Ty::Bool) && !fli {
+            let r = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_box_new({}) : (i64) -> i64",
+                r, v
+            ));
+            self.dangling_producer(fw, &r, to);
+            return (r, to);
+        }
+        if matches!(froms, Ty::I64 | Ty::Bool) && fli {
+            // int/bool word into a float? surface: promote payload then box
+            let cv = fw.v();
+            fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+            let r = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_box_new_f64({}) : (f64) -> i64",
+                r, cv
+            ));
+            self.dangling_producer(fw, &r, to);
+            return (r, to);
+        }
+        if froms == Ty::F64 {
+            if fli {
+                let r = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_box_new_f64({}) : (f64) -> i64",
+                    r, v
+                ));
+                self.dangling_producer(fw, &r, to);
+                return (r, to);
+            }
+            // float word into int?/bool?: word-view fallback, no box
+            return (v.to_string(), to);
+        }
+        if matches!(froms, Ty::Opt(_)) {
+            // already-boxed word of another inner family: unwrap, promote,
+            // rebox into the target family
+            let (p, pt) = self.unwrap_opt_word(fw, v, from);
+            let (r, _t2) = self.coerce_into_opt(fw, &p, pt, to);
+            return (r, to);
+        }
+        // word-view fallback (cross optional families / incompatible words)
+        (v.to_string(), to)
+    }
+
+    /// read an optional word as its inner payload (nil reads as 0/0.0 —
+    /// unwrap-or-0 semantics keeps the historical word view behavior)
+    pub(crate) fn unwrap_opt_word(&mut self, fw: &mut FnWalk, v: &str, t: TyId) -> (String, TyId) {
+        let (inner, fli) = match self.opt_inner(t) {
+            Some(x) => x,
+            None => return (v.to_string(), t),
+        };
+        let fty = if fli { "f64" } else { "i64" };
+        let sym = if fli {
+            "sloth_box_get_f64"
+        } else {
+            "sloth_box_get"
+        };
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @{}({}) : (i64) -> {}",
+            r, sym, v, fty
+        ));
+        (r, inner)
+    }
+
+    /// caller-side coercion of args to Opt(值型) params (patch 42): bare
+    /// scalars box, opt/nil words pass through; other pairs unchanged
+    pub(crate) fn coerce_args_to_params(
+        &mut self,
+        fw: &mut FnWalk,
+        argv: &[(String, TyId)],
+        params: &[(String, TyId, bool)],
+    ) -> Vec<String> {
+        let n = argv.len().min(params.len());
+        (0..argv.len())
+            .map(|i| {
+                if i < n && self.opt_inner(params[i].1).is_some() {
+                    self.coerce_into_opt(fw, &argv[i].0, argv[i].1, params[i].1)
+                        .0
+                } else {
+                    argv[i].0.clone()
+                }
+            })
+            .collect()
     }
 }
 
@@ -340,9 +465,19 @@ impl ModEmitter {
         vty: TyId,
         pos: &Pos,
     ) {
+        // value-optional surfaces (patch 42): wrap bare scalars into boxes,
+        // keep nil (Unit) / already-opt words as they are, then the common
+        // i64 store path below releases the old and retains the new owner
+        let mut v = v.to_string();
+        let mut vty = vty;
+        if self.opt_inner(dt).is_some() {
+            let (vc, vtc) = self.coerce_into_opt(fw, &v, vty, dt);
+            v = vc;
+            vty = vtc;
+        }
         if self.is_float(dt) {
             if self.is_float(vty) {
-                fw.assign(name, v, true);
+                fw.assign(name, &v, true);
             } else {
                 let cv = fw.v();
                 fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
@@ -350,11 +485,11 @@ impl ModEmitter {
             }
             return;
         }
-        if self.is_float(vty) {
+        if self.is_float(vty) && self.opt_inner(dt).is_none() {
             let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
             self.err_diff(pos, &format!("assignment to `{}`", name), "float", &dtn);
             // keep IR parseable: store with the value's own float spelling
-            fw.assign(name, v, true);
+            fw.assign(name, &v, true);
             return;
         }
         let dts = self.r.get(dt).clone();
@@ -367,15 +502,22 @@ impl ModEmitter {
         // rc patch B: release the overwritten word, retain the new owner's
         // copy (nil/untracked = rt no-ops). Loop variables are BORROWS of
         // container elements (patch C): their slot owns no count.
+        // patch 42: transferred call-result words already carry their +1 —
+        // bind them raw instead of retaining a second count
+        let xferred = fw.rc_take_xfer(&v);
         match fw.lookup(name) {
             Some((a, _)) if !fw.loopvars.contains(&name.to_string()) => {
                 let old = self.load_slot(fw, &a);
                 self.emit_release(fw, &old);
-                let rv = self.emit_retain(fw, v);
-                fw.assign(name, &rv, false);
+                if xferred {
+                    fw.assign(name, &v, false);
+                } else {
+                    let rv = self.emit_retain(fw, &v);
+                    fw.assign(name, &rv, false);
+                }
             }
             _ => {
-                fw.assign(name, v, false);
+                fw.assign(name, &v, false);
             }
         }
     }

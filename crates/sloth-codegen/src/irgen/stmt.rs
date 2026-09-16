@@ -126,12 +126,13 @@ impl ModEmitter {
                         let dt = self.ty_of(te);
                         let df = self.is_float(dt);
                         let vf = self.is_float(t);
+
                         if df && !vf {
                             // promote the int word to f64 spelling
                             let cv = fw.v();
                             fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
                             (cv, dt)
-                        } else if !df && vf {
+                        } else if !df && vf && self.opt_inner(dt).is_none() {
                             self.err_diff(
                                 &s.pos,
                                 "initializer",
@@ -158,12 +159,34 @@ impl ModEmitter {
                     }
                     None => (v, t),
                 };
+                // patch 42: declared value-optional face (`int?` etc) boxes
+                // the payload word (nil/Unit inits stay the raw nil word);
+                // the binding surface records the Opt type itself
+                let (v, t) = if ty.is_some() {
+                    let dtr42 = ty.clone().unwrap();
+                    let dt = self.ty_of(&dtr42);
+                    if self.opt_inner(dt).is_some() {
+                        let (vc, _tc2) = self.coerce_into_opt(fw, &v, t, dt);
+                        (vc, dt)
+                    } else {
+                        (v, t)
+                    }
+                } else {
+                    (v, t)
+                };
                 let fl = self.is_float(t);
                 // rc patch B: declare + retain (slot ownership; nil/unknown
-                // words are rt no-ops), then flush the temp's producer +
+                // words are rt no-ops), then flush the temp's producer +1.
+                // patch 42: transferred call results bind raw.
                 let a = fw.declare(name, t, fl, *mutable);
+                let xfer0 = fw.rc_take_xfer(&v);
                 if self.is_ref(t) && !fl {
-                    let rv = self.emit_retain(fw, &v);
+                    let (rv, xf) = if xfer0 {
+                        (v.clone(), true)
+                    } else {
+                        (self.emit_retain(fw, &v), false)
+                    };
+                    let _ = xf;
                     fw.assign(name, &rv, fl);
                     fw.scope_decls
                         .last_mut()
@@ -257,7 +280,7 @@ impl ModEmitter {
                                 let zi = fw.v();
                                 fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
                                 let fty = self.field_type(&cur, f);
-                                self.op_set_field(fw, &rv, &zi, &v, fty, s.pos.clone());
+                                self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
                             }
@@ -293,11 +316,20 @@ impl ModEmitter {
                                 // f64 field route: int words promote; float->i64 rejects
                                 let fty = self.field_type(&c, f);
                                 let mut vc = v.clone();
+                                let mut vct = vty;
+                                let dfo = !self.is_float(fty)
+                                    && matches!(self.opt_inner(fty), Some((_, true)));
                                 if self.is_float(fty) && !self.is_float(vty) {
                                     let cv = fw.v();
                                     fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
                                     vc = cv;
-                                } else if !self.is_float(fty) && self.is_float(vty) {
+                                    vct = self.r.mk(Ty::F64);
+                                } else if dfo && !self.is_float(vty) {
+                                    let cv = fw.v();
+                                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, v));
+                                    vc = cv;
+                                    vct = self.r.mk(Ty::F64);
+                                } else if !dfo && !self.is_float(fty) && self.is_float(vty) {
                                     self.err_diff(
                                         &s.pos,
                                         &format!("field assignment `{}`", f),
@@ -305,7 +337,7 @@ impl ModEmitter {
                                         "float",
                                     );
                                 }
-                                self.op_set_field(fw, &recv, &zi, &vc, fty, s.pos.clone());
+                                self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
                             }
@@ -655,6 +687,14 @@ impl ModEmitter {
             Some((w, tt)) => (w, tt),
             None => self.emit_expr(fw, e),
         };
+        // patch 42: value-optional return surfaces box bare scalars; nil
+        // word (0) passes through as nil
+        let (v, t) = if self.opt_inner(fw.ret).is_some() {
+            let (vc, tc) = self.coerce_into_opt(fw, &v, t, fw.ret);
+            (vc, tc)
+        } else {
+            (v, t)
+        };
         let fl = self.is_float(t);
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
@@ -681,6 +721,11 @@ impl ModEmitter {
         // instead (consume, otherwise the callee frees the live result)
         if !fl {
             fw.rc_consume(&v);
+            // patch 42: ref-shaped returns transfer their +1 across the
+            // call edge — receivers bind it raw (no second retain)
+            if self.is_ref(fw.ret) {
+                fw.rc_mark_xfer(&v);
+            }
         }
         fw.rc_flush();
         self.jump_to_ret(fw);
@@ -767,6 +812,41 @@ impl ModEmitter {
         fw.cjump(&c, &thlab, &ellab);
         fw.label(&thlab);
         match narrow {
+            Some((x, nty)) if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) => {
+                // boxed payload: materialize `sloth_box_get` into the shadow
+                let fl = self.is_float(nty);
+                let slot = fw.lookup(&x).map(|(a, _t)| a);
+                if let Some(a) = slot {
+                    let w = {
+                        let zz = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : index", zz));
+                        let w2 = fw.v();
+                        fw.op(&format!(
+                            "    {} = memref.load {}[{}] : memref<1xi64>",
+                            w2, a, zz
+                        ));
+                        w2
+                    };
+                    // unwrap (nil never reaches this branch; box_get is safe)
+                    let ot = self.r.mk(Ty::Opt(nty));
+                    let (u, _ut) = self.unwrap_opt_word(fw, &w, ot);
+                    fw.push_scope();
+                    let sa = fw.v();
+                    let mty = if fl { "memref<1xf64>" } else { "memref<1xi64>" };
+                    fw.op(&format!("    {} = memref.alloca() : {}", sa, mty));
+                    let zz2 = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", zz2));
+                    fw.op(&format!(
+                        "    memref.store {}, {}[{}] : {}",
+                        u, sa, zz2, mty
+                    ));
+                    fw.scopes.last_mut().unwrap().insert(x.clone(), (sa, nty));
+                    self.walk_body(fw, then_);
+                    fw.pop_scope();
+                } else {
+                    self.walk_body(fw, then_);
+                }
+            }
             Some((x, nty)) => {
                 let slot = fw.lookup(&x).map(|(a, _)| a);
                 if let Some(a) = slot {
@@ -1108,10 +1188,10 @@ impl ModEmitter {
         let (obj, _ot) = self.emit_new_obj(fw, &ename, &Vec::new(), &Vec::new(), &pos);
         let ki = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", ki, kidxf));
-        self.op_set_field(fw, &obj, &ki, &kw, k, pos.clone());
+        self.op_set_field(fw, &obj, &ki, &kw, k, k, pos.clone());
         let vi = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", vi, vidxf));
-        self.op_set_field(fw, &obj, &vi, &vw, v2, pos.clone());
+        self.op_set_field(fw, &obj, &vi, &vw, v2, v2, pos.clone());
         let vs = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
         fw.op(&format!(
@@ -1317,13 +1397,9 @@ impl ModEmitter {
                 return;
             }
         };
-        if self.is_float(el) {
-            self.err(
-                &pos,
-                "iterator element type float unsupported (MVP)".to_string(),
-            );
-            return;
-        }
+        // patch 42: boxed value optional elements (float payloads included)
+        // unwrap through the box; ref-shaped elements keep the borrow view
+        let el_boxed = self.opt_inner(nplan.ret).is_some();
         // iterator slot storage
         let islot = fw.v();
         let z = fw.v();
@@ -1368,11 +1444,36 @@ impl ModEmitter {
         fw.loops.push((done.clone(), head.clone()));
         // loop var = unwrap(next())
         let vs = fw.v();
-        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
-        fw.op(&format!(
-            "    memref.store {}, {}[{}] : memref<1xi64>",
-            ov, vs, z
-        ));
+        if el_boxed {
+            // boxed payload: unwrap the copy and let the consumed box die
+            let (u, _ut) = self.unwrap_opt_word(fw, &ov, nplan.ret);
+            if self.is_float(el) {
+                fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xf64>",
+                    u, vs, z
+                ));
+            } else {
+                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    u, vs, z
+                ));
+                self.emit_release(fw, &ov);
+            }
+        } else if self.is_float(el) {
+            fw.op(&format!("    {} = memref.alloca() : memref<1xf64>", vs));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xf64>",
+                ov, vs, z
+            ));
+        } else {
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                ov, vs, z
+            ));
+        }
         fw.scopes
             .last_mut()
             .unwrap()

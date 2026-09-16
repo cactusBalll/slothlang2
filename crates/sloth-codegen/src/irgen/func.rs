@@ -59,6 +59,7 @@ impl ModEmitter {
             dangling: Vec::new(),
             loops: Vec::new(),
             loopvars: Vec::new(),
+            xfer: Vec::new(),
             ret: plan.ret,
             ret_alloca: String::new(),
             ret_flag: String::new(),

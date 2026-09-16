@@ -183,6 +183,24 @@ pub extern "C" fn sloth_str_push_b(b: i64, v: i64) -> i64 {
     }
 }
 
+/// value-optional box interpolation (kind: 0 = int, 1 = float, 2 = bool):
+/// nil renders as "nil" — 0/0.0/false inside a box never collide
+#[no_mangle]
+pub extern "C" fn sloth_str_push_opt(b: i64, h: i64, kind: i64) -> i64 {
+    unsafe {
+        if h == 0 {
+            let p = strb_or_new(b);
+            strb_append(p, b"nil\0".as_ptr() as *const libc::c_void, 3);
+            return p as i64;
+        }
+        match kind {
+            1 => sloth_str_push_f(b, *(h as *const f64)),
+            2 => sloth_str_push_b(b, *(h as *const i64)),
+            _ => sloth_str_push_i(b, *(h as *const i64)),
+        }
+    }
+}
+
 /// finalize: return the pooled interned string for a built byte buffer
 #[no_mangle]
 pub extern "C" fn sloth_str_finish(b: i64) -> i64 {

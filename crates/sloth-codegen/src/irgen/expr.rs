@@ -181,6 +181,31 @@ impl ModEmitter {
                                         "    {} = call @sloth_str_push_f({}, {}) : (i64, f64) -> i64",
                                         r, curw, v
                                     ));
+                                } else if self.is_opt_val(t) {
+                                    // patch 42: boxed optional interpolation
+                                    let kind = if self.r.get(t) != &Ty::Unit {
+                                        match self.opt_inner(t) {
+                                            Some((in2, fli)) => {
+                                                if self.r.get(in2) == &Ty::F64 || fli {
+                                                    1
+                                                } else if self.r.get(in2) == &Ty::Bool {
+                                                    2
+                                                } else {
+                                                    0
+                                                }
+                                            }
+                                            _ => 0,
+                                        }
+                                    } else {
+                                        0
+                                    };
+                                    let _ = kind;
+                                    let kc = fw.v();
+                                    fw.op(&format!("    {} = arith.constant {} : i64", kc, kind));
+                                    fw.op(&format!(
+                                        "    {} = call @sloth_str_push_opt({}, {}, {}) : (i64, i64, i64) -> i64",
+                                        r, curw, v, kc
+                                    ));
                                 } else if self.r.get(t) == &Ty::Bool {
                                     fw.op(&format!(
                                         "    {} = call @sloth_str_push_b({}, {}) : (i64, i64) -> i64",
@@ -353,10 +378,6 @@ impl ModEmitter {
                     // patch #32: builtin type surfaces (`is str` / `is int` /
                     // ...) — static word-class compare, const true/false
                     if self.class_ids.get(cn).is_none() && Self::is_builtin_type_name(cn) {
-                        if self.is_float(lt) {
-                            self.err(&e.pos, "`is` on float is unsupported".to_string());
-                            return (String::new(), self.r.mk(Ty::Unit));
-                        }
                         // unwrap option layers for the word surface
                         let mut wt = self.r.get(lt).clone();
                         while let Ty::Opt(inner) = wt {
@@ -370,6 +391,45 @@ impl ModEmitter {
                             (Ty::Range, "range") => true,
                             _ => false,
                         };
+                        // patch 42: an optional word is a runtime box-or-nil —
+                        // `x is int` resolves against liveness, not statically
+                        if self.opt_inner(lt).is_some() {
+                            let zc = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0 : i64", zc));
+                            let live = fw.v();
+                            fw.op(&format!(
+                                "    {} = arith.cmpi ne, {}, {} : i64",
+                                live, lv, zc
+                            ));
+                            let live1 = fw.v();
+                            fw.op(&format!("    {} = arith.extsi {} : i1 to i64", live1, live));
+                            let r = if matches {
+                                if *negated {
+                                    // live inverted: 1 - live == xori 1
+                                    let one = fw.v();
+                                    let o = fw.v();
+                                    fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                                    fw.op(&format!(
+                                        "    {} = arith.subi {}, {} : i64",
+                                        o, one, live1
+                                    ));
+                                    o
+                                } else {
+                                    live1
+                                }
+                            } else {
+                                // a non-nil box still fails the family test…
+                                // matching family by word view; only does nil lose
+                                let z2 = fw.v();
+                                fw.op(&format!(
+                                    "    {} = arith.constant {} : i64",
+                                    z2,
+                                    if *negated { 1 } else { 0 }
+                                ));
+                                z2
+                            };
+                            return (r, self.r.mk(Ty::Bool));
+                        }
                         let hit = if matches { !*negated } else { *negated };
                         let c = fw.v();
                         fw.op(&format!(
@@ -469,25 +529,36 @@ impl ModEmitter {
             }
             ExprNode::Elvis { lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(fw, lhs);
-                let (rv, _rt) = self.emit_expr(fw, rhs);
-                if self.is_float(lt) {
-                    self.err(&e.pos, "`?:` on float is unsupported".to_string());
-                    return (String::new(), self.r.mk(Ty::Unit));
+                let (mut rv, rt) = self.emit_expr(fw, rhs);
+                // patch 42: boxed value optionals unwrap-or-0 on the taken
+                // branch; bare float-Elvis stays rejected
+                let (u, ut) = self.unwrap_opt_word(fw, &lv, lt);
+                if self.is_float(ut) && !self.is_float(rt) {
+                    let cv = fw.v();
+                    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", cv, rv));
+                    rv = cv;
                 }
+                let fl = self.is_float(ut);
                 let zc = fw.v();
                 fw.op(&format!("    {} = arith.constant 0 : i64", zc));
                 let c = fw.v();
                 fw.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", c, lv, zc));
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = arith.select {}, {}, {} : i64",
-                    r, c, lv, rv
+                    "    {} = arith.select {}, {}, {} : {}",
+                    r,
+                    c,
+                    u,
+                    rv,
+                    if fl { "f64" } else { "i64" }
                 ));
-                (r, lt)
+                (r, ut)
             }
             ExprNode::Arith { op, lhs, rhs } => {
                 let (a, at) = self.emit_expr(fw, lhs);
+                let (a, at) = self.unwrap_opt_word(fw, &a, at);
                 let (b, bt) = self.emit_expr(fw, rhs);
+                let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
                 // operator overload: class receiver dispatches __add__ etc;
                 // carry the rhs word as payload (a + b ≡ a.__op__(b))
                 if let Ty::Named(cls, _) = self.r.get(at).clone() {
@@ -597,7 +668,9 @@ impl ModEmitter {
         match &e.node {
             ExprNode::Bin { op, lhs, rhs } => {
                 let (a, at) = self.emit_expr(fw, lhs);
+                let (a, at) = self.unwrap_opt_word(fw, &a, at);
                 let (b, bt) = self.emit_expr(fw, rhs);
+                let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
                 return self.emit_binop(fw, op, a, b, at, bt, &e.pos);
             }
             ExprNode::Un { op, expr } => {
@@ -837,6 +910,15 @@ impl ModEmitter {
                             ));
                             return (r, fty2);
                         }
+                        // patch 42: value-optional field words are box handles
+                        Ty::Opt(_) => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                r, recv, zi
+                            ));
+                            return (r, fty2);
+                        }
                         _ => {
                             let r = fw.v();
                             fw.op(&format!(
@@ -892,6 +974,26 @@ impl ModEmitter {
                             ));
                             *v = cv;
                             *t = self.r.mk(Ty::F64);
+                        }
+                    }
+                }
+                // patch 42: a single Opt(值型) element family unifies the
+                // whole literal under the Opt surface; bare scalars box up
+                if !anyf {
+                    let inner = ets.iter().find_map(|t| self.opt_inner(*t).map(|x| x.0));
+                    if let Some(inner) = inner {
+                        let ik = self.r.get(inner).clone();
+                        let allok = ets.iter().all(|t| match self.opt_inner(*t) {
+                            Some((in2, _)) => self.r.get(in2).clone() == ik,
+                            None => self.r.get(*t).clone() == ik,
+                        });
+                        if allok {
+                            let ot = self.r.mk(Ty::Opt(inner));
+                            for i in 0..evs.len() {
+                                let (c2, _t2) = self.coerce_into_opt(fw, &evs[i], ets[i], ot);
+                                evs[i] = c2;
+                                ets[i] = ot;
+                            }
                         }
                     }
                 }
@@ -1026,6 +1128,26 @@ impl ModEmitter {
                         }
                     }
                 };
+                // patch 42: Opt(值型) value family unification (same rule as
+                // list literals: bare scalars box under the Opt surface)
+                if !anyf {
+                    let inner = vevs.iter().find_map(|x| self.opt_inner(x.1).map(|z| z.0));
+                    if let Some(inner) = inner {
+                        let ik = self.r.get(inner).clone();
+                        let allok = vevs.iter().all(|x| match self.opt_inner(x.1) {
+                            Some((in2, _)) => self.r.get(in2).clone() == ik,
+                            None => self.r.get(x.1).clone() == ik,
+                        });
+                        if allok {
+                            let ot = self.r.mk(Ty::Opt(inner));
+                            for x in vevs.iter_mut() {
+                                let (c2, _t2) = self.coerce_into_opt(fw, &x.0, x.1, ot);
+                                x.0 = c2;
+                                x.1 = ot;
+                            }
+                        }
+                    }
+                }
                 let kk = if anyk_str {
                     1i64
                 } else if anyk_obj {
@@ -1534,7 +1656,27 @@ impl ModEmitter {
             }
             let variadic = fd.variadic.clone();
             let plan = self.plan_func(&name, None, &fd, variadic.as_ref());
+            // patch 42: caller-side Opt(值型)-param coercion (bare scalars
+            // box up against the callee's declared parameter surfaces)
+            let argv_c: Vec<(String, TyId)> = {
+                let vals = self.coerce_args_to_params(fw, &argv, &plan.params);
+                argv.iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        if i < plan.params.len() && self.opt_inner(plan.params[i].1).is_some() {
+                            (vals[i].clone(), plan.params[i].1)
+                        } else {
+                            (vals[i].clone(), x.1)
+                        }
+                    })
+                    .collect()
+            };
+            let argv = argv_c;
+            let sigargs_c: Vec<String> = argv.iter().map(|x| mlir_word_ty(x.1, &self.r)).collect();
+            let sigargs = sigargs_c;
             let r = fw.v();
+            // patch 42: ref-shaped returns transfer their +1 across the edge
+            let xfer_expect = self.is_ref(plan.ret);
             // extern funcs resolve under their raw C-ABI symbol
             let sym = if fd.is_extern {
                 name.clone()
@@ -1598,6 +1740,9 @@ impl ModEmitter {
                 tys,
                 rt
             ));
+            if xfer_expect {
+                fw.rc_mark_xfer(&r);
+            }
             return (r, plan.ret);
         }
         // lambda value call: local symbol carrying a lambda frame dispatches via its sym
@@ -1716,6 +1861,26 @@ impl ModEmitter {
                         }
                     }
                     _ => {
+                        // patch 42: value-optional boxes print through the
+                        // nil-aware rt face (nil prints "nil")
+                        if let Some((inner, fli)) = self.opt_inner(t) {
+                            let kind = if self.r.get(inner) == &Ty::F64 {
+                                1
+                            } else if self.r.get(inner) == &Ty::Bool {
+                                2
+                            } else {
+                                0
+                            };
+                            let _ = fli;
+                            let kc = fw.v();
+                            fw.op(&format!("    {} = arith.constant {} : i64", kc, kind));
+                            let rv = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_rt_print_opt({}, {}) : (i64, i64) -> i64",
+                                rv, v, kc
+                            ));
+                            return (rv, self.r.mk(Ty::Unit));
+                        }
                         let sym = match self.r.get(t) {
                             Ty::Str => "sloth_rt_print_str",
                             Ty::F64 => "sloth_rt_print_f64",
@@ -1732,6 +1897,8 @@ impl ModEmitter {
             }
             "int" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
+                // patch 42: int(optional box) unwraps the payload (nil -> 0)
+                let (v, t) = self.unwrap_opt_word(fw, &v, t);
                 let ts = self.r.get(t).clone();
                 match ts {
                     Ty::F64 => {
@@ -1747,6 +1914,8 @@ impl ModEmitter {
             }
             "float" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
+                // patch 42: float(optional box) unwraps with promote
+                let (v, t) = self.unwrap_opt_word(fw, &v, t);
                 let ts = self.r.get(t).clone();
                 match ts {
                     Ty::F64 => (v, self.r.mk(Ty::F64)),
@@ -1933,7 +2102,16 @@ impl ModEmitter {
             p
         };
         let r = fw.v();
-        let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
+        // patch 42: caller-side Opt(值型)-param coercion against the
+        // monomorphized plan surfaces (bare scalars box up)
+        let argv_c: Vec<(String, TyId)> = {
+            let vals9 = self.coerce_args_to_params(fw, argv, &plan.params);
+            argv.iter()
+                .enumerate()
+                .map(|(i, x)| (vals9[i].clone(), x.1))
+                .collect()
+        };
+        let vals: Vec<String> = argv_c.iter().map(|x| x.0.clone()).collect();
         let sigs = argv
             .iter()
             .map(|x| mlir_word_ty(x.1, &self.r))
@@ -1956,6 +2134,9 @@ impl ModEmitter {
             sigs.join(", "),
             rt
         ));
+        if self.is_ref(plan.ret) {
+            fw.rc_mark_xfer(&r);
+        }
         (r, plan.ret)
     }
 }

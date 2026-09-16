@@ -44,8 +44,7 @@ impl ModEmitter {
             .find(|f| f.0 == "ok")
             .map(|f| f.1)
             .unwrap_or_else(|| self.r.mk(Ty::Unit));
-        let (mut v, vt) = self.emit_expr(fw, arg);
-        // slot route: float field promotes int words; refuse float into ints
+        let (mut v, vt) = self.emit_expr(fw, arg); // slot route: float field promotes int words; refuse float into ints
         let slot = if is_ok { fvy } else { fey };
         if self.is_float(slot) && !self.is_float(vt) {
             let cv = fw.v();
@@ -76,7 +75,7 @@ impl ModEmitter {
             okidx,
             self.field_index(inst, "ok")
         ));
-        self.op_set_field(fw, &obj, &okidx, &okv, fok, pos.clone());
+        self.op_set_field(fw, &obj, &okidx, &okv, fok, fok, pos.clone());
         if is_ok {
             let vidx = fw.v();
             fw.op(&format!(
@@ -84,7 +83,7 @@ impl ModEmitter {
                 vidx,
                 self.field_index(inst, "v")
             ));
-            self.op_set_field(fw, &obj, &vidx, &v, fvy, pos.clone());
+            self.op_set_field(fw, &obj, &vidx, &v, vt, fvy, pos.clone());
             // zero the err slot by its word spelling
             let ez = fw.v();
             if self.is_float(fey) {
@@ -98,7 +97,7 @@ impl ModEmitter {
                 eidx,
                 self.field_index(inst, "e")
             ));
-            self.op_set_field(fw, &obj, &eidx, &ez, fey, pos.clone());
+            self.op_set_field(fw, &obj, &eidx, &ez, fey, fey, pos.clone());
         } else {
             // zero the v slot
             let vz = fw.v();
@@ -113,14 +112,14 @@ impl ModEmitter {
                 vidx,
                 self.field_index(inst, "v")
             ));
-            self.op_set_field(fw, &obj, &vidx, &vz, fvy, pos.clone());
+            self.op_set_field(fw, &obj, &vidx, &vz, fey, fvy, pos.clone());
             let eidx = fw.v();
             fw.op(&format!(
                 "    {} = arith.constant {} : i64",
                 eidx,
                 self.field_index(inst, "e")
             ));
-            self.op_set_field(fw, &obj, &eidx, &v, fey, pos.clone());
+            self.op_set_field(fw, &obj, &eidx, &v, vt, fey, pos.clone());
         }
         (obj, ity)
     }
@@ -325,7 +324,7 @@ impl ModEmitter {
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
                     let ft2 = self.ty_of(&fty);
-                    self.op_set_field(fw, &r2, &zi, &iv, ft2, ix.pos.clone());
+                    self.op_set_field(fw, &r2, &zi, &iv, iit, ft2, ix.pos.clone());
                 }
             }
         }
@@ -425,8 +424,31 @@ impl ModEmitter {
         let is_ll = self
             .llvm_method
             .contains(&(cls.to_string(), mname.to_string()));
-        let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
-        let tys = sigargs.join(", ");
+        let vals: Vec<String> = {
+            // patch 42: caller-side Opt-param coercion before the emission;
+            // the ABI surface follows the PLAN spelling (boxes ride i64)
+            let vals2 = self.coerce_args_to_params(fw, argv, &plan.params);
+            let _sigs: Vec<String> = match plan.params.len().cmp(&argv.len()) {
+                std::cmp::Ordering::Greater => vec![],
+                _ => vec![],
+            };
+            let _ = _sigs;
+            vals2
+        };
+        let tys: String = plan
+            .params
+            .iter()
+            .take(vals.len())
+            .map(|(_n, t, _fl)| {
+                if self.is_float(*t) {
+                    "f64".to_string()
+                } else {
+                    "i64".to_string()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+        let _ = sigargs;
         let ret = mlir_ret_ty(self, plan.ret);
         let callkw = if is_ll { "llvm.call" } else { "call" };
         if self.is_unit(plan.ret) {
@@ -451,6 +473,9 @@ impl ModEmitter {
             tys,
             ret
         ));
+        if self.is_ref(plan.ret) {
+            fw.rc_mark_xfer(&r);
+        }
         (r, plan.ret)
     }
 }
@@ -820,10 +845,19 @@ impl ModEmitter {
         obj: &str,
         idx: &str,
         v: &str,
+        vt: TyId,
         ft: TyId,
         pos: Pos,
     ) {
         let _ = pos;
+        // patch 42: value-optional fields box bare scalar stores (nil /
+        // already-opt words pass through untouched)
+        let (v, _vt2) = if self.opt_inner(ft).is_some() {
+            self.coerce_into_opt(fw, v, vt, ft)
+        } else {
+            (v.to_string(), vt)
+        };
+        let _ = _vt2;
         if !self.is_float(ft) && self.is_ref(ft) {
             // load the old word (field index) then release it
             let old = fw.v();
@@ -832,7 +866,7 @@ impl ModEmitter {
                 old, obj, idx
             ));
             self.emit_release(fw, &old);
-            let rv = self.emit_retain(fw, v);
+            let rv = self.emit_retain(fw, &v);
             fw.op(&format!(
                 "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                 obj, idx, rv
@@ -842,12 +876,12 @@ impl ModEmitter {
         if self.is_float(ft) {
             fw.op(&format!(
                 "    call @sloth_obj_set_field_f64({}, {}, {}) : (i64, i64, f64) -> i64",
-                obj, idx, v
+                obj, idx, &v
             ));
         } else {
             fw.op(&format!(
                 "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-                obj, idx, v
+                obj, idx, &v
             ));
         }
     }

@@ -182,6 +182,13 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_weak_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_weak_upgrade(i64) -> i64\n");
     s.push_str("  func.func private @sloth_weak_release(i64) -> i64\n");
+    // patch 42: value-optional payload boxes + nil-aware print/interp faces
+    s.push_str("  func.func private @sloth_box_new(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_box_new_f64(f64) -> i64\n");
+    s.push_str("  func.func private @sloth_box_get(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_box_get_f64(i64) -> f64\n");
+    s.push_str("  func.func private @sloth_rt_print_opt(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_str_push_opt(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_i64(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_bool(i64) -> i64\n");
@@ -358,6 +365,7 @@ impl ModEmitter {
                 dangling: Vec::new(),
                 loops: Vec::new(),
                 loopvars: Vec::new(),
+                xfer: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),
                 ret_flag: String::new(),

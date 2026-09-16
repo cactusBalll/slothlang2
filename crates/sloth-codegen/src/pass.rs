@@ -3181,3 +3181,126 @@ mod irgen_p41 {
         );
     }
 }
+
+// ---------------- patch #42: value-optional boxes (ARC D1) ----------------
+#[cfg(test)]
+mod irgen_p42 {
+    use super::*;
+
+    /// int? value 0 is a live box, not nil — the confusion collapsed
+    #[test]
+    fn opt_int_zero_is_not_nil() {
+        let src = r#"
+            func main(): unit {
+                var n: int? = 0;
+                print(n is nil);        // false: boxed 0 != nil
+                if n is not nil {
+                    print(n);           // 0
+                }
+                var m: int? = nil;
+                print(m is nil);        // true
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float?/bool? boxes: float payloads ride the box; elvis + conversion
+    #[test]
+    fn opt_float_bool_boxes_work() {
+        let src = r#"
+            func pickf(f: float?): float { return f ?: 1.5; }
+            func main(): unit {
+                var f: float? = 0.0;
+                print(f is nil);        // false
+                print(pickf(0.0) == 0.0);  // true (boxed 0.0 kept)
+                print(pickf(nil) == 1.5);  // true
+                var b: bool? = false;
+                print(b is nil);        // false
+                if b is not nil {
+                    print(b);           // false
+                }
+                var i: int? = 7;
+                print(int(i));          // 7
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// class fields of `int?` box through the field write/read faces
+    #[test]
+    fn opt_class_field_works() {
+        let src = r#"
+            class C {
+                var n: int? = nil;
+                var f: float? = nil;
+            }
+            func main(): unit {
+                var c = C();
+                print(c.n is nil);      // true (declared init keeps nil)
+                c.n = 5;
+                c.f = 0.0;
+                print(c.n is nil);      // false
+                if c.n is not nil {
+                    print(c.n + 1);     // 6
+                }
+                if c.f is not nil {
+                    print(c.f);         // 0 (0.0, not nil)
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// optional values in containers: arrays and maps keep their boxes and
+    /// the slot ownership cascade releases them on death
+    #[test]
+    fn opt_container_elements_work() {
+        let src = r#"
+            func main(): unit {
+                var n: int? = 1;
+                var z: int? = nil;
+                var arr = [n, z, 3];
+                print(arr.len());       // 3
+                print(arr[0] is nil);   // false
+                print(arr[1] is nil);   // true
+                if arr[2] is not nil {
+                    print(arr[2]);      // 3
+                }
+                var m = @("k": n);
+                var e = m["k"];
+                print(e is nil);        // false
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// optional params across function calls box on both sides: the return
+    /// face transfers the box into the caller binding
+    #[test]
+    fn opt_return_and_churn_work() {
+        let src = r#"
+            func mk(v: int): int? {
+                return v;
+            }
+            func nz(): int? {
+                return nil;
+            }
+            func main(): unit {
+                var a = mk(5);
+                print(a is nil);        // false
+                var b = nz();
+                print(b is nil);         // true
+                // chained overwrites release each dead box (ownership stays)
+                var i = 0;
+                var base = sloth_rc_live();
+                while i < 2000 {
+                    a = mk(i);
+                    i = i + 1;
+                }
+                print(a);               // 1999
+                print(sloth_rc_live() == base);   // churn fully collected
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}

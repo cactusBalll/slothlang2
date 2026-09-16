@@ -5,6 +5,7 @@
 
 pub mod alloc;
 pub mod arrays;
+pub mod boxopt;
 pub mod console;
 pub mod externs;
 pub mod maps;

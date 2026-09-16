@@ -31,6 +31,10 @@ pub(crate) struct FnWalk {
     /// borrows of container elements; overwriting them must NOT release the
     /// element the slot does not own)
     pub(crate) loopvars: Vec<String>,
+    /// patch 42: words whose count transferred across a callee return edge
+    /// (rc_consume): the receiver binds them as slot owners WITHOUT an
+    /// extra retain; consumed on first binding (exact ownership)
+    pub(crate) xfer: Vec<String>,
     pub(crate) ret: TyId,
     pub(crate) ret_alloca: String,
     pub(crate) ret_flag: String,
@@ -94,6 +98,23 @@ impl FnWalk {
     /// +1 travels to the result instead of freeing a value still in use
     pub(crate) fn rc_consume(&mut self, h: &str) {
         self.dangling.retain(|x| x != h);
+    }
+    /// mark a transferred returned word (patch 42): the +1 already rides in
+    /// it; the receiver must not retain it again
+    pub(crate) fn rc_mark_xfer(&mut self, h: &str) {
+        if !self.xfer.contains(&h.to_string()) {
+            self.xfer.push(h.to_string());
+        }
+    }
+    /// bind a transferred word: extra +1 already lives in it, so take it
+    /// raw (returns true when the mark was present and consumed)
+    pub(crate) fn rc_take_xfer(&mut self, h: &str) -> bool {
+        if self.xfer.iter().any(|x| x == h) {
+            self.xfer.retain(|x| x != h);
+            true
+        } else {
+            false
+        }
     }
     /// start a new labelled block
     pub(crate) fn label(&mut self, name: &str) {
@@ -293,6 +314,7 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         end_label: "^ginit".to_string(),
         cur_cls: None,
         loopvars: Vec::new(),
+        xfer: Vec::new(),
     }
 }
 
