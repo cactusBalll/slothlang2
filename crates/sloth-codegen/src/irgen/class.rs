@@ -155,6 +155,24 @@ impl ModEmitter {
         }
         out
     }
+
+    /// field type by name following the base-class-first chain (inherited
+    /// fields keep their declared surface type; a name miss falls to i64)
+    pub(crate) fn field_type(&mut self, clsname: &str, field: &str) -> TyId {
+        let mut cur = Some(clsname.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    if let Some((_, t, _)) = ci.fields.iter().find(|(n, _, _)| n == field) {
+                        return *t;
+                    }
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        self.r.mk(Ty::I64)
+    }
 }
 
 impl ModEmitter {
@@ -193,6 +211,40 @@ pub(crate) fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
 }
 
 impl ModEmitter {
+    /// per-class rc field mask: bit i (base-class-first layout) = field i is
+    /// a refcounted word; fields are the flat chain of the superclass chain
+    pub(crate) fn class_refmask(&self, clsname: &str) -> (i64, i64) {
+        let mut chain: Vec<String> = Vec::new();
+        let mut cur = Some(clsname.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    chain.push(c.clone());
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
+        let (mut mask, mut bit, mut nf) = (0i64, 0i64, 0i64);
+        for c in chain {
+            let ci = match self.classes.get(&c) {
+                Some(c2) => c2,
+                None => break,
+            };
+            for (_fn2, ft, _mv) in &ci.fields {
+                if !self.is_float(*ft) && self.is_ref(*ft) {
+                    mask |= 1 << bit;
+                }
+                bit += 1;
+                nf += 1;
+            }
+        }
+        (mask, nf)
+    }
+}
+
+impl ModEmitter {
     /// allocate object with GC; fields set after ctor body
     pub(crate) fn emit_new_obj(
         &mut self,
@@ -217,6 +269,19 @@ impl ModEmitter {
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             cid, z, ids
         ));
+        // rc migration patch C: crate the class's refcounted-field mask so
+        // the rt cascade releases ref fields on instance death
+        {
+            let (mask, nft) = self.class_refmask(clsname);
+            let mv = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", mv, mask));
+            let nfv = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", nfv, nft));
+            fw.op(&format!(
+                "    call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
+                cid, mv, nfv
+            ));
+        }
         let nfw = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", nfw, nf));
         let r2 = fw.v();

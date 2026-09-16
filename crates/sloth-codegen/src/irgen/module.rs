@@ -357,6 +357,7 @@ impl ModEmitter {
                 scope_decls: vec![HashMap::new()],
                 dangling: Vec::new(),
                 loops: Vec::new(),
+                loopvars: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),
                 ret_flag: String::new(),
@@ -489,6 +490,8 @@ pub fn obj_rt_decls() -> String {
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_set_field_f64(i64, i64, f64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_cls_refmask(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_arr_new_k(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_cls_id(i64) -> i64\n");
     s.push_str("  func.func private @sloth_vt_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_vt_set(i64, i64, i64) -> i64\n");

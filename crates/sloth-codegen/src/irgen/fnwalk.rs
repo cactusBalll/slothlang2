@@ -27,6 +27,10 @@ pub(crate) struct FnWalk {
     pub(crate) dangling: Vec<String>,
     /// loop label stack for break/continue: (break_target, continue_target)
     pub(crate) loops: Vec<(String, String)>,
+    /// rc patch C: loop-var names currently borrowed (for-in slots hold
+    /// borrows of container elements; overwriting them must NOT release the
+    /// element the slot does not own)
+    pub(crate) loopvars: Vec<String>,
     pub(crate) ret: TyId,
     pub(crate) ret_alloca: String,
     pub(crate) ret_flag: String,
@@ -84,6 +88,12 @@ impl FnWalk {
         for h in pending {
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
         }
+    }
+    /// consume a dangling producer whose ownership TRANSFERS out of the
+    /// statement (return face): cancel its pending flush release so the
+    /// +1 travels to the result instead of freeing a value still in use
+    pub(crate) fn rc_consume(&mut self, h: &str) {
+        self.dangling.retain(|x| x != h);
     }
     /// start a new labelled block
     pub(crate) fn label(&mut self, name: &str) {
@@ -282,6 +292,7 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         term: false,
         end_label: "^ginit".to_string(),
         cur_cls: None,
+        loopvars: Vec::new(),
     }
 }
 

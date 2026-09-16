@@ -32,6 +32,29 @@ impl ModEmitter {
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             ci, z, cid
         ));
+        // rc migration patch C: frames own ref-typed captures — the mask
+        // makes the death cascade release each capture's count
+        {
+            let mut lam_mask = 0i64;
+            for (j, _cn) in caps.iter().enumerate() {
+                match fw.lookup(&_cn.clone()) {
+                    Some((_, t)) => {
+                        if self.is_ref(t) {
+                            lam_mask |= 1 << j;
+                        }
+                    }
+                    None => {}
+                };
+            }
+            let mvc = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", mvc, lam_mask));
+            let nfc = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", nfc, ncap));
+            fw.op(&format!(
+                "    call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
+                ci, mvc, nfc
+            ));
+        }
         let nf = fw.v();
         fw.op(&format!("    {} = arith.constant {} : i64", nf, ncap));
         let frame = fw.v();

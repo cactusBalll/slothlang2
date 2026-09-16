@@ -1,6 +1,6 @@
 //! Interned strings (str32), string builders (StrB), and str printing.
 
-use crate::gc::sloth_gc_alloc;
+use crate::alloc::sloth_rt_alloc;
 use crate::rc::track_user;
 
 // ---------------- string builders ----------------
@@ -54,7 +54,7 @@ pub struct StrT {
 #[no_mangle]
 pub extern "C" fn sloth_str_intern(ptr: i64, len: i64) -> i64 {
     unsafe {
-        let t = sloth_gc_alloc(std::mem::size_of::<StrT>() + len as libc::size_t + 1)
+        let t = sloth_rt_alloc(std::mem::size_of::<StrT>() + len as libc::size_t + 1)
             as *mut libc::c_void;
         track_user(t as usize);
         let td = t as *mut StrT;
@@ -99,7 +99,7 @@ pub extern "C" fn sloth_str_char(s: i64, i: i64) -> i64 {
     unsafe {
         let td = s as *mut StrT;
         let b = *(((*td).data as *const u8).offset(i as isize)) as u8;
-        let t = sloth_gc_alloc(std::mem::size_of::<StrT>() + 2) as *mut StrT;
+        let t = sloth_rt_alloc(std::mem::size_of::<StrT>() + 2) as *mut StrT;
         track_user(t as usize);
         let dat = (t as *mut libc::c_void).offset(std::mem::size_of::<StrT>() as isize);
         *(dat as *mut u8) = b;

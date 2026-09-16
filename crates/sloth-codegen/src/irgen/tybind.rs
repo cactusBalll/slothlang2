@@ -365,15 +365,16 @@ impl ModEmitter {
             self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
         }
         // rc patch B: release the overwritten word, retain the new owner's
-        // copy (nil/untracked = rt no-ops)
+        // copy (nil/untracked = rt no-ops). Loop variables are BORROWS of
+        // container elements (patch C): their slot owns no count.
         match fw.lookup(name) {
-            Some((a, _)) => {
+            Some((a, _)) if !fw.loopvars.contains(&name.to_string()) => {
                 let old = self.load_slot(fw, &a);
                 self.emit_release(fw, &old);
                 let rv = self.emit_retain(fw, v);
                 fw.assign(name, &rv, false);
             }
-            None => {
+            _ => {
                 fw.assign(name, v, false);
             }
         }

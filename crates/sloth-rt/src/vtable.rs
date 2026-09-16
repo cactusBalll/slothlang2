@@ -1,13 +1,13 @@
 //! Dynamic trait dispatch: vtable primitives and the object-header link.
 //! vt: `[capacity, slot0..]` array of i64 raw function pointers.
 
-use crate::gc::sloth_gc_alloc;
+use crate::alloc::sloth_rt_alloc;
 
 #[no_mangle]
 pub extern "C" fn sloth_vt_new(cap: i64) -> i64 {
     unsafe {
         let n = cap.max(1) as libc::size_t;
-        let o = sloth_gc_alloc((n + 1) * 8) as *mut i64;
+        let o = sloth_rt_alloc((n + 1) * 8) as *mut i64;
         *o = n as i64;
         o as i64
     }

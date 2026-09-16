@@ -39,11 +39,10 @@ impl ModEmitter {
             ExprNode::Ident(n) => match fw.lookup(n) {
                 Some((slot, ty)) => match self.r.get(ty) {
                     Ty::Array(_) => {
-                        // rc patch B: slot ownership moves to the relocated
-                        // handle — release the old slot word (scalar/nil
-                        // no-ops in rt) and store the fresh handle as-is
-                        let old = self.load_slot(fw, &slot);
-                        self.emit_release(fw, &old);
+                        // rc patch B: slot ownership MOVES untouched — the
+                        // relocate (realloc) already transferred the count
+                        // entry (rt transfer), so the raw store must not
+                        // release the old word (same address = live handle)
                         let z = fw.v();
                         fw.op(&format!("    {} = arith.constant 0 : index", z));
                         fw.op(&format!(
@@ -62,17 +61,12 @@ impl ModEmitter {
                 match self.r.get(rt) {
                     Ty::Named(c, _) => {
                         let idx = self.field_index(c, name) as i64;
+                        // rc patch B: raw store ONLY — the field slot owns
+                        // the count already and rt transfer followed the
+                        // relocated chunk; a release here would drop the
+                        // field's own count (same address = live handle)
                         let zi = fw.v();
                         fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                        // rc patch B: release the old field handle (the
-                        // relocated push handle supersedes it: same scalar
-                        // no-op story for non-ref words), then store raw
-                        let old = fw.v();
-                        fw.op(&format!(
-                            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
-                            old, rv, zi
-                        ));
-                        self.emit_release(fw, &old);
                         fw.op(&format!(
                             "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                             rv, zi, handle
@@ -806,7 +800,7 @@ impl ModEmitter {
                     }
                 }
                 let (recv, rt) = self.emit_expr(fw, obj);
-                if let Ty::Named(c, _) = self.r.get(rt) {
+                if let Ty::Named(c, _) = self.r.get(rt).clone() {
                     if self.extern_types.contains(c.as_str()) {
                         self.err(
                             &e.pos,
@@ -814,18 +808,10 @@ impl ModEmitter {
                         );
                         return (String::new(), self.r.mk(Ty::Unit));
                     }
-                    let idx = self.field_index(c, name);
+                    let idx = self.field_index(&c, name);
                     let zi = fw.v();
                     fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                    let fty = self
-                        .classes
-                        .get(c)
-                        .and_then(|ci| ci.fields.iter().find(|f| f.0 == *name))
-                        .map(|f| f.1);
-                    let fty2 = match fty {
-                        Some(x) => x,
-                        None => self.r.mk(Ty::I64),
-                    };
+                    let fty2 = self.field_type(&c, name);
                     match self.r.get(fty2) {
                         Ty::Str => {
                             let r = fw.v();
@@ -912,10 +898,21 @@ impl ModEmitter {
                 let n = fw.v();
                 fw.op(&format!("    {} = arith.constant {} : i64", n, evs.len()));
                 let arr = fw.v();
-                fw.op(&format!(
-                    "    {} = call @sloth_arr_new({}) : (i64) -> i64",
-                    arr, n
-                ));
+                // element refness flag → death cascade releases elements (C)
+                let elref = !anyf && ets.iter().any(|t| self.is_ref(*t));
+                if elref {
+                    let k2 = fw.v();
+                    fw.op(&format!("    {} = arith.constant 1 : i64", k2));
+                    fw.op(&format!(
+                        "    {} = call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
+                        arr, n, k2
+                    ));
+                } else {
+                    fw.op(&format!(
+                        "    {} = call @sloth_arr_new({}) : (i64) -> i64",
+                        arr, n
+                    ));
+                }
                 let ael = self.r.mk(Ty::Unit);
                 let at2 = self.r.mk(Ty::Array(ael));
                 self.dangling_producer(fw, &arr, at2);
@@ -1036,8 +1033,15 @@ impl ModEmitter {
                 } else {
                     0i64
                 };
+                // value refness rides the high bit (patch C): death cascade
+                // releases ref-typed values on map death
+                let kkv = if !anyf && self.is_ref(vty) {
+                    kk | (1 << 8)
+                } else {
+                    kk
+                };
                 let kv0 = fw.v();
-                fw.op(&format!("    {} = arith.constant {} : i64", kv0, kk));
+                fw.op(&format!("    {} = arith.constant {} : i64", kv0, kkv));
                 let m = fw.v();
                 fw.op(&format!(
                     "    {} = call @sloth_map_new({}) : (i64) -> i64",
@@ -1414,8 +1418,15 @@ impl ModEmitter {
                     return (r, self.r.mk(Ty::I64));
                 }
             }
-            if let Ty::Array(el) = self.r.get(rt) {
-                let fel = self.is_float(*el);
+            let el_tp = match self.r.get(rt) {
+                Ty::Array(e) => Some(*e),
+                _ => None,
+            };
+            if let Some(elid) = el_tp {
+                drop(el_tp);
+                let el = elid;
+                let fel = self.is_float(elid);
+                let _ = el;
                 match name.as_str() {
                     "push" => {
                         let (mut v, at) = match argv.get(1).cloned() {
@@ -1437,6 +1448,12 @@ impl ModEmitter {
                                 callv, recvv, v
                             ));
                         } else {
+                            // rc patch C: the array slot owns ref-typed
+                            // elements (push of a scalar/nil word no-ops)
+                            if self.is_ref(elid) {
+                                let rv2 = self.emit_retain(fw, &v);
+                                v = rv2;
+                            }
                             fw.op(&format!(
                                 "    {} = call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
                                 callv, recvv, v
@@ -1458,12 +1475,18 @@ impl ModEmitter {
                                 r, recvv
                             ));
                         } else {
+                            // rc patch C: pop of a ref element hands its
+                            // count to the caller — the value is producer-
+                            // owned (dies at statement close unless stored)
+                            if !fel && self.is_ref(elid) {
+                                self.dangling_producer(fw, &r, elid);
+                            }
                             fw.op(&format!(
                                 "    {} = call @sloth_arr_pop({}) : (i64) -> i64",
                                 r, recvv
                             ));
                         }
-                        return (r, *el);
+                        return (r, elid);
                     }
                     "len" => {
                         let r = fw.v();
@@ -1650,6 +1673,15 @@ impl ModEmitter {
         // builtins
         let r = fw.v();
         match name.as_str() {
+            // rc diagnostics (SLOTH_STATS surface, predeclared in module.rs)
+            "sloth_rc_live" if argv.is_empty() => {
+                fw.op(&format!("    {} = call @sloth_rc_live() : () -> i64", r));
+                (r, self.r.mk(Ty::I64))
+            }
+            "sloth_rc_drops" if argv.is_empty() => {
+                fw.op(&format!("    {} = call @sloth_rc_drops() : () -> i64", r));
+                (r, self.r.mk(Ty::I64))
+            }
             "print" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
                 let mty = mlir_word_ty(t, &self.r);

@@ -1,12 +1,13 @@
-//! Reference-count core (side-table phase, Boehm kept as memory backstop).
+//! Reference-count core over the deterministic allocator (ARC migration).
 //!
 //! Every rc-managed handle (object, array, map, string, lambda frame, and
 //! internal buffer chunks) gets one entry keyed by the handle address.
-//! `retain`/`release` move the counter; reaching zero detaches the entry,
-//! nullifies every weak box pointing at the handle, and cascades entry-owned
-//! children (internal buffers). Actual chunk memory is still reclaimed by
-//! libgc by unreachability, so missed releases leak counts, not crashes; the
-//! final swap to a deterministic allocator removes the backstop.
+//! `retain`/`release` move the counter; reaching zero runs the entry's death
+//! destructor (cascading field/element releases), invalidates every weak box
+//! pointing at the handle, detaches entry-owned children (internal buffers),
+//! and then frees the chunk memory itself — no collector exists, so a
+//! missed release leaks memory rather than crashing, and a release of an
+//! unknown word is an inert no-op.
 //!
 //! Weak boxes live outside the counted heap (libc::malloc): they hold the raw
 //! target address and are nulled when their target's count reaches zero.
@@ -26,10 +27,14 @@ pub(crate) enum Kind {
 
 pub(crate) struct Entry {
     cnt: u32,
-    #[allow(dead_code)]
     kind: Kind,
     /// weak boxes currently pointing at this handle
     weaks: Vec<*mut WeakBox>,
+    /// patch C: type-driven destructor hook executed when the count reaches
+    /// zero (cascades field/element/bucket releases for containers/objects)
+    /// aux carries the handle's kind flags (e.g. array element refness)
+    dtor: Option<fn(usize, u64)>,
+    aux: u64,
 }
 
 #[repr(C)]
@@ -60,8 +65,33 @@ pub(crate) fn track_user(h: usize) {
             cnt: 1,
             kind: Kind::User,
             weaks: Vec::new(),
+            dtor: None,
+            aux: 0,
         },
     );
+}
+
+/// register with a death destructor (patch C cascade hook)
+pub(crate) fn track_user_dtor(h: usize, dtor: fn(usize, u64)) {
+    let mut t = table().lock().unwrap();
+    t.0.insert(
+        h,
+        Entry {
+            cnt: 1,
+            kind: Kind::User,
+            weaks: Vec::new(),
+            dtor: Some(dtor),
+            aux: 0,
+        },
+    );
+}
+
+/// set the kind-flag word of an entry (patch C: array element refness etc.)
+pub(crate) fn set_aux(h: usize, aux: u64) {
+    let mut t = table().lock().unwrap();
+    if let Some(e) = t.0.get_mut(&h) {
+        e.aux = aux;
+    }
 }
 
 /// register an internal buffer owned by `parent`; it detaches (no cascade,
@@ -74,6 +104,8 @@ pub(crate) fn track_owned(h: usize, parent: usize) {
             cnt: 1,
             kind: Kind::Owned(parent),
             weaks: Vec::new(),
+            dtor: None,
+            aux: 0,
         },
     );
 }
@@ -89,6 +121,8 @@ pub(crate) fn reset(h: usize) {
             cnt: 1,
             kind: Kind::User,
             weaks: Vec::new(),
+            dtor: None,
+            aux: 0,
         },
     );
 }
@@ -110,6 +144,8 @@ pub(crate) fn transfer(old: usize, new: usize) {
                 cnt: 1,
                 kind: Kind::User,
                 weaks: Vec::new(),
+                dtor: None,
+                aux: 0,
             });
         }
     }
@@ -136,31 +172,50 @@ pub extern "C" fn sloth_rc_release(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
-    let mut t = table().lock().unwrap();
-    if !t.0.contains_key(&(h as usize)) {
-        return h;
-    }
-    let e = t.0.get_mut(&(h as usize)).unwrap();
-    if e.cnt > 1 {
-        e.cnt -= 1;
-        return h;
-    }
-    // count reached zero: invalidate weak boxes, drop owned children
-    let weaks = std::mem::take(&mut e.weaks);
+    // snapshot: hold the lock ONLY for this table surgery WITHOUT running
+    // the destructor cascade, child draining or the final free — those run
+    // after the guard is dropped, since child releases re-enter this
+    // function recursively (std Mutex is not reentrant: cascade-under-lock
+    // used to deadlock the harness)
+    let (dtor, aux, weaks) = {
+        let mut t = table().lock().unwrap();
+        if !t.0.contains_key(&(h as usize)) {
+            return h;
+        }
+        let e = t.0.get_mut(&(h as usize)).unwrap();
+        if e.cnt > 1 {
+            e.cnt -= 1;
+            return h;
+        }
+        let dtor = e.dtor.take();
+        let aux = e.aux;
+        let weaks = std::mem::take(&mut e.weaks);
+        t.0.remove(&(h as usize));
+        (dtor, aux, weaks)
+    };
     for wb in weaks {
-        unsafe { (**&wb).target = 0 };
+        unsafe { (*wb).target = 0 };
     }
-    let kids: Vec<usize> =
-        t.0.iter()
-            .filter(|(k2, e2)| {
-                matches!(e2.kind, Kind::Owned(p) if p == h as usize) && *k2 != &(h as usize)
-            })
-            .map(|(k2, _)| *k2)
-            .collect();
+    if let Some(dtor) = dtor {
+        dtor(h as usize, aux);
+    }
+    // owned children (map buckets, also stale grow buffers): detach + free
+    let kids: Vec<usize> = {
+        let mut t = table().lock().unwrap();
+        let kids: Vec<usize> =
+            t.0.iter()
+                .filter(|(_k2, e2)| matches!(e2.kind, Kind::Owned(p) if p == h as usize))
+                .map(|(k2, _)| *k2)
+                .collect();
+        for kid in &kids {
+            t.0.remove(kid);
+        }
+        kids
+    };
     for kid in kids {
-        t.0.remove(&kid);
+        unsafe { libc::free(kid as *mut libc::c_void) };
     }
-    t.0.remove(&(h as usize));
+    unsafe { libc::free(h as *mut libc::c_void) };
     h
 }
 

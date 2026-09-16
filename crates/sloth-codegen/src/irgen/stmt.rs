@@ -256,12 +256,7 @@ impl ModEmitter {
                                 );
                                 let zi = fw.v();
                                 fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
-                                let fty = self
-                                    .classes
-                                    .get(&cur)
-                                    .and_then(|ci| ci.fields.iter().find(|fd| fd.0 == *f))
-                                    .map(|fd| fd.1)
-                                    .unwrap_or_else(|| self.r.mk(Ty::I64));
+                                let fty = self.field_type(&cur, f);
                                 self.op_set_field(fw, &rv, &zi, &v, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
@@ -278,7 +273,7 @@ impl ModEmitter {
                         (target.first(), target.last())
                     {
                         if let Some((at, rty)) = fw.lookup(&h.clone()) {
-                            if let Ty::Named(c, _) = self.r.get(rty) {
+                            if let Ty::Named(c, _) = self.r.get(rty).clone() {
                                 // receiver word: alloca stores the object pointer word
                                 let z = fw.v();
                                 let recv = fw.v();
@@ -296,12 +291,7 @@ impl ModEmitter {
                                 let zi = fw.v();
                                 fw.op(&format!("    {} = arith.constant {} : i64", zi, idx));
                                 // f64 field route: int words promote; float->i64 rejects
-                                let fty = self
-                                    .classes
-                                    .get(c)
-                                    .and_then(|ci| ci.fields.iter().find(|fd| fd.0 == *f))
-                                    .map(|fd| fd.1)
-                                    .unwrap_or_else(|| self.r.mk(Ty::I64));
+                                let fty = self.field_type(&c, f);
                                 let mut vc = v.clone();
                                 if self.is_float(fty) && !self.is_float(vty) {
                                     let cv = fw.v();
@@ -686,7 +676,12 @@ impl ModEmitter {
             st, fw.ret_flag, zi
         ));
         // rc patch B: release unused producers BEFORE the return jump (a
-        // flushed word after the terminator would break the block shape)
+        // flushed word after the terminator would break the block shape);
+        // a producer in the RETURNED slot transfers its +1 to the caller
+        // instead (consume, otherwise the callee frees the live result)
+        if !fl {
+            fw.rc_consume(&v);
+        }
         fw.rc_flush();
         self.jump_to_ret(fw);
     }
@@ -891,7 +886,9 @@ impl ModEmitter {
                     .last_mut()
                     .unwrap()
                     .insert(var.to_string(), (vs, self.r.mk(Ty::I64)));
+                fw.loopvars.push(var.to_string());
                 self.walk_body(fw, body);
+                fw.loopvars.pop();
                 fw.loops.pop();
                 fw.label_br(&cont);
                 // idx += 1
@@ -1125,7 +1122,10 @@ impl ModEmitter {
             .last_mut()
             .unwrap()
             .insert(var.to_string(), (vs, et));
+        // rc patch C: proto-for vars are borrows too
+        fw.loopvars.push(var.to_string());
         self.walk_body(fw, body);
+        fw.loopvars.pop();
         fw.loops.pop();
         fw.label_br(&cont);
         let one2 = fw.v();
