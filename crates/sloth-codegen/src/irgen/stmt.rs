@@ -165,8 +165,8 @@ impl ModEmitter {
                 let (v, t) = if ty.is_some() {
                     let dtr42 = ty.clone().unwrap();
                     let dt = self.ty_of(&dtr42);
-                    if self.opt_inner(dt).is_some() {
-                        let (vc, _tc2) = self.coerce_into_opt(fw, &v, t, dt);
+                    if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+                        let (vc, _tc2) = self.coerce_word_to(fw, &v, t, dt);
                         (vc, dt)
                     } else {
                         (v, t)
@@ -690,7 +690,7 @@ impl ModEmitter {
         // patch 42: value-optional return surfaces box bare scalars; nil
         // word (0) passes through as nil
         let (v, t) = if self.opt_inner(fw.ret).is_some() {
-            let (vc, tc) = self.coerce_into_opt(fw, &v, t, fw.ret);
+            let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
             (vc, tc)
         } else {
             (v, t)

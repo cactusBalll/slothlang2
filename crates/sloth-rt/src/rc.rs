@@ -231,18 +231,32 @@ pub extern "C" fn sloth_rc_drops() -> i64 {
     DROPS.load(Ordering::Relaxed) as i64
 }
 
-/// weak reference: a malloc'd box holding the raw target address; the box is
-/// independent memory, so it does not keep the target alive
+/// weak reference: a malloc'd box holding the raw target address; the box
+/// is independent memory, so it does not keep the target alive. The box
+/// itself is rc-tracked (copy = retain, last release detaches + frees)
 #[no_mangle]
 pub extern "C" fn sloth_weak_new(h: i64) -> i64 {
     unsafe {
         let b = libc::malloc(std::mem::size_of::<WeakBox>()) as *mut WeakBox;
         (*b).target = h as usize;
+        crate::rc::track_user_dtor(b as usize, weak_dtor);
         let mut t = table().lock().unwrap();
         if let Some(e) = t.0.get_mut(&(h as usize)) {
             e.weaks.push(b);
         }
         b as i64
+    }
+}
+
+/// weak box death: detach from the (maybe already dead) target; the rc core
+/// frees the box chunk itself
+fn weak_dtor(b: usize, _aux: u64) {
+    unsafe {
+        let bb = b as *mut WeakBox;
+        let mut t = table().lock().unwrap();
+        if let Some(e) = t.0.get_mut(&(*bb).target) {
+            e.weaks.retain(|x| *x != bb);
+        }
     }
 }
 
@@ -255,17 +269,12 @@ pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
     unsafe { (*(w as *mut WeakBox)).target as i64 }
 }
 
-/// release a weak box's slot ownership (detach + free)
+/// release a weak box's slot ownership (detach + free; idempotent)
 #[no_mangle]
 pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
     if w != 0 {
         unsafe {
-            let b = w as *mut WeakBox;
-            let mut t = table().lock().unwrap();
-            if let Some(e) = t.0.get_mut(&(*b).target) {
-                e.weaks.retain(|x| *x != b);
-            }
-            libc::free(b as *mut libc::c_void);
+            sloth_rc_release(w);
         }
     }
     0

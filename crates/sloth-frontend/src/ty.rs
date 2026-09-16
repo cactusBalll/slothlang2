@@ -18,6 +18,9 @@ pub enum Ty {
     Fn(FnTy),
     Named(String, Vec<TyId>), // user class w/ optional ty args
     Opt(TyId),
+    /// Weak<T> reference box (ARC patch D2): holds a weak reference to a
+    /// (possibly boxed) target; upgrade() yields T?
+    Weak(TyId),
     Dyn(String),
     /// type param placeholder (during monomorphization substitution)
     Tp(String),
@@ -110,6 +113,10 @@ impl Reg {
                 let ne = self.subst(e, map);
                 self.mk(Ty::Opt(ne))
             }
+            Ty::Weak(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Weak(ne))
+            }
             other => self.mk(other.clone()),
         }
     }
@@ -128,13 +135,17 @@ fn fmt_ty(t: &Ty) -> String {
         Ty::Map(k, v) => format!("map:{}:{}", k.0, v.0),
         Ty::Fn(f) => {
             let ps: Vec<String> = f.params.iter().map(|p| p.0.to_string()).collect();
-            format!("fn:{}:{}", ps.join(","), f.ret.0)
+            match &f.lam {
+                Some(l) => format!("fn:{}:{}:lam{}", ps.join(","), f.ret.0, l.sym),
+                None => format!("fn:{}:{}", ps.join(","), f.ret.0),
+            }
         }
         Ty::Named(n, a) => {
             let args: Vec<String> = a.iter().map(|x| x.0.to_string()).collect();
             format!("named:{}:{}", n, args.join(","))
         }
         Ty::Opt(e) => format!("opt:{}", e.0),
+        Ty::Weak(e) => format!("weak:{}", e.0),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("tp:{}", n),
     }
@@ -153,6 +164,7 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Fn(_f) => "fn".to_string(),
         Ty::Named(n, _a) => n.clone(),
         Ty::Opt(_e) => "opt".to_string(),
+        Ty::Weak(_e) => "weak".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("?tp:{}", n),
     }

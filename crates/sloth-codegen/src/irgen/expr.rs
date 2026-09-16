@@ -919,6 +919,15 @@ impl ModEmitter {
                             ));
                             return (r, fty2);
                         }
+                        // patch 43: weakbox handles ride their type surface
+                        Ty::Weak(_) => {
+                            let r = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                r, recv, zi
+                            ));
+                            return (r, fty2);
+                        }
                         _ => {
                             let r = fw.v();
                             fw.op(&format!(
@@ -1619,6 +1628,28 @@ impl ModEmitter {
                         return (r, self.r.mk(Ty::I64));
                     }
                     _ => {}
+                }
+            }
+        }
+        // Weak<T>.upgrade() receiver face (patch 43): returns the target
+        // T? (ref targets keep the handle word; boxed value targets ride
+        // their box), retained as a producer-owned strong borrow
+        if let Some((recvv, rt)) = recv.clone() {
+            if name == "upgrade" {
+                if let Some(inner) = self.weak_inner(rt) {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_weak_upgrade({}) : (i64) -> i64",
+                        r, recvv
+                    ));
+                    let ot = self.r.mk(Ty::Opt(inner));
+                    if self.is_ref(ot) {
+                        // strong borrow over the live target (nil = dead, no-op)
+                        let rv2 = self.emit_retain(fw, &r);
+                        self.dangling_producer(fw, &rv2, ot);
+                        return (rv2, ot);
+                    }
+                    return (r, ot);
                 }
             }
         }

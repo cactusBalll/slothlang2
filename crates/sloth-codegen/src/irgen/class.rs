@@ -852,8 +852,8 @@ impl ModEmitter {
         let _ = pos;
         // patch 42: value-optional fields box bare scalar stores (nil /
         // already-opt words pass through untouched)
-        let (v, _vt2) = if self.opt_inner(ft).is_some() {
-            self.coerce_into_opt(fw, v, vt, ft)
+        let (v, _vt2) = if self.opt_inner(ft).is_some() || self.weak_inner(ft).is_some() {
+            self.coerce_word_to(fw, v, vt, ft)
         } else {
             (v.to_string(), vt)
         };

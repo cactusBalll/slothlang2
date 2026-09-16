@@ -107,9 +107,15 @@ impl ModEmitter {
         // construct the closured function body
         let mut params: Vec<Param> = caps
             .iter()
-            .map(|c| Param {
-                name: c.clone(),
-                ty: None,
+            .map(|c| {
+                let ty = match fw.lookup(c) {
+                    Some((_a, t)) => syn_ty_of(self, t),
+                    None => None,
+                };
+                Param {
+                    name: c.clone(),
+                    ty,
+                }
             })
             .collect();
         params.extend(l.params.iter().cloned());
@@ -181,4 +187,66 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
         }
     }
     out
+}
+
+/// reconstruct a syntactic Type for a capture's resolved surface (patch 44)
+fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
+    use sloth_frontend::ast::*;
+    use sloth_frontend::ty::Ty;
+    match me.r.get(t).clone() {
+        Ty::Bool => Some(Type::prim(Prim::Bool)),
+        Ty::I64 => Some(Type::prim(Prim::Int)),
+        Ty::F64 => Some(Type::prim(Prim::Float)),
+        Ty::Str => Some(Type::prim(Prim::Str)),
+        Ty::Range => Some(Type::prim(Prim::Range)),
+        Ty::Named(n, args) => {
+            let ats: Vec<Type> = args
+                .iter()
+                .map(|x| syn_ty_of(me, *x).unwrap_or(Type::Simple(SimpleType::Ident("_".into()))))
+                .collect();
+            Some(Type::Simple(SimpleType::Named(n.clone(), ats)))
+        }
+        Ty::Opt(e) => syn_ty_of(me, e).map(|x| Type::Optional(Box::new(x))),
+        Ty::Weak(e) => {
+            let et = syn_ty_of(me, e)?;
+            let ea = match et {
+                Type::Simple(s) => s,
+                other => SimpleType::Ident(plain_ty_name(&other)),
+            };
+            Some(Type::Simple(SimpleType::Named(
+                "Weak".into(),
+                vec![Type::Simple(ea)],
+            )))
+        }
+        Ty::Array(e) => syn_ty_of(me, e).map(|x| Type::Simple(SimpleType::Array(Box::new(x)))),
+        Ty::Map(k, v) => {
+            let kt = syn_ty_of(me, k)?;
+            let vt = syn_ty_of(me, v)?;
+            Some(Type::Simple(SimpleType::Map(Box::new(kt), Box::new(vt))))
+        }
+        _ => None,
+    }
+}
+
+fn plain_ty_name(t: &Type) -> String {
+    use sloth_frontend::ast::*;
+    match t {
+        Type::Unit => "unit".into(),
+        Type::Optional(x) => format!("{}?", plain_ty_name(x)),
+        Type::Simple(s) => match s {
+            SimpleType::Bool => "bool".into(),
+            SimpleType::Int => "int".into(),
+            SimpleType::Float => "float".into(),
+            SimpleType::Str => "str".into(),
+            SimpleType::Range => "range".into(),
+            SimpleType::Array(x) => format!("Array<{}>", plain_ty_name(x)),
+            SimpleType::Map(k, v) => {
+                format!("Map<{}, {}>", plain_ty_name(k), plain_ty_name(v))
+            }
+            SimpleType::Named(n, _) => n.clone(),
+            SimpleType::Ident(n) => n.clone(),
+            SimpleType::Dyn(d) => format!("dyn:{}", d),
+            SimpleType::Fn(_) => "fn".into(),
+        },
+    }
 }

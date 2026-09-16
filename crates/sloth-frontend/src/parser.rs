@@ -1200,7 +1200,7 @@ impl Parser {
                     node: ExprNode::Map(out),
                 })
             }
-            Tok::Pipe => self.lambda(),
+            Tok::Pipe | Tok::PipePipe => self.lambda(),
             Tok::LParen => {
                 self.ptr += 1;
                 let e = self.expr(0)?;
@@ -1238,21 +1238,26 @@ impl Parser {
 
     fn lambda(&mut self) -> PResult<Expr> {
         let pos = self.pos();
-        self.expect(Tok::Pipe, "'|' starting lambda parameters")?;
-        let mut params = Vec::new();
-        while !matches!(self.peek(), Some(Tok::Pipe)) {
-            let (name, _) = self.ident("lambda parameter")?;
-            let ty = if self.eat(Tok::Colon) {
-                Some(self.ty()?)
-            } else {
-                None
-            };
-            params.push(Param { name, ty });
-            if !self.eat(Tok::Comma) {
-                break;
+        // `||` lexes as PipePipe: a zero-parameter lambda head
+        let mut params: Vec<Param> = Vec::new();
+        if self.peek() == Some(&Tok::PipePipe) {
+            self.ptr += 1;
+        } else {
+            self.expect(Tok::Pipe, "'|' starting lambda parameters")?;
+            while !matches!(self.peek(), Some(Tok::Pipe)) {
+                let (name, _) = self.ident("lambda parameter")?;
+                let ty = if self.eat(Tok::Colon) {
+                    Some(self.ty()?)
+                } else {
+                    None
+                };
+                params.push(Param { name, ty });
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
             }
+            self.expect(Tok::Pipe, "'|' closing lambda parameter list")?;
         }
-        self.expect(Tok::Pipe, "'|' closing lambda parameter list")?;
         let ret = if self.eat(Tok::Arrow) {
             Some(self.ty()?)
         } else {

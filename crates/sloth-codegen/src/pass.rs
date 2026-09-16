@@ -3304,3 +3304,88 @@ mod irgen_p42 {
         run_src(src, "main").unwrap();
     }
 }
+
+// ---------------- patch #43: Weak<T> reference boxes (ARC D2) ----------------
+#[cfg(test)]
+mod irgen_p43 {
+    use super::*;
+
+    /// weak fields hold a weakbox (no strong count): the wrapped target rides
+    /// into upgrade() as T?; nil weaks stay nil
+    #[test]
+    fn weak_field_and_upgrade_work() {
+        let src = r#"
+            class Node {
+                var name: str = "n";
+                var next: Weak<Node> = nil;
+            }
+            func main(): unit {
+                var a = Node();
+                var w: Weak<Node> = nil;
+                print(w is nil);        // true
+                w = a;
+                print(w is nil);        // false
+                var s = w.upgrade();     // strong borrow
+                print(s is nil);         // false
+                if s is not nil {
+                    print(s.name);      // n
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// weak ring: two nodes referencing each other through weak fields die
+    /// fully — no strong edges through next (2000 ring churns leave no entries)
+    #[test]
+    fn weak_self_ring_collected() {
+        let src = r#"
+            class Node {
+                var next: Weak<Node> = nil;
+            }
+            pub func main(): unit {
+                var base = sloth_rc_live();
+                var i = 0;
+                while i < 2000 {
+                    var a = Node();
+                    var b = Node();
+                    a.next = b;
+                    b.next = a;      // weak fields reject the ring
+                    i = i + 1;
+                }
+                print(sloth_rc_live() == base);   // ring fully collected
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// dead targets upgrade to nil; weak payloads for boxed values ride int?
+    #[test]
+    fn weak_dead_upgrade_and_boxed_payload() {
+        let src = r#"
+            func dead_check(): int {
+                var w: Weak<int> = nil;
+                {
+                    var n: int? = 0;
+                    w = n;
+                }
+                var s = w.upgrade();
+                if s is not nil {
+                    print(s);       // 0 (boxed payload still alive? no: died)
+                    return 0;
+                }
+                return 1;
+            }
+            func main(): unit {
+                var w: Weak<int> = 5;
+                var s = w.upgrade();    // int? box, payload 5
+                print(s is nil);         // false
+                if s is not nil {
+                    print(int(s));      // 5
+                }
+                print(dead_check());     // 1 (inner scope dropped the box)
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+}

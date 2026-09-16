@@ -97,6 +97,14 @@ impl ModEmitter {
                 if a.is_empty() && self.traits.contains_key(n) {
                     return self.r.mk(Ty::Dyn(n.to_string()));
                 }
+                // Weak<T> reference module (patch 43): the weakbox handle set
+                if n == "Weak" {
+                    if let Some(e0) = a.into_iter().next() {
+                        return self.r.mk(Ty::Weak(e0));
+                    }
+                    let u0 = self.r.mk(Ty::Unit);
+                    return self.r.mk(Ty::Weak(u0));
+                }
                 // generic class instance: C<A1,A2> -> monomorphic C_<A>_...
                 if !a.is_empty() {
                     if let Some((_, cdef)) = self.class_defs.get(n).cloned() {
@@ -183,6 +191,16 @@ impl ModEmitter {
     pub fn is_unit(&self, t: TyId) -> bool {
         matches!(self.r.get(t), Ty::Unit)
     }
+    /// Weak<T> face (patch 43): the weak box handle word set
+    pub(crate) fn weak_inner(&self, t: TyId) -> Option<TyId> {
+        match self.r.get(t).clone() {
+            Ty::Weak(e) => Some(e),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_weak(&self, t: TyId) -> bool {
+        self.weak_inner(t).is_some()
+    }
     /// value-optional box face (patch 42): Some((inner,
     /// inner_is_float)) for the boxed `int? / float? / bool?` surfaces;
     /// reference optionals (str?/class?) stay word-view handle-or-0
@@ -202,7 +220,13 @@ impl ModEmitter {
     pub fn is_ref(&self, t: TyId) -> bool {
         matches!(
             self.r.get(t),
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) | Ty::Named(_, _) | Ty::Dyn(_)
+            Ty::Str
+                | Ty::Array(_)
+                | Ty::Map(..)
+                | Ty::Fn(_)
+                | Ty::Named(_, _)
+                | Ty::Dyn(_)
+                | Ty::Weak(_)
         ) || self.opt_inner(t).is_some()
     }
 }
@@ -362,7 +386,8 @@ impl ModEmitter {
     }
 
     /// caller-side coercion of args to Opt(值型) params (patch 42): bare
-    /// scalars box, opt/nil words pass through; other pairs unchanged
+    /// scalars box, opt/nil words pass through; other pairs unchanged;
+    /// Weak(值型)-typed params (patch 43) wrap their targets too
     pub(crate) fn coerce_args_to_params(
         &mut self,
         fw: &mut FnWalk,
@@ -372,14 +397,64 @@ impl ModEmitter {
         let n = argv.len().min(params.len());
         (0..argv.len())
             .map(|i| {
-                if i < n && self.opt_inner(params[i].1).is_some() {
-                    self.coerce_into_opt(fw, &argv[i].0, argv[i].1, params[i].1)
+                if i < n
+                    && (self.opt_inner(params[i].1).is_some()
+                        || self.weak_inner(params[i].1).is_some())
+                {
+                    self.coerce_word_to(fw, &argv[i].0, argv[i].1, params[i].1)
                         .0
                 } else {
                     argv[i].0.clone()
                 }
             })
             .collect()
+    }
+
+    /// bind a word into a declared surface (patch 42/43 entry): value
+    /// optionals box up, Weak targets wrap in a weak box, else as-is
+    pub(crate) fn coerce_word_to(
+        &mut self,
+        fw: &mut FnWalk,
+        v: &str,
+        from: TyId,
+        to: TyId,
+    ) -> (String, TyId) {
+        if self.opt_inner(to).is_some() {
+            return self.coerce_into_opt(fw, v, from, to);
+        }
+        if self.weak_inner(to).is_some() {
+            return self.coerce_into_weak(fw, v, from, to);
+        }
+        (v.to_string(), from)
+    }
+
+    /// wrap a produced word into a Weak<T> surface (patch 43): a weakbox
+    /// (rc-tracked, malloc'd) holding the (possibly boxed) target; nil
+    /// passes through as word 0; already-weak words ride along
+    pub(crate) fn coerce_into_weak(
+        &mut self,
+        fw: &mut FnWalk,
+        v: &str,
+        from: TyId,
+        to: TyId,
+    ) -> (String, TyId) {
+        let inner = match self.weak_inner(to) {
+            Some(e) => e,
+            None => return (v.to_string(), from),
+        };
+        let froms = self.r.get(from).clone();
+        if matches!(froms, Ty::Unit) || froms == Ty::Weak(inner) {
+            return (v.to_string(), to);
+        }
+        let check = self.r.mk(Ty::Opt(inner));
+        let (targ, _tt) = self.coerce_word_to(fw, v, from, check);
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_weak_new({}) : (i64) -> i64",
+            r, targ
+        ));
+        self.dangling_producer(fw, &r, to);
+        (r, to)
     }
 }
 
@@ -394,6 +469,9 @@ impl ModEmitter {
         match (a, b) {
             (_, Ty::Unit) => true,
             (Ty::Opt(..), _) => true,
+            // value-optional (boxed) and Weak surfaces are coercible store
+            // faces (patch 42/43): wrap at bind time
+            (Ty::Weak(..), _) => true,
             (Ty::Dyn(_), Ty::Named(..)) => true,
             (Ty::Array(x), Ty::Array(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
@@ -470,8 +548,8 @@ impl ModEmitter {
         // i64 store path below releases the old and retains the new owner
         let mut v = v.to_string();
         let mut vty = vty;
-        if self.opt_inner(dt).is_some() {
-            let (vc, vtc) = self.coerce_into_opt(fw, &v, vty, dt);
+        if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
             vty = vtc;
         }
