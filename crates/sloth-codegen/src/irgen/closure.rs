@@ -42,39 +42,14 @@ impl ModEmitter {
     /// wrap `{ tagged fnptr, env }` into a fresh closure object; the box owns
     /// its own count on a ref-typed env
     pub(crate) fn emit_closure_box(&mut self, fw: &mut FnWalk, fnptr: &str, env: &str) -> String {
-        let z = fw.v();
-        fw.op(&format!("    {} = arith.constant 0 : i64", z));
-        let nf = fw.v();
-        fw.op(&format!(
-            "    {} = arith.constant {} : i64",
-            nf,
-            enc_i_lit(2)
-        ));
+        // dedicated ctor: field 0 is a tagged (non-rc) fn pointer, so the
+        // generic object cascade must not walk it (rt closure_dtor handles
+        // the env field only)
+        let rev = self.emit_retain(fw, env);
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
-            obj, z, nf
-        ));
-        let i0 = fw.v();
-        fw.op(&format!(
-            "    {} = arith.constant {} : i64",
-            i0,
-            enc_i_lit(0)
-        ));
-        fw.op(&format!(
-            "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-            obj, i0, fnptr
-        ));
-        let i1 = fw.v();
-        fw.op(&format!(
-            "    {} = arith.constant {} : i64",
-            i1,
-            enc_i_lit(1)
-        ));
-        let rev = self.emit_retain(fw, env);
-        fw.op(&format!(
-            "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
-            obj, i1, rev
+            "    {} = call @sloth_closure_new({}, {}) : (i64, i64) -> i64",
+            obj, fnptr, rev
         ));
         obj
     }
@@ -335,6 +310,10 @@ impl ModEmitter {
                 vals.join(", "),
                 tys.join(", ")
             ));
+            // §5.1.1 rule 5: the bridge returns the callee's owned +1
+            if self.is_ref(ret) {
+                fw.rc_mark_xfer(&r);
+            }
             (r, ret)
         }
     }

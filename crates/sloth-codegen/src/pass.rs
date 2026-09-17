@@ -3835,4 +3835,50 @@ mod irgen_regress {
             );
         }
     }
+
+    /// ARC ownership protocol (§5.1.1): ref-return temporaries, class
+    /// ref-field death cascades, `continue`-abandoned loop locals and the
+    /// iterator protocol all settle without crashing or corrupting the heap
+    /// (spec 94 asserts the exact rc baseline convergence)
+    #[test]
+    fn arc_ownership_settles_ref_paths() {
+        let src = r#"
+            class Box { var v: int; func __init__(v: int) { this.v = v; } }
+            class Holder {
+                var a: Array<int>;
+                var s: str;
+                func __init__() { this.a = mkarr(); this.s = "held"; }
+            }
+            func mkarr(): Array<int> { return [1, 2, 3]; }
+            class Counter {
+                var n: int = 0;
+                var limit: int = 0;
+                func __init__(l: int) { this.limit = l; }
+                func iter(): Counter { return this; }
+                func next(): int? {
+                    if this.n >= this.limit { return nil; }
+                    this.n = this.n + 1;
+                    return this.n;
+                }
+            }
+            func main(): unit {
+                var acc = 0;
+                var i = 0;
+                while i < 500 {
+                    acc = acc + mkarr().len() + Box(i).v;
+                    let h = Holder();
+                    acc = acc + h.a.len() + h.s.len();
+                    let s = "abc";
+                    let a = [i, i + 1];
+                    if i % 2 == 0 { acc = acc + s.len(); i = i + 1; continue; }
+                    acc = acc + a.len();
+                    let c = Counter(8);
+                    for x in c { acc = acc + x; }
+                    i = i + 1;
+                }
+                print(acc > 0);   // expect: true
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
 }

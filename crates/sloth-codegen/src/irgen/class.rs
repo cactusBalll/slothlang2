@@ -242,9 +242,11 @@ impl ModEmitter {
         let lbl_def = fw.newlabel("cv");
         let lbl_end = fw.newlabel("cv");
         let labels: Vec<String> = branches.iter().map(|_| fw.newlabel("cv")).collect();
-        // class-id switch splits the CFG mid-expression: preserve producers
-        // of the enclosing expression across the merge
+        // class-id switch splits the CFG mid-expression: preserve owned temps
+        // (producers + transferred call results) of the enclosing expression
+        // across the merge
         let saved_dangling = std::mem::take(&mut fw.dangling);
+        let saved_xfer = std::mem::take(&mut fw.xfer);
         for (i, (cname, _, _)) in branches.iter().enumerate() {
             let idw = fw.v();
             let cidn = *self.class_ids.get(cname).unwrap_or(&0);
@@ -298,6 +300,7 @@ impl ModEmitter {
         }
         fw.label(&lbl_end);
         fw.dangling = saved_dangling;
+        fw.xfer = saved_xfer;
         if let Some(slot) = resslot {
             let zi = fw.v();
             let v = fw.v();
@@ -306,6 +309,10 @@ impl ModEmitter {
                 "    {} = memref.load {}[{}] : memref<1xi64>",
                 v, slot, zi
             ));
+            // §5.1.1 rule 5: the merged dispatch result is an owned temp
+            if self.is_ref(ret) {
+                fw.rc_mark_xfer(&v);
+            }
             return Some((v, ret));
         }
         let z = fw.v();
@@ -393,7 +400,9 @@ impl ModEmitter {
         _sigargs: &Vec<String>,
         pos: &Pos,
     ) -> (String, TyId) {
-        let nf = words_for_cls(self, clsname);
+        // sloth_obj_new takes the FIELD count (it adds the two metadata
+        // words itself for the allocation); words_for_cls includes them
+        let nf = words_for_cls(self, clsname) - 2;
         if !self.classes.contains_key(clsname) {
             self.err(pos, format!("unknown class `{}`", clsname));
             return (String::new(), self.r.mk(Ty::Unit));
@@ -923,12 +932,13 @@ impl ModEmitter {
         let lbl_call = fw.newlabel("dc");
         let lbl_panic = fw.newlabel("dp");
         let lbl_end = fw.newlabel("de");
-        // A vtable call splits the CFG mid-expression: producers from the
+        // A vtable call splits the CFG mid-expression: owned temps from the
         // ENCLOSING expression dominate the merge and must survive the
         // branch (releasing them at `cjump` would free live operands, e.g.
-        // the lhs of `"x" + obj.name()`). Producers created inside the
-        // branches do not exist, so none are dropped.
+        // the lhs of `"x" + obj.name()`). Temps created inside the branches
+        // are re-registered on the merged load below.
         let saved_dangling = std::mem::take(&mut fw.dangling);
+        let saved_xfer = std::mem::take(&mut fw.xfer);
         fw.cjump(&ce, &lbl_call, &lbl_panic);
         // resolved: call through the slot pointer
         fw.label(&lbl_call);
@@ -993,8 +1003,9 @@ impl ModEmitter {
         }
         fw.jump(&lbl_end);
         fw.label(&lbl_end);
-        // enclosing-expression producers resume ownership at the merge
+        // enclosing-expression owned temps resume ownership at the merge
         fw.dangling = saved_dangling;
+        fw.xfer = saved_xfer;
         if let Some((slot2, fl)) = resslot {
             let zi = fw.v();
             let v = fw.v();
@@ -1009,6 +1020,10 @@ impl ModEmitter {
             } else {
                 self.ty_of(&ms.ret)
             };
+            // §5.1.1 rule 5: dyn dispatch result is an owned temp
+            if self.is_ref(tret) {
+                fw.rc_mark_xfer(&v);
+            }
             return (v, tret);
         }
         let z = fw.v();

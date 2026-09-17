@@ -27,6 +27,10 @@ pub(crate) struct FnWalk {
     pub(crate) dangling: Vec<String>,
     /// loop label stack for break/continue: (break_target, continue_target)
     pub(crate) loops: Vec<(String, String)>,
+    /// parallel to `loops`: scope_decls depth at loop-body entry. break/continue
+    /// release the ref locals declared in the body scopes being abandoned
+    /// (their pop_scope is skipped because the block is terminated)
+    pub(crate) loop_bases: Vec<usize>,
     /// rc patch C: loop-var names currently borrowed (for-in slots hold
     /// borrows of container elements; overwriting them must NOT release the
     /// element the slot does not own)
@@ -72,13 +76,17 @@ impl FnWalk {
         }
         self.term = true;
     }
-    /// conditional jump; pending statement-dangling temps are flushed HERE
-    /// (into the current block only: releasing a producer def that only
-    /// exists on one side from the merge point would be invalid SSA)
+    /// conditional jump; pending owned temps (producers + transferred call
+    /// results) are flushed HERE. Mid-expression CFG splits must save/clear
+    /// `dangling`/`xfer` around their branch so enclosing operands survive.
     pub(crate) fn cjump(&mut self, c: &str, t: &str, f: &str) {
         let c1 = self.v();
         let pending = std::mem::take(&mut self.dangling);
         for h in pending {
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+        }
+        let pending_x = std::mem::take(&mut self.xfer);
+        for h in pending_x {
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
         }
         // tag migration: `c` is an encoded bool word (false=0, true=enc(1)=2);
@@ -90,19 +98,27 @@ impl FnWalk {
         self.op(&format!("    cf.cond_br {}, {}, {}", c1, t, f));
         self.term = true;
     }
-    /// statement-close for dangling producer temps (patch B): release the
-    /// producer's +1 for temps that were not stored anywhere
+    /// statement-close for owned temps: release the +1 of (a) fresh producers
+    /// that were not stored anywhere and (b) transferred call results that no
+    /// owner (slot/field/container/return) claimed (§5.1.1 rule 7)
     pub(crate) fn rc_flush(&mut self) {
         let pending = std::mem::take(&mut self.dangling);
         for h in pending {
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
         }
+        let pending_x = std::mem::take(&mut self.xfer);
+        for h in pending_x {
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+        }
     }
     /// consume a dangling producer whose ownership TRANSFERS out of the
     /// statement (return face): cancel its pending flush release so the
-    /// +1 travels to the result instead of freeing a value still in use
-    pub(crate) fn rc_consume(&mut self, h: &str) {
+    /// +1 travels to the result instead of freeing a value still in use.
+    /// Returns true when the word held a pending producer +1.
+    pub(crate) fn rc_consume(&mut self, h: &str) -> bool {
+        let had = self.dangling.iter().any(|x| x == h);
         self.dangling.retain(|x| x != h);
+        had
     }
     /// mark a transferred returned word (patch 42): the +1 already rides in
     /// it; the receiver must not retain it again
@@ -121,6 +137,57 @@ impl FnWalk {
             false
         }
     }
+    /// release the owned locals of the loop-body scopes about to be abandoned
+    /// by a `break`/`continue` (their block pop_scope is skipped once the
+    /// terminator is emitted). Scopes from the loop-body base upward are
+    /// settled; the loop's own scope is left to the loop teardown.
+    pub(crate) fn rc_release_loop_body(&mut self) {
+        let base = match self.loop_bases.last() {
+            Some(b) => *b,
+            None => return,
+        };
+        if base >= self.scope_decls.len() {
+            return;
+        }
+        let slots: Vec<String> = self.scope_decls[base..]
+            .iter()
+            .flat_map(|d| d.values().cloned())
+            .collect();
+        for a in slots {
+            let z = self.v();
+            self.op(&format!("    {} = arith.constant 0 : index", z));
+            let w = self.v();
+            self.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                w, a, z
+            ));
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+        }
+    }
+
+    /// release every owned local still in scope. A function return abandons
+    /// its frame: the normal scope-exit path is skipped (the block is
+    /// terminated), so the return face settles the owned slots here instead.
+    /// The returned word is retained/transferred before this runs, so
+    /// releasing its source slot (if any) never frees the result.
+    pub(crate) fn rc_release_scope_slots(&mut self) {
+        let slots: Vec<String> = self
+            .scope_decls
+            .iter()
+            .flat_map(|d| d.values().cloned())
+            .collect();
+        for a in slots {
+            let z = self.v();
+            self.op(&format!("    {} = arith.constant 0 : index", z));
+            let w = self.v();
+            self.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                w, a, z
+            ));
+            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+        }
+    }
+
     /// start a new labelled block
     pub(crate) fn label(&mut self, name: &str) {
         self.op(&format!("  {}:", name));
@@ -304,6 +371,7 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         scope_decls: vec![HashMap::new()],
         dangling: Vec::new(),
         loops: Vec::new(),
+        loop_bases: Vec::new(),
         ret: me.r.mk(Ty::Unit),
         ret_alloca: String::new(),
         ret_flag: String::new(),

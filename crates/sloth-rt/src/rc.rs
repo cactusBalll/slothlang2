@@ -192,6 +192,13 @@ pub(crate) unsafe fn hdr_of(payload: usize) -> *mut Hdr {
     (payload - HDR_BYTES) as *mut Hdr
 }
 
+/// record a payload's auxiliary header word (object field count for the
+/// death cascade; 0 for kinds that do not use it)
+#[inline]
+pub(crate) unsafe fn set_aux(payload: usize, aux: u64) {
+    (*hdr_of(payload)).aux = aux;
+}
+
 /// retain: bump the count of a tracked handle (no-op for value words)
 #[no_mangle]
 pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {

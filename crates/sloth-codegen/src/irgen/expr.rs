@@ -712,6 +712,7 @@ impl ModEmitter {
                     let lbl_ok = fw.newlabel("dz");
                     let lbl_end = fw.newlabel("dz");
                     let saved_dangling = std::mem::take(&mut fw.dangling);
+                    let saved_xfer = std::mem::take(&mut fw.xfer);
                     fw.cjump(&isze, &lbl_panic, &lbl_ok);
                     fw.label(&lbl_panic);
                     fw.op("    call @sloth_panic_divzero() : () -> i64");
@@ -734,6 +735,7 @@ impl ModEmitter {
                     fw.jump(&lbl_end);
                     fw.label(&lbl_end);
                     fw.dangling = saved_dangling;
+                    fw.xfer = saved_xfer;
                     let lz = fw.v();
                     let rw = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : index", lz));
@@ -889,6 +891,7 @@ impl ModEmitter {
         let lbl_rhs = fw.newlabel("sc");
         let lbl_end = fw.newlabel("sc");
         let saved_dangling = std::mem::take(&mut fw.dangling);
+        let saved_xfer = std::mem::take(&mut fw.xfer);
         match op {
             // and: a true -> evaluate rhs; a false -> keep a
             BinOp::And => fw.cjump(&nze, &lbl_rhs, &lbl_end),
@@ -913,6 +916,7 @@ impl ModEmitter {
         fw.jump(&lbl_end);
         fw.label(&lbl_end);
         fw.dangling = saved_dangling;
+        fw.xfer = saved_xfer;
         let lz = fw.v();
         let rv = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : index", lz));
@@ -2011,8 +2015,10 @@ impl ModEmitter {
             let sigargs_c: Vec<String> = argv.iter().map(|x| mlir_word_ty(x.1, &self.r)).collect();
             let sigargs = sigargs_c;
             let r = fw.v();
-            // patch 42: ref-shaped returns transfer their +1 across the edge
-            let xfer_expect = self.is_ref(plan.ret);
+            // §5.1.1 rule 5: ref-shaped sloth returns transfer their +1 across
+            // the edge. Extern C functions follow C ownership: their word is
+            // not rc-tracked, so the caller neither owns nor releases it.
+            let xfer_expect = self.is_ref(plan.ret) && !fd.is_extern;
             // extern funcs resolve under their raw C-ABI symbol
             let sym = if fd.is_extern {
                 name.clone()

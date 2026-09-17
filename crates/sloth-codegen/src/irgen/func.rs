@@ -62,6 +62,7 @@ impl ModEmitter {
             scope_decls: vec![HashMap::new()],
             dangling: Vec::new(),
             loops: Vec::new(),
+            loop_bases: Vec::new(),
             loopvars: Vec::new(),
             xfer: Vec::new(),
             ret: plan.ret,

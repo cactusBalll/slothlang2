@@ -403,6 +403,7 @@ impl ModEmitter {
                 scope_decls: vec![HashMap::new()],
                 dangling: Vec::new(),
                 loops: Vec::new(),
+                loop_bases: Vec::new(),
                 loopvars: Vec::new(),
                 xfer: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
@@ -531,6 +532,7 @@ impl ModEmitter {
 pub fn obj_rt_decls() -> String {
     let mut s = String::new();
     s.push_str("  func.func private @sloth_obj_new(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_closure_new(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_field(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");

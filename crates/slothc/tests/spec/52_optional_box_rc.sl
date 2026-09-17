@@ -1,6 +1,7 @@
 // spec: value-optional box churn (patch 42, ARC D1) — transferred call
-// results keep exact counts: dead boxes return to the rc baseline, and only
-// the two still-owned results stay live at the end
+// results keep exact counts: dead boxes return to the rc baseline, and the
+// function-local box is settled on return (§5.1.1 rule 4/scope teardown), so
+// the live count converges exactly back to the baseline
 // (sloth_rc_live/sloth_rc_drops are predeclared by the SLOTH_STATS surface)
 func one(v: int): int? {
     return v;
@@ -21,9 +22,9 @@ pub func main(): unit {
     var base = sloth_rc_live();
     let r = churn(5000);
     print(r);                              // expect: 4999
-    print(sloth_rc_live() == base + 1);    // expect: true
+    print(sloth_rc_live() == base);        // expect: true
     let d0 = sloth_rc_drops();
     let r2 = churn(2000);
     print(sloth_rc_drops() > d0);          // expect: true
-    print(sloth_rc_live() == base + 2);    // expect: true
+    print(sloth_rc_live() == base);        // expect: true
 }

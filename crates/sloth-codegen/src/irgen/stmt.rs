@@ -889,6 +889,22 @@ impl ModEmitter {
             }
         }
         let fl = self.is_float(t);
+        // §5.1.1 rule 4: a ref-typed return ALWAYS hands the caller an owned
+        // (+1) word. A pending producer or transferred call result already
+        // carries the +1 (transfer it); a borrowed slot/field/param does not,
+        // so materialize a retained +1 here. Non-ref returns just drop
+        // producers. This must run before the store so the slot holds the
+        // owned word.
+        if !fl && self.is_ref(fw.ret) {
+            if !fw.rc_take_xfer(&v) && !fw.rc_consume(&v) {
+                v = self.emit_retain(fw, &v);
+            }
+        } else if !fl {
+            fw.rc_consume(&v);
+        }
+        // the frame is abandoned: settle owned locals the normal scope-exit
+        // path would have released
+        fw.rc_release_scope_slots();
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
         fw.op(&format!(
@@ -901,18 +917,6 @@ impl ModEmitter {
             "    memref.store {}, {}[{}] : memref<1xi64>",
             st, fw.ret_flag, zi
         ));
-        // rc patch B: release unused producers BEFORE the return jump (a
-        // flushed word after the terminator would break the block shape);
-        // a producer in the RETURNED slot transfers its +1 to the caller
-        // instead (consume, otherwise the callee frees the live result)
-        if !fl {
-            fw.rc_consume(&v);
-            // patch 42: ref-shaped returns transfer their +1 across the
-            // call edge — receivers bind it raw (no second retain)
-            if self.is_ref(fw.ret) {
-                fw.rc_mark_xfer(&v);
-            }
-        }
         fw.rc_flush();
         self.jump_to_ret(fw);
     }
@@ -1146,9 +1150,11 @@ impl ModEmitter {
         }
         fw.cjump(&c, &doo, &done);
         fw.label(&doo);
+        fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((done.clone(), head.clone()));
         self.walk_body(fw, body);
         fw.loops.pop();
+        fw.loop_bases.pop();
         fw.jump(&head);
         fw.label(&done);
     }
@@ -1285,6 +1291,7 @@ impl ModEmitter {
         fw.label(&doo);
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("fc");
+        fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((done.clone(), cont.clone()));
         // bind loop var
         let vs = fw.v();
@@ -1301,6 +1308,7 @@ impl ModEmitter {
         self.walk_body(fw, body);
         fw.loopvars.pop();
         fw.loops.pop();
+        fw.loop_bases.pop();
         fw.label_br(&cont);
         // idx += 1 (encoded word: the loop var holds a tagged int)
         let one2 = fw.v();
@@ -1386,6 +1394,7 @@ impl ModEmitter {
         fw.label(&doo);
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("mc");
+        fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((done.clone(), cont.clone()));
         // key word: keys array (word route covers int/str/Hashable keys)
         let kw = fw.v();
@@ -1441,6 +1450,10 @@ impl ModEmitter {
         };
         // build the Entry record: plain object + fields (no user ctor)
         let (obj, _ot) = self.emit_new_obj(fw, &ename, &Vec::new(), &Vec::new(), &pos);
+        // the per-iteration Entry is a fresh producer owned by the loop var
+        // (a borrow view): cancel its statement-dangling slot and release it
+        // at the iteration continuation below
+        fw.rc_consume(&obj);
         let ki = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
@@ -1470,7 +1483,11 @@ impl ModEmitter {
         self.walk_body(fw, body);
         fw.loopvars.pop();
         fw.loops.pop();
+        fw.loop_bases.pop();
         fw.label_br(&cont);
+        // the Entry built above is owned by the loop var; drop its +1 at the
+        // end of each iteration (fallthrough + continue)
+        self.emit_release(fw, &obj);
         // counter is an encoded word: +1 == +enc(1)
         let one2 = fw.v();
         fw.op(&format!(
@@ -1543,6 +1560,7 @@ impl ModEmitter {
         fw.label(&doo);
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("ic");
+        fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((done.clone(), cont.clone()));
         // loop var = seq[i]
         let gtv = fw.v();
@@ -1568,7 +1586,14 @@ impl ModEmitter {
             .insert(var.to_string(), (vs, gety));
         self.walk_body(fw, body);
         fw.loops.pop();
+        fw.loop_bases.pop();
         fw.label_br(&cont);
+        // str iteration produces a fresh pooled char per element (§5.1.1
+        // rule 7): the loop var holds a borrow view, so the producer's +1 is
+        // released at the end of each iteration (fallthrough + continue)
+        if kind == IdxKind::StrChar {
+            self.emit_release(fw, &gtv);
+        }
         // idx += 1 (encoded word)
         let one2 = fw.v();
         fw.op(&format!(
@@ -1669,9 +1694,21 @@ impl ModEmitter {
             "    memref.store {}, {}[{}] : memref<1xi64>",
             itv, islot, z
         ));
+        // §5.1.1 rule 5/8: the iterator obtained from `iter()` is an owned
+        // temp (a borrowed iterator has no +1 and is left alone). Take its
+        // transfer mark before the loop so the in-loop cjump does not free it,
+        // and hand the slot to the scope so every loop exit releases it once.
+        let it_owned = fw.rc_take_xfer(&itv);
         fw.push_scope();
+        if it_owned {
+            fw.scope_decls
+                .last_mut()
+                .unwrap()
+                .insert("__iter".to_string(), islot.clone());
+        }
         let head = fw.newlabel("if");
         let doo = fw.newlabel("ib");
+        let cont = fw.newlabel("ic");
         let done = fw.newlabel("ie");
         fw.jump(&head);
         fw.label(&head);
@@ -1690,6 +1727,9 @@ impl ModEmitter {
             &vec!["i64".to_string()],
             &pos,
         );
+        // `next()` is an owned temp: take it before the nil-test cjump so the
+        // current element survives until the end of the iteration
+        let ov_owned = fw.rc_take_xfer(&ov);
         let nc = fw.v();
         let znil = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", znil));
@@ -1701,7 +1741,8 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.extui {} : i1 to i64", nc1, nc));
         fw.cjump(&nc1, &done, &doo);
         fw.label(&doo);
-        fw.loops.push((done.clone(), head.clone()));
+        fw.loop_bases.push(fw.scope_decls.len());
+        fw.loops.push((done.clone(), cont.clone()));
         // loop var = unwrap(next())
         let vs = fw.v();
         if el_boxed {
@@ -1712,8 +1753,8 @@ impl ModEmitter {
                 "    memref.store {}, {}[{}] : memref<1xi64>",
                 u, vs, z
             ));
-            // non-ref payloads (scalars/box-less) still drop the consumed box
-            if !self.is_ref(el) {
+            // the consumed box is an owned temp; drop its +1 now
+            if ov_owned {
                 self.emit_release(fw, &ov);
             }
         } else {
@@ -1730,6 +1771,13 @@ impl ModEmitter {
             .insert(var.to_string(), (vs, el));
         self.walk_body(fw, body);
         fw.loops.pop();
+        fw.loop_bases.pop();
+        // iteration continuation: reached by fallthrough and by `continue`;
+        // a ref-shaped element that stayed a borrow view is dropped here
+        fw.label_br(&cont);
+        if !el_boxed && ov_owned {
+            self.emit_release(fw, &ov);
+        }
         fw.jump(&head);
         fw.label(&done);
         fw.pop_scope();
@@ -1741,6 +1789,8 @@ impl ModEmitter {
         match fw.loops.last() {
             Some((b, _c)) => {
                 let t = b.clone();
+                // settle the loop-body locals this jump abandons
+                fw.rc_release_loop_body();
                 fw.jump(&t);
             }
             None => {
@@ -1755,6 +1805,8 @@ impl ModEmitter {
         match fw.loops.last() {
             Some((_b, c)) => {
                 let t = c.clone();
+                // settle the loop-body locals this jump abandons
+                fw.rc_release_loop_body();
                 fw.jump(&t);
             }
             None => {

@@ -39,31 +39,61 @@ pub extern "C" fn sloth_cls_refmask(_info_w: i64, _mask: i64, _n: i64) -> i64 {
     0
 }
 
+/// allocate an instance with `n_fields_w` = number of FIELD words (the two
+/// leading metadata words are added here). The field count is recorded in the
+/// header `aux` so the death cascade knows how many words to walk — this also
+/// covers info-less boxes (closure/lambda frames), whose word 0 is null.
 #[no_mangle]
 pub extern "C" fn sloth_obj_new(info_w: i64, n_fields_w: i64) -> i64 {
     unsafe {
-        let n_words = crate::rc::dec_i(n_fields_w).max(0) + 2;
+        let n_fields = crate::rc::dec_i(n_fields_w).max(0);
         let info = if w_is_ref(info_w) {
             w_unref(info_w) as usize
         } else {
             0
         };
-        let o = rc_addr(n_words as usize * 8, Some(obj_dtor)) as *mut i64;
+        let o = rc_addr((n_fields as usize + 2) * 8, Some(obj_dtor)) as *mut i64;
+        crate::rc::set_aux(o as usize, n_fields as u64);
         *o = info as i64;
         // word 1 (vtable) is set separately; fields start zeroed (nil)
         w_ref(o as usize)
     }
 }
 
-/// death cascade: release every tagged field word of the dying instance
-fn obj_dtor(p: usize, _aux: u64) {
+/// allocate a closure box `{ tagged fnptr, env }`. Field 0 is a *tagged*
+/// function pointer (bit 0 set to mark it), which the generic tag-driven
+/// cascade would mistake for an rc handle — so closure boxes get a dedicated
+/// dtor that releases only the environment field.
+#[no_mangle]
+pub extern "C" fn sloth_closure_new(fnptr_w: i64, env_w: i64) -> i64 {
+    unsafe {
+        let o = rc_addr((2 + 2) * 8, Some(closure_dtor)) as *mut i64;
+        *o = 0;
+        *o.offset(1) = 0;
+        *o.offset(OBJ_FIELD_OFFSET) = fnptr_w;
+        *o.offset(OBJ_FIELD_OFFSET + 1) = env_w;
+        w_ref(o as usize)
+    }
+}
+
+/// closure death: release the environment (field 1) only
+fn closure_dtor(p: usize, _aux: u64) {
     unsafe {
         let o = p as *mut i64;
-        let info = *o as *mut ObjInfo;
-        if info.is_null() {
-            return;
+        let env = *o.offset(OBJ_FIELD_OFFSET + 1);
+        if env != 0 && w_is_ref(env) {
+            crate::rc::sloth_rc_release(env);
         }
-        let nf = (*info).n_fields;
+    }
+}
+
+/// death cascade: release every tagged field word of the dying instance. The
+/// field count rides the header `aux` (tag-gated releases keep value words
+/// inert), so the cascade is mask-free and info-less boxes work too.
+fn obj_dtor(p: usize, aux: u64) {
+    unsafe {
+        let o = p as *mut i64;
+        let nf = aux as i64;
         let mut i = 0i64;
         while i < nf {
             let w = *o.offset(i as isize + OBJ_FIELD_OFFSET);
