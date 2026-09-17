@@ -1260,6 +1260,27 @@ impl ModEmitter {
                         }
                     }
                 }
+                // declared store face (`var a: Array<Weak<T>> = [t]` or
+                // `Array<int?> = [1, 2]`) coerces each element; without the
+                // Weak wrap a strong handle would sit in a Weak slot and
+                // upgrade() would misread it as a box
+                let hint_el = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                    Some(Ty::Array(e)) => Some(e),
+                    _ => None,
+                };
+                if !anyf {
+                    if let Some(he) = hint_el {
+                        if self.weak_inner(he).is_some() || self.opt_inner(he).is_some() {
+                            for i in 0..evs.len() {
+                                if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
+                                    let (c2, t2) = self.coerce_word_to(fw, &evs[i], ets[i], he);
+                                    evs[i] = c2;
+                                    ets[i] = t2;
+                                }
+                            }
+                        }
+                    }
+                }
                 let n = fw.v();
                 fw.op(&format!(
                     "    {} = arith.constant {} : i64",
@@ -1305,10 +1326,6 @@ impl ModEmitter {
                         arr, zi, vv
                     ));
                 }
-                let hint_el = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
-                    Some(Ty::Array(e)) => Some(e),
-                    _ => None,
-                };
                 let ty = if ets.is_empty() {
                     // empty literal: adopt the expected element type from the
                     // surrounding annotation (`var a: Array<float> = []`)
@@ -1418,6 +1435,25 @@ impl ModEmitter {
                         if !self.is_float(x.1) {
                             x.0 = iw_to_f64_word(fw, &x.0);
                             x.1 = self.r.mk(Ty::F64);
+                        }
+                    }
+                }
+                // declared value store face (`Map<str, Weak<T>> = @(...)`)
+                // coerces bare values the same way the list literal route does
+                let hint_v = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                    Some(Ty::Map(_k, v)) => Some(v),
+                    _ => None,
+                };
+                if !anyf {
+                    if let Some(hv) = hint_v {
+                        if self.weak_inner(hv).is_some() || self.opt_inner(hv).is_some() {
+                            for x in vevs.iter_mut() {
+                                if self.r.get(x.1).clone() != self.r.get(hv).clone() {
+                                    let (c2, t2) = self.coerce_word_to(fw, &x.0, x.1, hv);
+                                    x.0 = c2;
+                                    x.1 = t2;
+                                }
+                            }
                         }
                     }
                 }
@@ -1858,6 +1894,14 @@ impl ModEmitter {
                             // design §2.1: no implicit int -> float on push
                             self.err_diff(pos, "push element", "float", "int");
                             v = iw_to_f64_word(fw, &v);
+                        }
+                        // store-face coercion: an Opt/Weak element slot boxes a
+                        // bare produced value (matches the `a[i] = v` route);
+                        // without this a strong handle lands in a Weak slot and
+                        // the container's death cascade misreads it as a box
+                        if self.opt_inner(elid).is_some() || self.weak_inner(elid).is_some() {
+                            let (vc, _tc) = self.coerce_word_to(fw, &v, at, elid);
+                            v = vc;
                         }
                         let callv = fw.v();
                         // rc patch C: the array slot owns ref-typed
@@ -2337,7 +2381,10 @@ impl ModEmitter {
                     "    {} = call @sloth_map_values({}) : (i64) -> i64",
                     r, v
                 ));
-                (r, self.r.mk(Ty::Array(vt)))
+                let at = self.r.mk(Ty::Array(vt));
+                // rc patch B: fresh values array (producer) — mirrors keys()
+                self.dangling_producer(fw, &r, at);
+                (r, at)
             }
             _ => {
                 self.err(pos, format!("call to unknown `{}`", name));

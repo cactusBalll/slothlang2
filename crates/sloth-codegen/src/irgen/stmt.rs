@@ -1200,28 +1200,52 @@ impl ModEmitter {
             _ => {
                 // array/map iteration: for x in arr|map { ... } with a slotted counter
                 let (mav, at) = self.emit_expr(fw, iter);
+                // the iterable may be an owned producer (array/map/str literal
+                // or a ref-returning call: `for x in mkarr()`). Detach it from
+                // the enclosing statement flush so the loop-head cjump does not
+                // free it mid-iteration; the loop owns and releases it at exit.
+                let consumed = fw.rc_consume(&mav);
+                let taken = fw.rc_take_xfer(&mav);
+                let iter_owned = consumed || taken;
                 let ats = self.r.get(at).clone();
                 match &ats {
                     Ty::Array(e) => {
-                        self.emit_index_loop(fw, var, body, mav, *e, IdxKind::Arr, pos);
+                        self.emit_index_loop(fw, var, body, mav, *e, IdxKind::Arr, pos, iter_owned);
                         return;
                     }
                     // map iteration: for-in yields Entry<K,V> records (§3.5)
                     Ty::Map(k, _v) => {
-                        self.emit_entry_loop(fw, var, body, mav.clone(), *k, *_v, pos);
+                        self.emit_entry_loop(fw, var, body, mav.clone(), *k, *_v, pos, iter_owned);
                         return;
                     }
                     // str iteration: per-char 1-byte strings
                     Ty::Str => {
                         {
                             let et = self.r.mk(Ty::Str);
-                            self.emit_index_loop(fw, var, body, mav, et, IdxKind::StrChar, pos);
+                            self.emit_index_loop(
+                                fw,
+                                var,
+                                body,
+                                mav,
+                                et,
+                                IdxKind::StrChar,
+                                pos,
+                                iter_owned,
+                            );
                         }
                         return;
                     }
                     // iterator protocol: iterator object (or iter())/next() -> Opt<el>
                     Ty::Named(_c, _) => {
-                        self.emit_proto_loop(fw, var, body, mav.clone(), at.clone(), pos);
+                        self.emit_proto_loop(
+                            fw,
+                            var,
+                            body,
+                            mav.clone(),
+                            at.clone(),
+                            pos,
+                            iter_owned,
+                        );
                         return;
                     }
                     // first-class range value: unbox {lo, hi} and run the loop
@@ -1237,6 +1261,9 @@ impl ModEmitter {
                             hi, mav
                         ));
                         self.emit_range_loop(fw, var, body, &lo, &hi);
+                        if iter_owned {
+                            self.emit_release(fw, &mav);
+                        }
                         return;
                     }
                     _ => {
@@ -1341,6 +1368,7 @@ impl ModEmitter {
         k: TyId,
         v2: TyId,
         pos: &Pos,
+        iter_owned: bool,
     ) {
         let is_str = self.is_str(k);
         let vf = self.is_float(v2);
@@ -1394,8 +1422,11 @@ impl ModEmitter {
         fw.label(&doo);
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("mc");
+        // break must still drop the current Entry (cont is skipped); route it
+        // through a cleanup block that reloads the entry slot
+        let brk = fw.newlabel("mx");
         fw.loop_bases.push(fw.scope_decls.len());
-        fw.loops.push((done.clone(), cont.clone()));
+        fw.loops.push((brk.clone(), cont.clone()));
         // key word: keys array (word route covers int/str/Hashable keys)
         let kw = fw.v();
         fw.op(&format!(
@@ -1477,7 +1508,7 @@ impl ModEmitter {
         fw.scopes
             .last_mut()
             .unwrap()
-            .insert(var.to_string(), (vs, et));
+            .insert(var.to_string(), (vs.clone(), et));
         // rc patch C: proto-for vars are borrows too
         fw.loopvars.push(var.to_string());
         self.walk_body(fw, body);
@@ -1502,7 +1533,23 @@ impl ModEmitter {
             nx, islot, z
         ));
         fw.jump(&head);
+        // break cleanup: drop the Entry the abandoned iteration still owns
+        fw.label(&brk);
+        let bv = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            bv, vs, z
+        ));
+        self.emit_release(fw, &bv);
+        fw.jump(&done);
         fw.label(&done);
+        // the keys snapshot array is a fresh producer owned by the loop
+        // (break lands here too, so it is released exactly once)
+        self.emit_release(fw, &ks);
+        // a producer iterable (`for (e: mkmap())`) is owned by the loop
+        if iter_owned {
+            self.emit_release(fw, &mav);
+        }
         fw.pop_scope();
     }
 }
@@ -1517,6 +1564,7 @@ impl ModEmitter {
         el: TyId,
         kind: IdxKind,
         _pos: &Pos,
+        iter_owned: bool,
     ) {
         let (countfn, getfn, getty) = match kind {
             // tag migration: one word route (float elements ride the word)
@@ -1560,8 +1608,11 @@ impl ModEmitter {
         fw.label(&doo);
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("ic");
+        // break must still settle the current element for string iteration
+        // (a pooled char is owned; array elements are borrows)
+        let brk = fw.newlabel("ix");
         fw.loop_bases.push(fw.scope_decls.len());
-        fw.loops.push((done.clone(), cont.clone()));
+        fw.loops.push((brk.clone(), cont.clone()));
         // loop var = seq[i]
         let gtv = fw.v();
         fw.op(&format!(
@@ -1583,7 +1634,7 @@ impl ModEmitter {
         fw.scopes
             .last_mut()
             .unwrap()
-            .insert(var.to_string(), (vs, gety));
+            .insert(var.to_string(), (vs.clone(), gety));
         self.walk_body(fw, body);
         fw.loops.pop();
         fw.loop_bases.pop();
@@ -1608,7 +1659,23 @@ impl ModEmitter {
             nx, islot, z
         ));
         fw.jump(&head);
+        // break cleanup: settle the abandoned iteration's owned char
+        fw.label(&brk);
+        if kind == IdxKind::StrChar {
+            let bv = fw.v();
+            fw.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                bv, vs, z
+            ));
+            self.emit_release(fw, &bv);
+        }
+        fw.jump(&done);
         fw.label(&done);
+        // a producer iterable (`for x in mkarr()` / `for c in mkstr()`) is
+        // owned by the loop and released once at exit
+        if iter_owned {
+            self.emit_release(fw, &arr);
+        }
         fw.pop_scope();
     }
 
@@ -1622,6 +1689,7 @@ impl ModEmitter {
         recv: String,
         recvty: TyId,
         pos: &Pos,
+        recv_owned: bool,
     ) {
         // normalize: value itself an iterator, or expose iter() first
         let cls = match self.r.get(recvty) {
@@ -1635,6 +1703,7 @@ impl ModEmitter {
             }
         };
         let (itv, itty);
+        let has_iter = self.find_method(&cls, "iter").is_some();
         if let Some((defcls, fd)) = self.find_method(&cls, "iter") {
             let (v, t) = self.emit_method_call(
                 fw,
@@ -1655,7 +1724,7 @@ impl ModEmitter {
                 return;
             }
         } else {
-            itv = recv;
+            itv = recv.clone();
             itty = recvty;
         }
         let icls = match self.r.get(itty) {
@@ -1698,7 +1767,11 @@ impl ModEmitter {
         // temp (a borrowed iterator has no +1 and is left alone). Take its
         // transfer mark before the loop so the in-loop cjump does not free it,
         // and hand the slot to the scope so every loop exit releases it once.
-        let it_owned = fw.rc_take_xfer(&itv);
+        // When the receiver itself was an owned producer (`for x in mk()`)
+        // and an iter() bridge produced a distinct owned iterator, the
+        // receiver keeps its own +1 and is released separately at loop exit.
+        let itv_xfer = fw.rc_take_xfer(&itv);
+        let it_owned = itv_xfer || (recv_owned && !has_iter);
         fw.push_scope();
         if it_owned {
             fw.scope_decls
@@ -1706,9 +1779,11 @@ impl ModEmitter {
                 .unwrap()
                 .insert("__iter".to_string(), islot.clone());
         }
+        let recv_release = recv_owned && has_iter;
         let head = fw.newlabel("if");
         let doo = fw.newlabel("ib");
         let cont = fw.newlabel("ic");
+        let brk = fw.newlabel("ix");
         let done = fw.newlabel("ie");
         fw.jump(&head);
         fw.label(&head);
@@ -1742,7 +1817,9 @@ impl ModEmitter {
         fw.cjump(&nc1, &done, &doo);
         fw.label(&doo);
         fw.loop_bases.push(fw.scope_decls.len());
-        fw.loops.push((done.clone(), cont.clone()));
+        // break must still drop the current non-boxed ref element (owned
+        // next() result); boxed payloads were already dropped above
+        fw.loops.push((brk.clone(), cont.clone()));
         // loop var = unwrap(next())
         let vs = fw.v();
         if el_boxed {
@@ -1768,7 +1845,7 @@ impl ModEmitter {
         fw.scopes
             .last_mut()
             .unwrap()
-            .insert(var.to_string(), (vs, el));
+            .insert(var.to_string(), (vs.clone(), el));
         self.walk_body(fw, body);
         fw.loops.pop();
         fw.loop_bases.pop();
@@ -1779,7 +1856,21 @@ impl ModEmitter {
             self.emit_release(fw, &ov);
         }
         fw.jump(&head);
+        // break cleanup: drop the owned element the abandoned iteration holds
+        fw.label(&brk);
+        if !el_boxed && ov_owned {
+            let bv = fw.v();
+            fw.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                bv, vs, z
+            ));
+            self.emit_release(fw, &bv);
+        }
+        fw.jump(&done);
         fw.label(&done);
+        if recv_release {
+            self.emit_release(fw, &recv);
+        }
         fw.pop_scope();
     }
 }
