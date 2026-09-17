@@ -144,12 +144,31 @@ impl ModEmitter {
                 None => self.r.mk(Ty::I64),
             })
             .collect();
+        // first-class value: wrap the capture frame behind a uniform-ABI
+        // bridge, yielding a 2-word closure object
+        let bkey = format!("lam:{}:{}", sym, ncap);
+        let bridge = self.fn_bridge(
+            &bkey,
+            &sym,
+            ncap,
+            l.params.len(),
+            crate::irgen::closure::BR_LAMBDA,
+            false,
+            self.is_unit(ret),
+        );
+        let fp = self.emit_fnptr_word(fw, &bridge);
+        let cbox = self.emit_closure_box(fw, &fp, &frame);
         let ft = self.r.mk(Ty::Fn(FnTy {
             params: pty,
             ret,
-            lam: Some(LamMeta { sym, caps }),
+            lam: Some(LamMeta {
+                sym: bridge,
+                caps: Vec::new(),
+            }),
         }));
-        (frame, ft)
+        // fresh box = producer temp (released at stmt close unless stored)
+        self.dangling_producer(fw, &cbox, ft);
+        (cbox, ft)
     }
 }
 

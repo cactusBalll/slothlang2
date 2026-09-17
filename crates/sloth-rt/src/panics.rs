@@ -37,6 +37,13 @@ pub extern "C" fn sloth_panic_unwrap() -> i64 {
     std::process::exit(1);
 }
 
+/// integer division/modulo by zero: unrecoverable (design §5.5)
+#[no_mangle]
+pub extern "C" fn sloth_panic_divzero() -> i64 {
+    eprintln!("sloth panic: integer division by zero");
+    std::process::exit(1);
+}
+
 /// runtime panic with a fixed message (patch #34: the single exit path)
 pub fn panic_msg(msg: &str) -> ! {
     eprintln!("sloth panic: {}", msg);

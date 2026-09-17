@@ -737,7 +737,7 @@ mod irgen_p3d {
     #[test]
     fn array_float_works() {
         let src = r#"
-            var f: Array<float> = [1, 2.5, 3];
+            var f: Array<float> = [1.0, 2.5, 3.0];
             f[0] = 0.5;
             print(f[0] + f[1]);
         "#;
@@ -830,7 +830,7 @@ mod irgen_p9 {
             print(a.pop());
             print(a.len());
             var f2: Array<float> = [1.5];
-            f2.push(2);
+            f2.push(2.0);
             print(f2[1]);
             print(f2 .len());
         "#;
@@ -1023,7 +1023,7 @@ mod irgen_p11 {
                 for (var x: xs) { s = s + x; }
                 return s;
             }
-            print(stats(1, 2.5, 3));
+            print(stats(1.0, 2.5, 3.0));
         "#;
         run_src(src, "main").unwrap();
     }
@@ -1242,8 +1242,8 @@ mod irgen_p15 {
     fn operator_overload_add() {
         let src = r#"
             class Vec2 {
-                var x: float = 0;
-                var y: float = 0;
+                var x: float = 0.0;
+                var y: float = 0.0;
                 func __init__(x: float, y: float): unit {
                     this.x = x;
                     this.y = y;
@@ -1254,8 +1254,8 @@ mod irgen_p15 {
                 }
             }
             func main(): unit {
-                var a = Vec2(1, 2);
-                var b = Vec2(3, 4);
+                var a = Vec2(1.0, 2.0);
+                var b = Vec2(3.0, 4.0);
                 var c = a + b;
                 print(c.x);
                 print(c.y);
@@ -2036,7 +2036,7 @@ mod irgen_p22 {
         let src = r#"
             func main(): unit {
                 var f = 0.0;
-                f = f + 5;
+                f = f + 5.0;
                 print(f);
             }
         "#;
@@ -2426,7 +2426,7 @@ mod irgen_p26 {
     fn entry_float_values() {
         let src = r#"
             func main(): unit {
-                let m = @(1: 2.5);
+                let m = @(1.0: 2.5);
                 for (var e: m) {
                     print(e.key + e.val);
                 }
@@ -3387,5 +3387,452 @@ mod irgen_p43 {
             }
         "#;
         run_src(src, "main").unwrap();
+    }
+}
+
+// ---------------- hidden-bug regression batch: globals, dispatch,
+// divide-by-zero, ranges, optionals, numeric promotion ----------------
+#[cfg(test)]
+mod irgen_regress {
+    use super::*;
+
+    /// module-level globals with a declared main(): initializers run and
+    /// function bodies can read/write the cells
+    #[test]
+    fn globals_init_and_write_work() {
+        let src = r#"
+            var g = 10;
+            var name = "world";
+            func bump(): unit { g = g + 1; }
+            func greet(): str { return "hi " + name; }
+            func main(): unit {
+                print(g);           // 10
+                bump();
+                bump();
+                print(g);           // 12
+                g = 100;
+                print(g);           // 100
+                name = "there";
+                print(greet());     // hi there
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// immutable top-level `let` rejects writes from a function body
+    #[test]
+    fn global_immutable_rejected() {
+        let src = r#"
+            let fixed = 7;
+            func clobber() { fixed = 8; }
+            func main(): unit { clobber(); }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("immutable global write accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("cannot assign to immutable"),
+            "unexpected: {}",
+            e
+        );
+    }
+
+    /// range literals bind to variables and flow through params/returns
+    #[test]
+    fn range_values_work() {
+        let src = r#"
+            func mk(a: int, b: int): range { return a..b; }
+            func sum(r: range): int {
+                var s = 0;
+                for x in r { s = s + x; }
+                return s;
+            }
+            func main(): unit {
+                var r = 0..5;
+                var s = 0;
+                for x in r { s = s + x; }
+                print(s);                 // 10
+                print(sum(mk(1, 4)));     // 6
+                print(sum(2..=4));        // 9
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// and/or short-circuit: the rhs of a guard must not run when the lhs
+    /// already decides (avoids out-of-bounds evaluation)
+    #[test]
+    fn logical_short_circuits() {
+        let src = r#"
+            var calls = 0;
+            func yes(): bool { calls = calls + 1; return true; }
+            func no(): bool { calls = calls + 1; return false; }
+            func main(): unit {
+                var a = [1, 2];
+                var i = 5;
+                if i < a.len() and a[i] == 2 { print(1); } else { print(2); }
+                calls = 0;
+                if no() and yes() { print(1); } else { print(2); }
+                print(calls);             // 1 (yes skipped)
+                if yes() or no() { print(3); } else { print(4); }
+                print(calls);             // 2 (no skipped)
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// str iteration is by Unicode scalar value, not by byte
+    #[test]
+    fn unicode_iteration_works() {
+        let src = r#"
+            func main(): unit {
+                var s = "aé中";
+                var n = 0;
+                for c in s { n = n + 1; }
+                print(n);                 // 3
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// empty Array/Map literals adopt the declared element surface
+    #[test]
+    fn empty_literal_context_types() {
+        let src = r#"
+            func main(): unit {
+                var a: Array<float> = [];
+                a.push(1.5);
+                print(a[0]);              // 1.5
+                var m: Map<str, int> = @();
+                m["a"] = 1;
+                print(m["a"]);            // 1
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// float keys are Hashable and ride the word route
+    #[test]
+    fn float_map_keys_work() {
+        let src = r#"
+            func main(): unit {
+                var m = @(1.5: 10, 2.5: 20);
+                print(m[1.5]);            // 10
+                var m2: Map<float, int> = @();
+                m2[0.25] = 4;
+                print(m2[0.25]);          // 4
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// else-branch of `if x is nil` narrows to the payload type
+    #[test]
+    fn else_branch_nil_narrowing() {
+        let src = r#"
+            class C { var n: int = 3; }
+            func p1(o: C?): int {
+                if o is nil { return 0 - 1; } else { return o.n; }
+            }
+            func main(): unit {
+                print(p1(C()));           // 3
+                print(p1(nil));           // -1
+                var n: int? = 5;
+                if n is nil { print(0); } else { print(n + 1); }  // 6
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// a declared base-typed variable kept as its concrete init still works,
+    /// and trait-method calls from base bodies dispatch virtually
+    #[test]
+    fn trait_virtual_dispatch_emits_vtable_call() {
+        let src = r#"
+            trait Shape {
+                func area(): int;
+                func describe(): str { return "${this.area()}"; }
+            }
+            class Base impl Shape {
+                func area(): int { return 1; }
+            }
+            class Sub: Base {
+                func area(): int { return 2; }
+            }
+            func main(): unit {
+                let s = Sub();
+                print(s.describe());      // 2
+            }
+        "#;
+        let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
+        assert!(
+            ir.contains("sloth_obj_vtable"),
+            "trait method call from a base body must route through the vtable"
+        );
+        assert!(ir.contains("llvm.call"), "expected indirect vtable call");
+        run_src(src, "main").unwrap();
+    }
+
+    /// design §2.1: no implicit numeric conversion — mixed int/float
+    /// comparisons and arithmetic are compile-time type mismatches
+    #[test]
+    fn mixed_numeric_rejected() {
+        for (tag, src) in [
+            ("cmp", "func main(): unit { print(3.0 == 3); }\n"),
+            ("arith", "func main(): unit { print(1 + 2.5); }\n"),
+            (
+                "lit",
+                "func main(): unit { var a = [1, 2.5]; print(a[0]); }\n",
+            ),
+        ] {
+            let e = match run_src(src, "main") {
+                Ok(()) => panic!("{}: implicit int/float conversion accepted", tag),
+                Err(e) => e,
+            };
+            assert!(e.contains("type mismatch"), "{}: unexpected: {}", tag, e);
+        }
+        // explicit conversions stay legal
+        run_src(
+            "func main(): unit { print(float(3) == 3.0); print(float(1) + 2.5); }\n",
+            "main",
+        )
+        .unwrap();
+    }
+
+    /// static surface checks: return, field and element assignment
+    #[test]
+    fn return_and_field_surface_checks() {
+        for (tag, src) in [
+            ("ret", "func f(): int { return \"x\"; }\nfunc main(): unit { print(f()); }\n"),
+            (
+                "field",
+                "class C { var n: int; func __init__() { this.n = 1; } }\nfunc main(): unit { let c = C(); c.n = \"s\"; }\n",
+            ),
+            (
+                "elem",
+                "func main(): unit { var a = [1, 2]; a[0] = \"x\"; }\n",
+            ),
+        ] {
+            let e = match run_src(src, "main") {
+                Ok(()) => panic!("{}: unsound store accepted", tag),
+                Err(e) => e,
+            };
+            assert!(
+                e.contains("type mismatch"),
+                "{}: unexpected: {}",
+                tag,
+                e
+            );
+        }
+    }
+
+    /// heterogeneous class array literals upcast to the common ancestor
+    #[test]
+    fn class_array_lub() {
+        let src = r#"
+            class A { func k(): str { return "a"; } }
+            class B: A { func k(): str { return "b"; } }
+            func main(): unit {
+                let arr = [A(), B()];
+                print(arr.len());         // 2
+                print(arr[0].k());        // a
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// first-class functions: fn-typed params, named-function values,
+    /// returned closures, IIFE and an arbitrary callee expression
+    #[test]
+    fn first_class_functions_work() {
+        let src = r#"
+            func apply(f: (int) -> int, x: int): int { return f(x); }
+            func inc(x: int): int { return x + 1; }
+            func dbl(x: int): int { return x * 2; }
+            func compose(f: (int) -> int, g: (int) -> int, x: int): int {
+                return f(g(x));
+            }
+            func make_add(n: int): (int) -> int {
+                return |x: int| { return x + n; };
+            }
+            func main(): unit {
+                print(apply(|y: int| { return y * y; }, 5));   // 25
+                let g = inc;
+                print(g(4));                                    // 5
+                print(compose(inc, dbl, 3));                    // 7
+                let add5 = make_add(5);
+                print(add5(10));                                // 15
+                print((|x: int| { return x - 1; })(9));         // 8
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// method reference `obj.method`: a bound closure keeps `this`
+    #[test]
+    fn method_references_work() {
+        let src = r#"
+            class Counter {
+                var n: int = 0;
+                func __init__(k: int) { this.n = k; }
+                func bump(): int { this.n = this.n + 1; return this.n; }
+            }
+            func run(f: () -> int): int { return f(); }
+            func main(): unit {
+                var c = Counter(10);
+                let bump = c.bump;
+                print(bump());          // 11
+                print(bump());          // 12
+                print(run(c.bump));     // 13
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// plain-class virtual dispatch through a base-typed reference (§2.4)
+    #[test]
+    fn plain_class_virtual_dispatch_works() {
+        let src = r#"
+            class A { func k(): str { return "a"; } func via_this(): str { return this.k(); } }
+            class B: A { func k(): str { return "b"; } }
+            func pick(x: A): str { return x.k(); }
+            func main(): unit {
+                var b: A = B();
+                print(pick(b));         // b
+                print(b.via_this());    // b
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// chained assignable target: a[i][j] and obj.field[i] (design §3 EBNF)
+    #[test]
+    fn nested_index_assignment_works() {
+        let src = r#"
+            class Grid { var xs: Array<Array<int>> = [[1, 2], [3, 4]]; }
+            func main(): unit {
+                var a = [[1, 2], [3, 4]];
+                a[0][1] = 9;
+                print(a[0][1]);         // 9
+                var g = Grid();
+                g.xs[1][1] = 42;
+                print(g.xs[1][1]);      // 42
+                var m: Map<str, Map<str, int>> = @();
+                m["a"] = @();
+                m["a"]["b"] = 7;
+                print(m["a"]["b"]);     // 7
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// array growth keeps the handle stable across aliases, callee params,
+    /// closure captures and nested container elements (no stale/double-free)
+    #[test]
+    fn array_growth_stable_handle() {
+        let src = r#"
+            func fill(a: Array<int>, n: int) {
+                for i in 0..n { a.push(i); }
+            }
+            func main(): unit {
+                var a: Array<int> = [];
+                var b = a;
+                for i in 0..20 { a.push(i); }
+                print(a.len()); print(b.len()); print(b[19]);
+                var c: Array<int> = [];
+                fill(c, 100);
+                print(c.len());
+                var d: Array<int> = [];
+                var pushd = |x: int| { d.push(x); return 0; };
+                for i in 0..20 { pushd(i); }
+                print(d.len());
+                var g: Array<Array<int>> = [];
+                g.push([]);
+                for j in 0..20 { g[0].push(j); }
+                print(g[0].len()); print(g[0][19]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// Result ctor as an index/container value: m["k"] = ok(v)
+    #[test]
+    fn map_result_value_assign() {
+        let src = r#"
+            func main(): unit {
+                var m: Map<str, Result<int, str>> = @();
+                m["a"] = ok(1);
+                print(m["a"].unwrap());     // 1
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// scientific-notation float literals lex correctly
+    #[test]
+    fn scientific_notation_literals() {
+        let src = r#"
+            func main(): unit {
+                print(1e0);        // 1
+                print(1.5e-3);     // 0.0015
+                print(2E+4);       // 20000
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// nested optional and optional-receiver field access are diagnosed
+    #[test]
+    fn nested_optional_and_opt_receiver_diag() {
+        let e = match run_src(
+            "func f(x: int??): unit { return; }\nfunc main(): unit { f(nil); }\n",
+            "main",
+        ) {
+            Ok(()) => panic!("nested optional accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("nested optional T??"), "unexpected: {}", e);
+
+        let src = r#"
+            class N { var v: int = 1; var next: N? = nil; }
+            func main(): unit { var n = N(); print(n.next.v); }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("optional receiver field access accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("on an optional receiver"), "unexpected: {}", e);
+    }
+
+    /// integer divide/modulo by zero is a diagnosed panic (not garbage)
+    #[test]
+    fn int_divzero_panics() {
+        let md = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let exe = format!("{}/../../target/debug/slothc", md);
+        if !std::path::Path::new(&exe).exists() {
+            eprintln!("skip: slothc binary not built");
+            return;
+        }
+        for (tag, src) in [
+            ("div", "func main(): unit { var z = 0; print(10 / z); }\n"),
+            ("rem", "func main(): unit { var z = 0; print(10 % z); }\n"),
+        ] {
+            let p = std::env::temp_dir().join(format!("sloth_regress_{}.sl", tag));
+            std::fs::write(&p, src).unwrap();
+            let out = std::process::Command::new(&exe)
+                .arg("run")
+                .arg(&p)
+                .output()
+                .expect("subprocess");
+            let stde = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(!out.status.success(), "{}: should exit nonzero", tag);
+            assert!(
+                stde.contains("integer division by zero"),
+                "{}: unexpected stderr: {}",
+                tag,
+                stde
+            );
+        }
     }
 }

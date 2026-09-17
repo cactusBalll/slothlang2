@@ -46,14 +46,14 @@ impl ModEmitter {
             .unwrap_or_else(|| self.r.mk(Ty::Unit));
         let (mut v, vt) = self.emit_expr(fw, arg); // slot route: float field promotes int words; refuse float into ints
         let slot = if is_ok { fvy } else { fey };
-        if self.is_float(slot) && !self.is_float(vt) {
-            // int word -> f64 word
-            v = iw_to_f64_word(fw, &v);
-        } else if !self.is_float(slot) && self.is_float(vt) {
-            self.err(
-                pos,
-                "type mismatch: Result slot is a word but a float value was passed".to_string(),
-            );
+        if self.is_float(slot) != self.is_float(vt) {
+            // design §2.1: no implicit numeric conversion on Result payloads
+            let an = sloth_frontend::ty::ty_name(self.r.get(slot));
+            let bn = sloth_frontend::ty::ty_name(self.r.get(vt));
+            self.err_diff(pos, "Result payload", &an, &bn);
+            if self.is_float(slot) {
+                v = iw_to_f64_word(fw, &v);
+            }
         }
         // object + default zero fields
         let (obj, _ot) = self.emit_new_obj(fw, inst, &Vec::new(), &Vec::new(), pos);
@@ -146,6 +146,23 @@ impl ModEmitter {
         out
     }
 
+    /// does the class (or an ancestor) declare a field with this name?
+    pub(crate) fn has_field(&self, clsname: &str, field: &str) -> bool {
+        let mut cur = Some(clsname.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    if ci.fields.iter().any(|(n, _, _)| n == field) {
+                        return true;
+                    }
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        false
+    }
+
     /// field type by name following the base-class-first chain (inherited
     /// fields keep their declared surface type; a name miss falls to i64)
     pub(crate) fn field_type(&mut self, clsname: &str, field: &str) -> TyId {
@@ -162,6 +179,138 @@ impl ModEmitter {
             }
         }
         self.r.mk(Ty::I64)
+    }
+}
+
+impl ModEmitter {
+    /// is `sub` the same class as `sup` or a (transitive) descendant of it?
+    pub(crate) fn is_descendant_of(&self, sup: &str, sub: &str) -> bool {
+        let mut cur = Some(sub.to_string());
+        while let Some(c) = cur {
+            if c == sup {
+                return true;
+            }
+            cur = self.classes.get(&c).and_then(|ci| ci.superclass.clone());
+        }
+        false
+    }
+
+    /// design §2.4: calling a method through a base-class reference must
+    /// dispatch on the runtime class. Emits a class-id switch over every
+    /// loaded concrete subclass that overrides `mname`. Returns None when no
+    /// subclass overrides it (the caller keeps the direct call).
+    pub(crate) fn emit_class_virtual_call(
+        &mut self,
+        fw: &mut FnWalk,
+        base_cls: &str,
+        mname: &str,
+        recv: &str,
+        argv: &Vec<(String, TyId)>,
+        sigargs: &Vec<String>,
+        pos: &Pos,
+    ) -> Option<(String, TyId)> {
+        let (basedefcls, basedef) = self.find_method(base_cls, mname)?;
+        let mut branches: Vec<(String, String, FuncDef)> = Vec::new();
+        let names: Vec<String> = self.classes.keys().cloned().collect();
+        for cname in names {
+            if !self.is_descendant_of(base_cls, &cname) {
+                continue;
+            }
+            if let Some((dc, fd)) = self.find_method(&cname, mname) {
+                if dc != basedefcls {
+                    branches.push((cname, dc, fd));
+                }
+            }
+        }
+        if branches.is_empty() {
+            return None;
+        }
+        let ret = self.plan_for_class(mname, &basedefcls, &basedef).ret;
+        let unit = self.is_unit(ret);
+        let resslot: Option<String> = if unit {
+            None
+        } else {
+            let a = fw.v();
+            fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", a));
+            Some(a)
+        };
+        let cid = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+            cid, recv
+        ));
+        let lbl_def = fw.newlabel("cv");
+        let lbl_end = fw.newlabel("cv");
+        let labels: Vec<String> = branches.iter().map(|_| fw.newlabel("cv")).collect();
+        // class-id switch splits the CFG mid-expression: preserve producers
+        // of the enclosing expression across the merge
+        let saved_dangling = std::mem::take(&mut fw.dangling);
+        for (i, (cname, _, _)) in branches.iter().enumerate() {
+            let idw = fw.v();
+            let cidn = *self.class_ids.get(cname).unwrap_or(&0);
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                idw,
+                enc_i_lit(cidn)
+            ));
+            let c = fw.v();
+            fw.op(&format!(
+                "    {} = arith.cmpi eq, {}, {} : i64",
+                c, cid, idw
+            ));
+            let ce = fw.v();
+            fw.op(&format!("    {} = arith.extui {} : i1 to i64", ce, c));
+            let nxt = if i + 1 < branches.len() {
+                fw.newlabel("cv")
+            } else {
+                lbl_def.clone()
+            };
+            fw.cjump(&ce, &labels[i], &nxt);
+            if i + 1 < branches.len() {
+                fw.label(&nxt);
+            }
+        }
+        // default: the base implementation
+        fw.label(&lbl_def);
+        let (rv, _) =
+            self.emit_method_call(fw, &basedefcls, mname, &basedef, false, argv, sigargs, pos);
+        if let Some(slot) = &resslot {
+            let zi = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                rv, slot, zi
+            ));
+        }
+        fw.jump(&lbl_end);
+        for (i, (_, dc, fd)) in branches.iter().enumerate() {
+            fw.label(&labels[i]);
+            let (rv, _) = self.emit_method_call(fw, dc, mname, fd, false, argv, sigargs, pos);
+            if let Some(slot) = &resslot {
+                let zi = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", zi));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    rv, slot, zi
+                ));
+            }
+            fw.jump(&lbl_end);
+        }
+        fw.label(&lbl_end);
+        fw.dangling = saved_dangling;
+        if let Some(slot) = resslot {
+            let zi = fw.v();
+            let v = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
+            fw.op(&format!(
+                "    {} = memref.load {}[{}] : memref<1xi64>",
+                v, slot, zi
+            ));
+            return Some((v, ret));
+        }
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        Some((z, ret))
     }
 }
 
@@ -293,31 +442,46 @@ impl ModEmitter {
         self.emit_vt_build(fw, clsname, &r2);
         // field initializers run before __init__
         {
-            // field decls need the original program AST: find via decl map
+            // field decls need the original program AST: find via decl map.
+            // The whole ancestor chain runs base-first so inherited field
+            // defaults are present on every subclass instance.
             let defs: Vec<(
                 String,
                 Option<sloth_frontend::ast::Expr>,
                 sloth_frontend::ast::Type,
             )> = {
-                match self.class_defs.get(clsname) {
-                    Some((_, cdef)) => cdef
-                        .fields
-                        .iter()
-                        .map(|fd| (fd.name.clone(), fd.init.clone(), fd.ty.clone()))
-                        .collect(),
-                    None => Vec::new(),
+                let mut chain: Vec<String> = Vec::new();
+                let mut cur = Some(clsname.to_string());
+                while let Some(c) = cur {
+                    cur = self.classes.get(&c).and_then(|ci| ci.superclass.clone());
+                    chain.push(c);
                 }
+                chain.reverse();
+                let mut out = Vec::new();
+                for c in chain {
+                    if let Some((_, cdef)) = self.class_defs.get(&c) {
+                        for fd in &cdef.fields {
+                            out.push((fd.name.clone(), fd.init.clone(), fd.ty.clone()));
+                        }
+                    }
+                }
+                out
             };
             for (fname, iopt, fty) in defs {
                 if let Some(ix) = &iopt {
                     let idx = self.field_index(clsname, &fname);
                     let (mut iv, iit) = self.emit_expr(fw, ix);
-                    // float field route: int init words get promoted first
+                    // design §2.1: no implicit numeric conversion on field
+                    // initializers (int vs float is a compile error)
                     let ftt = self.ty_of(&fty);
                     let ftf = self.is_float(ftt);
-                    if ftf && !self.is_float(iit) {
-                        // int word -> f64 word
-                        iv = iw_to_f64_word(fw, &iv);
+                    if ftf != self.is_float(iit) {
+                        let an = sloth_frontend::ty::ty_name(self.r.get(ftt));
+                        let bn = sloth_frontend::ty::ty_name(self.r.get(iit));
+                        self.err_diff(&ix.pos, "field initializer", &an, &bn);
+                        if ftf {
+                            iv = iw_to_f64_word(fw, &iv);
+                        }
                     }
                     let zi = fw.v();
                     fw.op(&format!(
@@ -462,6 +626,40 @@ impl ModEmitter {
             fw.rc_mark_xfer(&r);
         }
         (r, plan.ret)
+    }
+}
+
+impl ModEmitter {
+    /// if `method` is a trait method on a trait implemented (transitively) by
+    /// `cls`, return the owning trait + its vtable slot. Used to route
+    /// `this.method()` / base-typed `obj.method()` through the vtable so an
+    /// override in a subclass is honored (virtual dispatch, design §2.4).
+    pub(crate) fn trait_slot_for(&self, cls: &str, method: &str) -> Option<(String, usize)> {
+        let mut impls: Vec<String> = Vec::new();
+        let mut cur = Some(cls.to_string());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ci) => {
+                    for t in &ci.impls {
+                        if !impls.contains(t) {
+                            impls.push(t.clone());
+                        }
+                    }
+                    cur = ci.superclass.clone();
+                }
+                None => break,
+            }
+        }
+        for tr in &impls {
+            if let Some(ms) = self.traits.get(tr) {
+                if ms.iter().any(|m| m.name == method) {
+                    if let Some(slot) = self.vt_slots.get(&(tr.clone(), method.to_string())) {
+                        return Some((tr.clone(), *slot));
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -725,6 +923,12 @@ impl ModEmitter {
         let lbl_call = fw.newlabel("dc");
         let lbl_panic = fw.newlabel("dp");
         let lbl_end = fw.newlabel("de");
+        // A vtable call splits the CFG mid-expression: producers from the
+        // ENCLOSING expression dominate the merge and must survive the
+        // branch (releasing them at `cjump` would free live operands, e.g.
+        // the lhs of `"x" + obj.name()`). Producers created inside the
+        // branches do not exist, so none are dropped.
+        let saved_dangling = std::mem::take(&mut fw.dangling);
         fw.cjump(&ce, &lbl_call, &lbl_panic);
         // resolved: call through the slot pointer
         fw.label(&lbl_call);
@@ -789,6 +993,8 @@ impl ModEmitter {
         }
         fw.jump(&lbl_end);
         fw.label(&lbl_end);
+        // enclosing-expression producers resume ownership at the merge
+        fw.dangling = saved_dangling;
         if let Some((slot2, fl)) = resslot {
             let zi = fw.v();
             let v = fw.v();

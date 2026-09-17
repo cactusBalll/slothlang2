@@ -219,16 +219,22 @@ impl ModEmitter {
         self.opt_inner(t).is_some()
     }
     pub fn is_ref(&self, t: TyId) -> bool {
-        matches!(
-            self.r.get(t),
-            Ty::Str
-                | Ty::Array(_)
-                | Ty::Map(..)
-                | Ty::Fn(_)
-                | Ty::Named(_, _)
-                | Ty::Dyn(_)
-                | Ty::Weak(_)
-        ) || self.opt_inner(t).is_some()
+        match self.r.get(t) {
+            // optionals are ref-shaped when their payload is (value optionals
+            // ride an rc box; reference optionals are the bare handle)
+            Ty::Opt(e) => self.is_ref(*e) || self.opt_inner(t).is_some(),
+            _ => matches!(
+                self.r.get(t),
+                Ty::Str
+                    | Ty::Array(_)
+                    | Ty::Map(..)
+                    | Ty::Fn(_)
+                    | Ty::Named(_, _)
+                    | Ty::Dyn(_)
+                    | Ty::Weak(_)
+                    | Ty::Range
+            ),
+        }
     }
 }
 
@@ -465,6 +471,16 @@ impl ModEmitter {
             // faces (patch 42/43): wrap at bind time
             (Ty::Weak(..), _) => true,
             (Ty::Dyn(_), Ty::Named(..)) => true,
+            // function surfaces compare structurally (lambda metadata — the
+            // closure frame symbol — must not defeat compatibility)
+            (Ty::Fn(x), Ty::Fn(y)) => {
+                x.params.len() == y.params.len()
+                    && x.params
+                        .iter()
+                        .zip(y.params.iter())
+                        .all(|(p, q)| self.surface_compat(self.r.get(*p), self.r.get(*q)))
+                    && self.surface_compat(self.r.get(x.ret), self.r.get(y.ret))
+            }
             (Ty::Array(x), Ty::Array(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
                 self.surface_compat(self.r.get(*k1), self.r.get(*k2))
@@ -481,6 +497,43 @@ impl ModEmitter {
             }
             _ => false,
         }
+    }
+}
+
+impl ModEmitter {
+    /// nearest common ancestor of two class names (identity counts)
+    pub(crate) fn common_ancestor(&self, a: &str, b: &str) -> Option<String> {
+        let mut chain_a: Vec<String> = Vec::new();
+        let mut cur = Some(a.to_string());
+        while let Some(c) = cur {
+            chain_a.push(c.clone());
+            cur = self.classes.get(&c).and_then(|ci| ci.superclass.clone());
+        }
+        let mut cur = Some(b.to_string());
+        while let Some(c) = cur {
+            if chain_a.contains(&c) {
+                return Some(c);
+            }
+            cur = self.classes.get(&c).and_then(|ci| ci.superclass.clone());
+        }
+        None
+    }
+
+    /// least upper bound of a list of class-valued element types (None when
+    /// any element is not a class or no common ancestor exists)
+    pub(crate) fn named_lub(&self, ets: &[TyId]) -> Option<String> {
+        let mut acc: Option<String> = None;
+        for t in ets {
+            let n = match self.r.get(*t).clone() {
+                Ty::Named(n, _) => n,
+                _ => return None,
+            };
+            acc = Some(match acc {
+                None => n,
+                Some(p) => self.common_ancestor(&p, &n)?,
+            });
+        }
+        acc
     }
 }
 
@@ -590,6 +643,94 @@ impl ModEmitter {
                 fw.assign(name, &v, false);
             }
         }
+    }
+
+    /// structural surface check for object-field assignment (float routes are
+    /// handled by the callers before this is reached; Unit value = unknown)
+    pub(crate) fn check_field_surface(&mut self, pos: &Pos, fname: &str, fty: TyId, vty: TyId) {
+        if self.is_float(fty) || self.is_float(vty) {
+            return;
+        }
+        let vts = self.r.get(vty).clone();
+        if matches!(vts, Ty::Unit) {
+            return;
+        }
+        let fts = self.r.get(fty).clone();
+        if !self.surface_compat(&fts, &vts) {
+            let ftn = self.surface_name(&fts);
+            let vtn = self.surface_name(&vts);
+            self.err_diff(pos, &format!("field assignment `{}`", fname), &ftn, &vtn);
+        }
+    }
+
+    /// store a tagged word into a module-level global cell
+    pub(crate) fn store_global(&self, fw: &mut FnWalk, gsym: &str, dt: TyId, val: &str) {
+        let mty = memref_cell_ty(self, dt);
+        let g = fw.v();
+        fw.op(&format!(
+            "    {} = memref.get_global @{} : {}",
+            g, gsym, mty
+        ));
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        fw.op(&format!("    memref.store {}, {}[{}] : {}", val, g, z, mty));
+    }
+
+    /// plain-name assignment to a module-level global cell: mirrors
+    /// `check_named_assign` (coercion + surface check + rc overwrite) but
+    /// stores through `memref.get_global` instead of a local slot.
+    pub(crate) fn check_global_assign(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        gsym: &str,
+        dt: TyId,
+        v: &str,
+        vty: TyId,
+        pos: &Pos,
+    ) {
+        let mut v = v.to_string();
+        let mut vty = vty;
+        if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
+            v = vc;
+            vty = vtc;
+        }
+        if self.is_float(dt) {
+            let cv = if self.is_float(vty) {
+                v.clone()
+            } else {
+                iw_to_f64_word(fw, &v)
+            };
+            self.store_global(fw, gsym, dt, &cv);
+            return;
+        }
+        if self.is_float(vty) && self.opt_inner(dt).is_none() {
+            let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
+            self.err_diff(pos, &format!("assignment to `{}`", name), "float", &dtn);
+            self.store_global(fw, gsym, dt, &v);
+            return;
+        }
+        // unannotated global (`dt == Unit`) stays word-lenient
+        let dts = self.r.get(dt).clone();
+        if !matches!(dts, Ty::Unit) {
+            let vts = self.r.get(vty).clone();
+            if !self.surface_compat(&dts, &vts) {
+                let dtn = self.surface_name(&dts);
+                let vtn = self.surface_name(&vts);
+                self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
+            }
+        }
+        // rc: read old, retain new (unless ownership transferred), release old,
+        // then store. Retain-before-release keeps `g = g` self-assignment safe.
+        let (old, _) = self.emit_global_read(fw, gsym, dt);
+        let stored = if fw.rc_take_xfer(&v) {
+            v.clone()
+        } else {
+            self.emit_retain(fw, &v)
+        };
+        self.emit_release(fw, &old);
+        self.store_global(fw, gsym, dt, &stored);
     }
 }
 

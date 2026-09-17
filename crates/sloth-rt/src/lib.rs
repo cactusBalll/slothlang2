@@ -11,6 +11,7 @@ pub mod externs;
 pub mod maps;
 pub mod objects;
 pub mod panics;
+pub mod ranges;
 pub mod rc;
 pub mod strings;
 pub mod vtable;

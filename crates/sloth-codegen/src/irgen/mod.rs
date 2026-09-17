@@ -25,6 +25,7 @@ use sloth_frontend::ty::{Reg, Ty, TyId};
 use std::collections::{HashMap, HashSet};
 
 mod class;
+mod closure;
 mod collect;
 mod expr;
 mod fnwalk;

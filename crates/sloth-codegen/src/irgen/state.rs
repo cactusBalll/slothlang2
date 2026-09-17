@@ -42,8 +42,8 @@ pub struct ModEmitter {
     pub class_defs: HashMap<String, (String, ClassDef)>,
     /// non-pub symbols exported by imported modules; access = diagnostic
     pub hidden: HashSet<String>,
-    /// foreign globals: "mod.name" or "alias.name" -> (mangled global symbol, ty)
-    pub fglobals: HashMap<String, (String, TyId)>,
+    /// foreign globals: "mod.name" or "alias.name" -> (mangled symbol, ty, mutable)
+    pub fglobals: HashMap<String, (String, TyId, bool)>,
     /// global symbol declarations to prepend to the module IR
     pub global_decls: Vec<String>,
     /// global symbols already declared (dedupe)
@@ -91,6 +91,10 @@ pub struct ModEmitter {
     /// active type-param substitution for the generic instance being emitted
     /// (stacked for nesting; ty positions resolve T against the top frame)
     pub(crate) tp_subst: Vec<HashMap<String, TyId>>,
+    /// function-value trampolines: cache key -> bridge symbol. A closure is
+    /// a 2-word object { tagged fnptr, env }; the bridge has the uniform
+    /// `(i64 env, i64 args...) -> i64` ABI that any `Ty::Fn` call site uses.
+    pub bridges: HashMap<String, String>,
     /// mangled instance name forced for the next plan_func/emit_func
     pub(crate) tp_mangled: Vec<String>,
     /// generic instance cache: base mangled -> concrete word spelling key
@@ -160,6 +164,7 @@ impl ModEmitter {
             tp_subst: Vec::new(),
             tp_mangled: Vec::new(),
             insts: std::collections::HashMap::new(),
+            bridges: HashMap::new(),
         }
     }
 }

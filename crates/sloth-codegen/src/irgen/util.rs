@@ -102,15 +102,6 @@ pub(crate) fn iw_to_f64_word(fw: &mut FnWalk, w: &str) -> String {
     emit_enc_f(fw, &f)
 }
 
-/// convert an int word into an f64 *scalar* (decode, promote): for use on
-/// the scalar flank of a typed arith op, not for a word-plane result
-pub(crate) fn iw_to_f64_scalar(fw: &mut FnWalk, w: &str) -> String {
-    let d = emit_dec_int(fw, w);
-    let f = fw.v();
-    fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", f, d));
-    f
-}
-
 /// convert an f64 word into an int word (decode, truncate, encode)
 pub(crate) fn f64w_to_iw(fw: &mut FnWalk, w: &str) -> String {
     let f = emit_dec_f(fw, w);

@@ -261,6 +261,24 @@ impl Lexer {
                 break;
             }
         }
+        // exponent part: 1e0 / 1.5e-3 / 2E+4 (only when a digit follows the
+        // optional sign, so a trailing `e` never eats an identifier)
+        if matches!(self.peek(), Some('e') | Some('E')) {
+            let mut k = 1usize;
+            if matches!(self.peekn(k), Some('+') | Some('-')) {
+                k += 1;
+            }
+            if matches!(self.peekn(k), Some(c) if c.is_ascii_digit()) {
+                is_float = true;
+                self.advance();
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    self.advance();
+                }
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                    self.advance();
+                }
+            }
+        }
         let s: String = self.chars[start..self.ptr].iter().collect();
         if is_float {
             let f: f64 = s.parse().map_err(|_| self.err("invalid float literal"))?;

@@ -31,11 +31,12 @@ impl ModEmitter {
                     Some(t) => self.ty_of(t),
                     None => self.r.mk(Ty::Unit),
                 };
+                let mutable = d.kind == DeclKind::Var;
                 let sym = self.declare_global(mname, &d.name, t);
                 self.fglobals
-                    .insert(format!("{}.{}", qname, d.name), (sym.clone(), t));
+                    .insert(format!("{}.{}", qname, d.name), (sym.clone(), t, mutable));
                 self.fglobals
-                    .insert(format!("{}.{}", mname, d.name), (sym.clone(), t));
+                    .insert(format!("{}.{}", mname, d.name), (sym.clone(), t, mutable));
                 if !visible_of(d) {
                     self.hidden.insert(format!("{}.{}", qname, d.name));
                 }
@@ -146,13 +147,24 @@ impl ModEmitter {
         let mut gbody = String::new();
         let mut fw = fresh_walk(self);
         for d in &prog.decls {
-            if let DeclNode::Var { init, .. } = &d.node {
+            if let DeclNode::Var { ty, init } = &d.node {
                 let key = format!("{}.{}", qname, d.name);
-                let (sym, t) = match self.fglobals.get(&key).cloned() {
+                let (sym, t, _mut) = match self.fglobals.get(&key).cloned() {
                     Some(x) => x,
                     None => continue,
                 };
-                let (v, _vt) = self.emit_expr(&mut fw, &init);
+                let (v, vt) = self.emit_expr(&mut fw, &init);
+                // unannotated foreign global: infer the surface from its init
+                if ty.is_none() {
+                    for k in [
+                        format!("{}.{}", qname, d.name),
+                        format!("{}.{}", mname, d.name),
+                    ] {
+                        if let Some(g) = self.fglobals.get_mut(&k) {
+                            g.1 = vt;
+                        }
+                    }
+                }
                 let mty = memref_cell_ty(self, t);
                 let g = fw.v();
                 fw.op(&format!("    {} = memref.get_global @{} : {}", g, sym, mty));
@@ -193,7 +205,11 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_rt_print_bool(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_str(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_range_pack(i64, i64) -> i64\n");
+    s.push_str(
+        "  func.func private @sloth_range_pack(i64, i64) -> i64
+  func.func private @sloth_range_lo(i64) -> i64
+  func.func private @sloth_range_hi(i64) -> i64\n",
+    );
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
     s.push_str(
         "  func.func private @sloth_arr_push(i64, i64) -> i64
@@ -205,6 +221,7 @@ pub fn rt_decls() -> String {
   func.func private @sloth_str_push_b(i64, i64) -> i64\n",
     );
     s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_str_clen(i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_char(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_eq(i64, i64) -> i64\n");
@@ -301,6 +318,39 @@ impl ModEmitter {
         };
         self.collect(prog);
         self.finalize_vt();
+        // 0) local module init: store top-level var initializers into the
+        //    module's global cells. Emitted for every module so @sloth_main
+        //    can invoke it unconditionally before running the user body.
+        {
+            let mut fw = fresh_walk(self);
+            for d in &prog.decls {
+                if let DeclNode::Var { ty, init } = &d.node {
+                    let (sym, t) = match self.globals.get(&d.name).cloned() {
+                        Some((s, t, _)) => (s, t),
+                        None => continue,
+                    };
+                    let (v, vt) = self.emit_expr(&mut fw, init);
+                    // unannotated global: infer its surface from the initializer
+                    // so later reads/assignments carry the real word kind
+                    if ty.is_none() {
+                        if let Some(g) = self.globals.get_mut(&d.name) {
+                            g.1 = vt;
+                        }
+                    }
+                    let mty = memref_cell_ty(self, t);
+                    let g = fw.v();
+                    fw.op(&format!("    {} = memref.get_global @{} : {}", g, sym, mty));
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", z));
+                    fw.op(&format!("    memref.store {}, {}[{}] : {}", v, g, z, mty));
+                }
+            }
+            let body = fw.cur.clone();
+            self.out.push_str(&format!(
+                "  func.func @sloth_{}__ginit() -> () {{\n{}    return\n  }}\n",
+                self.name, body
+            ));
+        }
         // 1) top-level funcs
         for d in &prog.decls {
             if let DeclNode::Func(f) = &d.node {
@@ -368,10 +418,13 @@ impl ModEmitter {
             fw.ret_flag = rf;
             fw.push_scope();
             // run imported modules' variable initializers first
-            for m in &self.init_mods {
+            let init_mods = self.init_mods.clone();
+            for m in &init_mods {
                 fw.op(&format!("    call @sloth_{}__ginit() : () -> ()", m));
             }
-            // top-level var/let decls become prelude statements
+            // top-level var/let decls become prelude statements (script mode
+            // keeps the historical local-slot route so container/lambda
+            // writeback and declaration checking work unchanged)
             for d in &prog.decls {
                 if let DeclNode::Var { ty, init } = &d.node {
                     let st = Stmt {
@@ -490,6 +543,7 @@ pub fn obj_rt_decls() -> String {
     s.push_str("  func.func private @sloth_obj_set_vtable(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_vtable(i64) -> i64\n");
     s.push_str("  func.func private @sloth_panic_noimpl(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_panic_divzero() -> i64\n");
     s
 }
 

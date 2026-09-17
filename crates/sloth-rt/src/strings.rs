@@ -99,23 +99,52 @@ pub extern "C" fn sloth_str_len(p_w: i64) -> i64 {
     unsafe { rc::enc_i((*(w_unref(p_w) as *const StrT)).len as i64) }
 }
 
-/// single-character string for iteration: `for (var c: "str")`
+/// number of Unicode scalar values in a pooled string (str iteration bound).
+/// Falls back to the byte length for non-UTF-8 content.
+#[no_mangle]
+pub extern "C" fn sloth_str_clen(p_w: i64) -> i64 {
+    unsafe {
+        let td = w_unref(p_w) as *const StrT;
+        let bytes = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
+        let n = std::str::from_utf8(bytes)
+            .map(|s| s.chars().count())
+            .unwrap_or(bytes.len());
+        rc::enc_i(n as i64)
+    }
+}
+
+/// i-th character (Unicode scalar) as a one-char pooled string; the index is
+/// a CHAR index, matching `sloth_str_clen` (design §3.5: str iterates by
+/// character). Non-UTF-8 content falls back to byte slicing.
 #[no_mangle]
 pub extern "C" fn sloth_str_char(s_w: i64, i_w: i64) -> i64 {
     unsafe {
         let td = w_unref(s_w) as *const StrT;
-        let b = *(((*td).data as *const u8).offset(rc::dec_i(i_w) as isize)) as u8;
-        let p = rc_addr(std::mem::size_of::<StrT>() + 2, None) as *mut libc::c_void;
+        let bytes = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
+        let idx = rc::dec_i(i_w) as usize;
+        let (start, end) = match std::str::from_utf8(bytes) {
+            Ok(s) => match s.char_indices().nth(idx) {
+                Some((b, ch)) => (b, b + ch.len_utf8()),
+                None => (bytes.len(), bytes.len()),
+            },
+            Err(_) => {
+                if idx < bytes.len() {
+                    (idx, idx + 1)
+                } else {
+                    (bytes.len(), bytes.len())
+                }
+            }
+        };
+        let n = end - start;
+        let p = rc_addr(std::mem::size_of::<StrT>() + n + 1, None) as *mut libc::c_void;
         let t = p as *mut StrT;
         let dat = (p as *mut libc::c_char).offset(std::mem::size_of::<StrT>() as isize)
             as *mut libc::c_void;
-        *(dat as *mut u8) = b;
-        libc::memset(
-            (dat as *mut libc::c_char).offset(1) as *mut libc::c_void,
-            0,
-            1,
-        );
-        (*t).len = 1;
+        if n != 0 {
+            libc::memcpy(dat, bytes.as_ptr().add(start) as *const libc::c_void, n);
+        }
+        *(dat as *mut u8).add(n) = 0;
+        (*t).len = n;
         (*t).data = dat;
         w_ref(p as usize)
     }

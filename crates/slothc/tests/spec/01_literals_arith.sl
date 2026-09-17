@@ -9,7 +9,7 @@ func main(): unit {
     print((2 + 3) * 4);     // expect: 20
     print(1.5 + 2.0);       // expect: 3.5
     print(2.0 * 3.5);       // expect: 7
-    print(1 + 2.5);         // expect: 3.5
+    print(float(1) + 2.5);  // expect: 3.5
     print(10 - 3 - 2);      // expect: 5
     print(-4 + 10);         // expect: 6
     print(2 * 3 + 1 == 7);  // expect: true

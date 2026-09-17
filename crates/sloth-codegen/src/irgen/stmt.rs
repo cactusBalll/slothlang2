@@ -164,8 +164,14 @@ impl ModEmitter {
                     let dtr42 = ty.clone().unwrap();
                     let dt = self.ty_of(&dtr42);
                     if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+                        // value-optional: box the payload word
                         let (vc, _tc2) = self.coerce_word_to(fw, &v, t, dt);
                         (vc, dt)
+                    } else if matches!(self.r.get(dt).clone(), Ty::Opt(_)) {
+                        // reference-optional: the handle word is already the
+                        // representation, just record the Opt surface so
+                        // `is nil` narrowing / later assigns see it
+                        (v, dt)
                     } else {
                         (v, t)
                     }
@@ -196,47 +202,42 @@ impl ModEmitter {
                 fw.rc_flush();
             }
             StmtNode::Assign { target, value } => {
+                // declared surface of the assignee (drives value inference and
+                // the Result-ctor fast path); for index targets it is the
+                // container's element/value type, so `m["k"] = @()` and
+                // `m["k"] = ok(v)` see the right Result/Map frame
+                let target_ty = self.assign_target_type(fw, target);
                 // assign-face Result ctor fast-path (patch #37): `x = ok(v)`
                 // binds to the target's declared Result<T,E> frame
                 let mut pre: Option<(String, TyId)> = None;
-                if let (Some(PathSeg::Name(h)), ExprNode::Call { callee, args }) =
-                    (target.first(), &value.node)
-                {
+                if let ExprNode::Call { callee, args } = &value.node {
                     if args.len() == 1
                         && matches!(
                             callee.node,
                             ExprNode::Ident(ref id) if id == "ok" || id == "err",
                         )
                     {
-                        match fw.lookup(&h.clone()) {
-                            Some((_, dt)) => match self.r.get(dt).clone() {
-                                Ty::Named(nm, _) if self.result_insts.contains(&nm) => {
-                                    let is_ok = matches!(
-                                        callee.node,
-                                        ExprNode::Ident(ref id) if id == "ok",
-                                    );
-                                    pre = Some(
-                                        self.emit_result_ctor(fw, &nm, &args[0], is_ok, &value.pos),
-                                    );
-                                }
-                                _ => {
-                                    self.err(
-                                            &value.pos,
-                                            format!(
-                                                "ctor `{}` requires a declared Result target (assignment target `{}` is not Result<_, _>)",
-                                                if Self::init_str2(callee) == "err" { "err" } else { "ok" },
-                                                h
-                                            ),
-                                        );
-                                }
-                            },
-                            None => {
+                        let oname = if Self::init_str2(callee) == "err" {
+                            "err"
+                        } else {
+                            "ok"
+                        };
+                        match target_ty.map(|dt| self.r.get(dt).clone()) {
+                            Some(Ty::Named(nm, _)) if self.result_insts.contains(&nm) => {
+                                let is_ok = matches!(
+                                    callee.node,
+                                    ExprNode::Ident(ref id) if id == "ok",
+                                );
+                                pre = Some(
+                                    self.emit_result_ctor(fw, &nm, &args[0], is_ok, &value.pos),
+                                );
+                            }
+                            _ => {
                                 self.err(
                                     &value.pos,
                                     format!(
-                                        "ctor `{}` requires a declared Result target (assignment to unknown `{}`)",
-                                        if Self::init_str2(callee) == "err" { "err" } else { "ok" },
-                                        h
+                                        "ctor `{}` requires a declared Result target (assignment target is not Result<_, _>)",
+                                        oname
                                     ),
                                 );
                             }
@@ -246,14 +247,7 @@ impl ModEmitter {
                 let (mut v, vty) = match pre {
                     Some((w, tt)) => (w, tt),
                     None => {
-                        let hint =
-                            if let (Some(PathSeg::Name(h)), _) = (target.first(), target.last()) {
-                                fw.lookup(&h.clone())
-                                    .map(|x| x.1)
-                                    .unwrap_or_else(|| self.r.mk(Ty::Unit))
-                            } else {
-                                self.r.mk(Ty::Unit)
-                            };
+                        let hint = target_ty.unwrap_or_else(|| self.r.mk(Ty::Unit));
                         self.exp_ret.push(hint);
                         let out = self.emit_expr(fw, value);
                         self.exp_ret.pop();
@@ -282,6 +276,7 @@ impl ModEmitter {
                                     enc_i_lit(idx as i64)
                                 ));
                                 let fty = self.field_type(&cur, f);
+                                self.check_field_surface(&s.pos, f, fty, vty);
                                 self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
@@ -331,6 +326,8 @@ impl ModEmitter {
                                         "non-float surface",
                                         "float",
                                     );
+                                } else if !dfo {
+                                    self.check_field_surface(&s.pos, f, fty, vct);
                                 }
                                 self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
                                 fw.rc_flush();
@@ -352,20 +349,45 @@ impl ModEmitter {
                                 self.check_named_assign(fw, n, dt, &v, vty, &s.pos);
                             }
                             None => {
-                                fw.assign(n, &v, false);
+                                let cur_mod = self.cur_mod.clone();
+                                let own = self.globals.get(n).cloned();
+                                let foreign =
+                                    self.fglobals.get(&format!("{}.{}", cur_mod, n)).cloned();
+                                // while emitting a foreign body, its own global
+                                // wins over a same-named local one
+                                let picked = if cur_mod != self.name {
+                                    foreign.or(own)
+                                } else {
+                                    own.or(foreign)
+                                };
+                                match picked {
+                                    Some((gsym, gt, gmut)) => {
+                                        if !gmut {
+                                            self.err(
+                                                &s.pos,
+                                                format!(
+                                                    "cannot assign to immutable `{}` (declared with `let`)",
+                                                    n
+                                                ),
+                                            );
+                                        }
+                                        self.check_global_assign(fw, n, &gsym, gt, &v, vty, &s.pos);
+                                    }
+                                    None => {
+                                        fw.assign(n, &v, false);
+                                    }
+                                }
                             }
                         }
                     }
                     Some(PathSeg::Index(ix)) => {
-                        // a[i] = v / m[k] = v (single-index MVP)
-                        if target.len() != 2 {
-                            self.err(&s.pos, "nested index assignment unsupported".to_string());
-                            return;
-                        }
-                        if let Some(PathSeg::Name(h)) = target.first() {
-                            match fw.lookup(h) {
+                        // a[i] = v / m[k] = v / a[i][j] = v / h.f[i] = v
+                        // (design §3 EBNF assignable: any `[expr]` chain)
+                        let nseg = target.len();
+                        let mut cont: Option<(String, TyId)> = None;
+                        match &target[..nseg - 1] {
+                            [PathSeg::Name(h)] => match fw.lookup(&h.clone()) {
                                 Some((aa, at)) => {
-                                    let ats = self.r.get(at).clone();
                                     let z = fw.v();
                                     fw.op(&format!("    {} = arith.constant 0 : index", z));
                                     let av = fw.v();
@@ -373,161 +395,203 @@ impl ModEmitter {
                                         "    {} = memref.load {}[{}] : memref<1xi64>",
                                         av, aa, z
                                     ));
-                                    let (iv, _it) = self.emit_expr(fw, ix);
-                                    match ats {
-                                        Ty::Array(el) => {
-                                            // tag migration: single word route;
-                                            // int words promote for float slots
-                                            if self.is_float(el) && !self.is_float(vty) {
-                                                v = iw_to_f64_word(fw, &v);
-                                            }
-                                            // rc patch B: release the old elem
-                                            // (scalar/nil words no-op in rt),
-                                            // retain the new one if ref-typed
-                                            if self.is_ref(el) {
-                                                let old = fw.v();
-                                                fw.op(&format!(
+                                    cont = Some((av, at));
+                                }
+                                None => self.err(&s.pos, format!("unknown array `{}`", h)),
+                            },
+                            _ => cont = self.eval_assign_container(fw, &target[..nseg - 1], &s.pos),
+                        }
+                        if let Some((av, at)) = cont {
+                            let ats = self.r.get(at).clone();
+                            let (iv, _it) = self.emit_expr(fw, ix);
+                            match ats {
+                                Ty::Array(el) => {
+                                    // tag migration: single word route;
+                                    // int words promote for float slots;
+                                    // cross-kind stores diagnose
+                                    if self.opt_inner(el).is_some() || self.weak_inner(el).is_some()
+                                    {
+                                        let (vc, _tc) = self.coerce_word_to(fw, &v, vty, el);
+                                        v = vc;
+                                    } else if self.is_float(el) && !self.is_float(vty) {
+                                        v = iw_to_f64_word(fw, &v);
+                                    } else if !self.is_float(el) && self.is_float(vty) {
+                                        self.err_diff(
+                                            &s.pos,
+                                            "array element assignment",
+                                            "non-float surface",
+                                            "float",
+                                        );
+                                    } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
+                                        let els = self.r.get(el).clone();
+                                        let vts = self.r.get(vty).clone();
+                                        if !self.surface_compat(&els, &vts) {
+                                            let en = self.surface_name(&els);
+                                            let vn = self.surface_name(&vts);
+                                            self.err_diff(
+                                                &s.pos,
+                                                "array element assignment",
+                                                &en,
+                                                &vn,
+                                            );
+                                        }
+                                    }
+                                    // rc patch B: release the old elem
+                                    // (scalar/nil words no-op in rt),
+                                    // retain the new one if ref-typed
+                                    if self.is_ref(el) {
+                                        let old = fw.v();
+                                        fw.op(&format!(
                                                     "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
                                                     old, av, iv
                                                 ));
-                                                self.emit_release(fw, &old);
-                                                let rv2 = self.emit_retain(fw, &v);
-                                                v = rv2;
-                                            }
-                                            fw.op(&format!(
+                                        self.emit_release(fw, &old);
+                                        let rv2 = self.emit_retain(fw, &v);
+                                        v = rv2;
+                                    }
+                                    fw.op(&format!(
                                                 "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
                                                 av, iv, v
                                             ));
-                                        }
-                                        Ty::Map(k, v2) => {
-                                            let kkind = matches!(self.r.get(k), Ty::Str);
-                                            let vf = self.is_float(v2);
-                                            // object keys: monomorphized hash()
-                                            // routed into the call (patch #35)
-                                            let mut use_h: Option<String> = None;
-                                            if let Ty::Named(kcls, _) = self.r.get(k).clone() {
-                                                if self.class_ids.contains_key(&kcls) {
-                                                    match self.find_map_key_hash(&kcls) {
-                                                        Some((hmname, defcls, hfd)) => {
-                                                            let oargv = vec![(
-                                                                iv.clone(),
-                                                                self.r.mk(Ty::I64),
-                                                            )];
-                                                            let osig = vec!["i64".to_string()];
-                                                            let (hv, _ht) = self.emit_method_call(
-                                                                fw, &defcls, &hmname, &hfd, false,
-                                                                &oargv, &osig, &s.pos,
-                                                            );
-                                                            use_h = Some(hv);
-                                                        }
-                                                        None => {
-                                                            self.err(
+                                }
+                                Ty::Map(k, v2) => {
+                                    let kkind = matches!(self.r.get(k), Ty::Str);
+                                    let vf = self.is_float(v2);
+                                    // object keys: monomorphized hash()
+                                    // routed into the call (patch #35)
+                                    let mut use_h: Option<String> = None;
+                                    if let Ty::Named(kcls, _) = self.r.get(k).clone() {
+                                        if self.class_ids.contains_key(&kcls) {
+                                            match self.find_map_key_hash(&kcls) {
+                                                Some((hmname, defcls, hfd)) => {
+                                                    let oargv =
+                                                        vec![(iv.clone(), self.r.mk(Ty::I64))];
+                                                    let osig = vec!["i64".to_string()];
+                                                    let (hv, _ht) = self.emit_method_call(
+                                                        fw, &defcls, &hmname, &hfd, false, &oargv,
+                                                        &osig, &s.pos,
+                                                    );
+                                                    use_h = Some(hv);
+                                                }
+                                                None => {
+                                                    self.err(
                                                             &s.pos,
                                                             format!(
                                                                 "map key `{}` implements no `hash()`-family method — keyed by pointer identity (Hashable surface needs `hash()`/`hashKey()`/`__hash__()`)",
                                                                 kcls
                                                             ),
                                                         );
-                                                        }
-                                                    }
                                                 }
                                             }
-                                            if vf && !self.is_float(vty) {
-                                                // int word -> f64 word
-                                                v = iw_to_f64_word(fw, &v);
-                                            }
-                                            // rc patch B: the map slot owns its
-                                            // key (str/object) and value copy;
-                                            // scalar/nil words no-op in rt.
-                                            // Overwrite-time release of evicted
-                                            // old pairs lands in patch C.
-                                            let kty = self.r.get(k).clone();
-                                            let kref = matches!(kty, Ty::Str | Ty::Named(_, _));
-                                            if kref {
-                                                self.emit_retain(fw, &iv);
-                                            }
-                                            let vref = !vf && self.is_ref(v2);
-                                            if vref {
-                                                let rv2 = self.emit_retain(fw, &v);
-                                                v = rv2;
-                                            }
-                                            match use_h {
-                                                Some(hv) => {
-                                                    fw.op(&format!(
+                                        }
+                                    }
+                                    if self.opt_inner(v2).is_some() || self.weak_inner(v2).is_some()
+                                    {
+                                        let (vc, _tc) = self.coerce_word_to(fw, &v, vty, v2);
+                                        v = vc;
+                                    } else if vf && !self.is_float(vty) {
+                                        // int word -> f64 word
+                                        v = iw_to_f64_word(fw, &v);
+                                    } else if !vf && self.is_float(vty) {
+                                        self.err_diff(
+                                            &s.pos,
+                                            "map value assignment",
+                                            "non-float surface",
+                                            "float",
+                                        );
+                                    } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
+                                        let v2s = self.r.get(v2).clone();
+                                        let vts = self.r.get(vty).clone();
+                                        if !self.surface_compat(&v2s, &vts) {
+                                            let en = self.surface_name(&v2s);
+                                            let vn = self.surface_name(&vts);
+                                            self.err_diff(&s.pos, "map value assignment", &en, &vn);
+                                        }
+                                    }
+                                    // rc patch B: the map slot owns its
+                                    // key (str/object) and value copy;
+                                    // scalar/nil words no-op in rt.
+                                    // Overwrite-time release of evicted
+                                    // old pairs lands in patch C.
+                                    let kty = self.r.get(k).clone();
+                                    let kref = matches!(kty, Ty::Str | Ty::Named(_, _));
+                                    if kref {
+                                        self.emit_retain(fw, &iv);
+                                    }
+                                    let vref = !vf && self.is_ref(v2);
+                                    if vref {
+                                        let rv2 = self.emit_retain(fw, &v);
+                                        v = rv2;
+                                    }
+                                    match use_h {
+                                        Some(hv) => {
+                                            fw.op(&format!(
                                                         "    call @sloth_map_set_h({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                                                         av, iv, hv, v
                                                     ));
-                                                }
-                                                None => {
-                                                    let sym = if kkind {
-                                                        "sloth_map_str_set"
-                                                    } else {
-                                                        "sloth_map_set"
-                                                    };
-                                                    fw.op(&format!(
-                                                        "    call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
-                                                        sym, av, iv, v
-                                                    ));
-                                                }
-                                            }
                                         }
-                                        Ty::Named(cn, _) => {
-                                            // Indexable overload: a[i] = v ≡ a.__assign__(i, v)
-                                            match self.find_method(cn.as_str(), "__assign__") {
-                                                Some((defcls, fd)) => {
-                                                    let mut vc = v.clone();
-                                                    let retf = fd.params.len() >= 3 && {
-                                                        let pt = fd.params[2].ty.clone();
-                                                        pt.as_ref()
-                                                            .map(|t| {
-                                                                let dt = self.ty_of(t);
-                                                                self.is_float(dt)
-                                                            })
-                                                            .unwrap_or(false)
-                                                    };
-                                                    if retf && !self.is_float(vty) {
-                                                        vc = iw_to_f64_word(fw, &v);
-                                                    }
-                                                    let oargv = vec![
-                                                        (av.clone(), at),
-                                                        (iv.clone(), self.r.mk(Ty::I64)),
-                                                        (vc, vty),
-                                                    ];
-                                                    let osig = vec![
-                                                        mlir_word_ty(at, &self.r),
-                                                        "i64".to_string(),
-                                                        mlir_word_ty(vty, &self.r),
-                                                    ];
-                                                    self.emit_method_call(
-                                                        fw,
-                                                        &defcls,
-                                                        "__assign__",
-                                                        &fd,
-                                                        false,
-                                                        &oargv,
-                                                        &osig,
-                                                        &s.pos,
-                                                    );
-                                                }
-                                                None => {
-                                                    self.err(
-                                                        &s.pos,
-                                                        format!("class `{}` requires an `__assign__` overload for index assignment", cn),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            self.err(
-                                                &s.pos,
-                                                "index assignment on non-array".to_string(),
-                                            );
-                                            return;
+                                        None => {
+                                            let sym = if kkind {
+                                                "sloth_map_str_set"
+                                            } else {
+                                                "sloth_map_set"
+                                            };
+                                            fw.op(&format!(
+                                                "    call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                                                sym, av, iv, v
+                                            ));
                                         }
                                     }
                                 }
-                                None => {
-                                    self.err(&s.pos, format!("unknown array `{}`", h));
+                                Ty::Named(cn, _) => {
+                                    // Indexable overload: a[i] = v ≡ a.__assign__(i, v)
+                                    match self.find_method(cn.as_str(), "__assign__") {
+                                        Some((defcls, fd)) => {
+                                            let mut vc = v.clone();
+                                            let retf = fd.params.len() >= 3 && {
+                                                let pt = fd.params[2].ty.clone();
+                                                pt.as_ref()
+                                                    .map(|t| {
+                                                        let dt = self.ty_of(t);
+                                                        self.is_float(dt)
+                                                    })
+                                                    .unwrap_or(false)
+                                            };
+                                            if retf && !self.is_float(vty) {
+                                                vc = iw_to_f64_word(fw, &v);
+                                            }
+                                            let oargv = vec![
+                                                (av.clone(), at),
+                                                (iv.clone(), self.r.mk(Ty::I64)),
+                                                (vc, vty),
+                                            ];
+                                            let osig = vec![
+                                                mlir_word_ty(at, &self.r),
+                                                "i64".to_string(),
+                                                mlir_word_ty(vty, &self.r),
+                                            ];
+                                            self.emit_method_call(
+                                                fw,
+                                                &defcls,
+                                                "__assign__",
+                                                &fd,
+                                                false,
+                                                &oargv,
+                                                &osig,
+                                                &s.pos,
+                                            );
+                                        }
+                                        None => {
+                                            self.err(
+                                                        &s.pos,
+                                                        format!("class `{}` requires an `__assign__` overload for index assignment", cn),
+                                                    );
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.err(&s.pos, "index assignment on non-array".to_string());
+                                    return;
                                 }
                             }
                         }
@@ -566,6 +630,154 @@ impl ModEmitter {
             StmtNode::Block(_) => {
                 self.walk_body(fw, s);
             }
+        }
+    }
+}
+
+impl ModEmitter {
+    /// declared surface of an assignment target: the variable/field type for a
+    /// plain name, or the container's element/value type for an index target.
+    /// Used both for value inference hints and the Result-ctor fast path.
+    pub(crate) fn assign_target_type(&mut self, fw: &FnWalk, target: &[PathSeg]) -> Option<TyId> {
+        match target.last()? {
+            PathSeg::Name(n) => {
+                if target.len() == 1 {
+                    fw.lookup(&n.clone()).map(|x| x.1)
+                } else {
+                    self.assign_container_type(fw, &target[..target.len() - 1])
+                        .and_then(|ct| match self.r.get(ct).clone() {
+                            // `a.f` / `a.f.g` — field of an object surface
+                            Ty::Named(c, _) => Some(self.field_type(&c, n)),
+                            _ => None,
+                        })
+                }
+            }
+            PathSeg::Index(_) => self
+                .assign_container_type(fw, &target[..target.len() - 1])
+                .and_then(|ct| match self.r.get(ct).clone() {
+                    Ty::Array(el) => Some(el),
+                    Ty::Map(_, v) => Some(v),
+                    _ => None,
+                }),
+        }
+    }
+
+    /// evaluate the container denoted by an assignment prefix into a word:
+    /// a local, an object field, or a nested container element (design §3
+    /// EBNF `assignable` allows arbitrarily chained `.` / `[]`). Used by the
+    /// index-assignment path for `a[i][j] = v` / `h.f[i] = v` / `m[k1][k2] = v`.
+    pub(crate) fn eval_assign_container(
+        &mut self,
+        fw: &mut FnWalk,
+        prefix: &[PathSeg],
+        pos: &Pos,
+    ) -> Option<(String, TyId)> {
+        match prefix {
+            [] => None,
+            [PathSeg::Name(h)] => match fw.lookup(&h.clone()) {
+                Some((aa, at)) => {
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", z));
+                    let av = fw.v();
+                    fw.op(&format!(
+                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                        av, aa, z
+                    ));
+                    Some((av, at))
+                }
+                None => {
+                    self.err(pos, format!("unknown `{}`", h));
+                    None
+                }
+            },
+            _ => {
+                let (parent, last) = prefix.split_at(prefix.len() - 1);
+                let (pw, pt) = self.eval_assign_container(fw, parent, pos)?;
+                match &last[0] {
+                    PathSeg::Name(f) => {
+                        if let Ty::Named(c, _) = self.r.get(pt).clone() {
+                            let fi = self.field_index(&c, f);
+                            let zi = fw.v();
+                            fw.op(&format!(
+                                "    {} = arith.constant {} : i64",
+                                zi,
+                                enc_i_lit(fi as i64)
+                            ));
+                            let fv = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                fv, pw, zi
+                            ));
+                            Some((fv, self.field_type(&c, f)))
+                        } else {
+                            self.err(pos, "nested assignment base must be an object".to_string());
+                            None
+                        }
+                    }
+                    PathSeg::Index(ix) => {
+                        let (iv, _) = self.emit_expr(fw, ix);
+                        match self.r.get(pt).clone() {
+                            Ty::Array(el) => {
+                                let inner = fw.v();
+                                fw.op(&format!(
+                                    "    {} = call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                                    inner, pw, iv
+                                ));
+                                Some((inner, el))
+                            }
+                            Ty::Map(k, v) => {
+                                let kkind = matches!(self.r.get(k), Ty::Str);
+                                let sym = if kkind {
+                                    "sloth_map_str_get"
+                                } else {
+                                    "sloth_map_get"
+                                };
+                                let inner = fw.v();
+                                fw.op(&format!(
+                                    "    {} = call @{}({}, {}) : (i64, i64) -> i64",
+                                    inner, sym, pw, iv
+                                ));
+                                Some((inner, v))
+                            }
+                            _ => {
+                                self.err(
+                                    pos,
+                                    "nested index assignment base is not a container".to_string(),
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// type of the container expression denoted by an assignment prefix
+    /// (a local, an object field, or a nested container element)
+    pub(crate) fn assign_container_type(
+        &mut self,
+        fw: &FnWalk,
+        prefix: &[PathSeg],
+    ) -> Option<TyId> {
+        match prefix {
+            [PathSeg::Name(h)] => fw.lookup(&h.clone()).map(|x| x.1),
+            [PathSeg::Name(h), PathSeg::Name(f)] => match fw.lookup(&h.clone()) {
+                Some((_a, t)) => match self.r.get(t).clone() {
+                    Ty::Named(c, _) => Some(self.field_type(&c, f)),
+                    _ => None,
+                },
+                None => None,
+            },
+            [PathSeg::Name(h), PathSeg::Index(_)] => match fw.lookup(&h.clone()) {
+                Some((_a, t)) => match self.r.get(t).clone() {
+                    Ty::Array(el) => Some(el),
+                    Ty::Map(_, v) => Some(v),
+                    _ => None,
+                },
+                None => None,
+            },
+            _ => None,
         }
     }
 }
@@ -646,12 +858,36 @@ impl ModEmitter {
         };
         // patch 42: value-optional return surfaces box bare scalars; nil
         // word (0) passes through as nil
-        let (v, t) = if self.opt_inner(fw.ret).is_some() {
+        let (mut v, mut t) = if self.opt_inner(fw.ret).is_some() {
             let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
             (vc, tc)
         } else {
             (v, t)
         };
+        // declared-return surface check (design §2.2 static typing): int
+        // words promote into float returns; word-family conflicts diagnose.
+        // Unit returns and unannotated bodies stay lenient.
+        if !self.is_unit(fw.ret)
+            && self.opt_inner(fw.ret).is_none()
+            && self.weak_inner(fw.ret).is_none()
+        {
+            if self.is_float(fw.ret) {
+                if !self.is_float(t) && !matches!(self.r.get(t).clone(), Ty::Unit) {
+                    v = iw_to_f64_word(fw, &v);
+                    t = self.r.mk(Ty::F64);
+                }
+            } else if self.is_float(t) {
+                self.err_diff(&e.pos, "return value", "non-float surface", "float");
+            } else if !matches!(self.r.get(t).clone(), Ty::Unit) {
+                let rts = self.r.get(fw.ret).clone();
+                let vts = self.r.get(t).clone();
+                if !self.surface_compat(&rts, &vts) {
+                    let rtn = self.surface_name(&rts);
+                    let vtn = self.surface_name(&vts);
+                    self.err_diff(&e.pos, "return value", &rtn, &vtn);
+                }
+            }
+        }
         let fl = self.is_float(t);
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
@@ -705,6 +941,35 @@ impl ModEmitter {
                         let nty = self.r.mk(Ty::Named(cn.to_string(), Vec::new()));
                         Some((x, nty))
                     }
+                    // builtin `is` on an optional: look through the option
+                    // layer and narrow to the payload family when it matches
+                    ExprNode::Ident(cn) if Self::is_builtin_type_name(cn) => {
+                        let mut wt = fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone())?;
+                        let mut had_opt = false;
+                        while let Ty::Opt(inner) = wt {
+                            had_opt = true;
+                            wt = self.r.get(inner).clone();
+                        }
+                        if !had_opt {
+                            return None;
+                        }
+                        let hit = matches!(
+                            (&wt, cn.as_str()),
+                            (Ty::I64, "int")
+                                | (Ty::I64, "i64")
+                                | (Ty::F64, "float")
+                                | (Ty::F64, "f64")
+                                | (Ty::Str, "str")
+                                | (Ty::Bool, "bool")
+                                | (Ty::Range, "range")
+                        );
+                        if hit {
+                            let ni = self.r.mk(wt);
+                            Some((x, ni))
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -729,6 +994,88 @@ impl ModEmitter {
             _ => None,
         }
     }
+
+    /// narrowing valid on the FALSE branch of `cond`:
+    /// `if x is nil {} else {}` ⇒ x is not nil; `if x is not C {} else {}` ⇒ x is C
+    pub(crate) fn narrow_pattern_false(
+        &mut self,
+        fw: &mut FnWalk,
+        cond: &Expr,
+    ) -> Option<(String, TyId)> {
+        let (negated, lhs, rhs) = match &cond.node {
+            ExprNode::Is { negated, lhs, rhs } => (*negated, lhs, rhs),
+            _ => return None,
+        };
+        let x = match &lhs.node {
+            ExprNode::Ident(n) => n.clone(),
+            _ => return None,
+        };
+        match (negated, &rhs.node) {
+            (false, ExprNode::Nil) => {
+                // x is nil is false ⇒ x is not nil
+                match fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone()) {
+                    Some(Ty::Opt(e)) => Some((x, e)),
+                    _ => None,
+                }
+            }
+            (true, ExprNode::Ident(cn)) if self.class_ids.contains_key(cn.as_str()) => {
+                // x is not C is false ⇒ x is C
+                let nty = self.r.mk(Ty::Named(cn.to_string(), Vec::new()));
+                Some((x, nty))
+            }
+            _ => None,
+        }
+    }
+
+    /// emit `body` with `x` shadow-narrowed to `nty` (value-optional payloads
+    /// are unboxed into a fresh scalar shadow slot)
+    pub(crate) fn walk_narrowed(&mut self, fw: &mut FnWalk, x: &str, nty: TyId, body: &Stmt) {
+        if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) {
+            let slot = fw.lookup(x).map(|(a, _t)| a);
+            if let Some(a) = slot {
+                let w = {
+                    let zz = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", zz));
+                    let w2 = fw.v();
+                    fw.op(&format!(
+                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                        w2, a, zz
+                    ));
+                    w2
+                };
+                let ot = self.r.mk(Ty::Opt(nty));
+                let (u, _ut) = self.unwrap_opt_word(fw, &w, ot);
+                fw.push_scope();
+                let sa = fw.v();
+                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", sa));
+                let zz2 = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", zz2));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    u, sa, zz2
+                ));
+                fw.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(x.to_string(), (sa, nty));
+                self.walk_body(fw, body);
+                fw.pop_scope();
+                return;
+            }
+        }
+        let slot = fw.lookup(x).map(|(a, _)| a);
+        if let Some(a) = slot {
+            fw.push_scope();
+            fw.scopes
+                .last_mut()
+                .unwrap()
+                .insert(x.to_string(), (a, nty));
+            self.walk_body(fw, body);
+            fw.pop_scope();
+        } else {
+            self.walk_body(fw, body);
+        }
+    }
 }
 
 impl ModEmitter {
@@ -751,10 +1098,13 @@ impl ModEmitter {
             let tn = sloth_frontend::ty::ty_name(self.r.get(ct));
             self.err_cond_bool(pos, &tn);
         }
-        let narrow = if self.diags.is_empty() {
-            self.narrow_pattern(fw, cond)
+        let (narrow, narrow_else) = if self.diags.is_empty() {
+            (
+                self.narrow_pattern(fw, cond),
+                self.narrow_pattern_false(fw, cond),
+            )
         } else {
-            None
+            (None, None)
         };
         let thlab = fw.newlabel("t");
         let ellab = fw.newlabel("e");
@@ -762,58 +1112,16 @@ impl ModEmitter {
         fw.cjump(&c, &thlab, &ellab);
         fw.label(&thlab);
         match narrow {
-            Some((x, nty)) if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) => {
-                // boxed payload: materialize `sloth_box_get` into the shadow
-                let fl = self.is_float(nty);
-                let slot = fw.lookup(&x).map(|(a, _t)| a);
-                if let Some(a) = slot {
-                    let w = {
-                        let zz = fw.v();
-                        fw.op(&format!("    {} = arith.constant 0 : index", zz));
-                        let w2 = fw.v();
-                        fw.op(&format!(
-                            "    {} = memref.load {}[{}] : memref<1xi64>",
-                            w2, a, zz
-                        ));
-                        w2
-                    };
-                    // unwrap (nil never reaches this branch; box_get is safe)
-                    let ot = self.r.mk(Ty::Opt(nty));
-                    let (u, _ut) = self.unwrap_opt_word(fw, &w, ot);
-                    fw.push_scope();
-                    let sa = fw.v();
-                    let _ = fl;
-                    fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", sa));
-                    let zz2 = fw.v();
-                    fw.op(&format!("    {} = arith.constant 0 : index", zz2));
-                    fw.op(&format!(
-                        "    memref.store {}, {}[{}] : memref<1xi64>",
-                        u, sa, zz2
-                    ));
-                    fw.scopes.last_mut().unwrap().insert(x.clone(), (sa, nty));
-                    self.walk_body(fw, then_);
-                    fw.pop_scope();
-                } else {
-                    self.walk_body(fw, then_);
-                }
-            }
-            Some((x, nty)) => {
-                let slot = fw.lookup(&x).map(|(a, _)| a);
-                if let Some(a) = slot {
-                    fw.push_scope();
-                    fw.scopes.last_mut().unwrap().insert(x.clone(), (a, nty));
-                    self.walk_body(fw, then_);
-                    fw.pop_scope();
-                } else {
-                    self.walk_body(fw, then_);
-                }
-            }
+            Some((x, nty)) => self.walk_narrowed(fw, &x, nty, then_),
             None => self.walk_body(fw, then_),
         }
         fw.jump(&endlab);
         fw.label(&ellab);
         if let Some(e2) = else_ {
-            self.walk_body(fw, e2);
+            match narrow_else {
+                Some((x, nty)) => self.walk_narrowed(fw, &x, nty, e2),
+                None => self.walk_body(fw, e2),
+            }
         }
         fw.jump(&endlab);
         fw.label(&endlab);
@@ -881,67 +1189,7 @@ impl ModEmitter {
                     fw.op(&format!("    {} = arith.addi {}, {} : i64", h, hi0, one));
                     h
                 };
-                // slot for range bound; slot for index
-                fw.push_scope();
-                let islot = fw.v();
-                let z = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", z));
-                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    lo, islot, z
-                ));
-                let head = fw.newlabel("fr");
-                let doo = fw.newlabel("fb");
-                let done = fw.newlabel("fd");
-                fw.jump(&head);
-                fw.label(&head);
-                let iv = fw.v();
-                fw.op(&format!(
-                    "    {} = memref.load {}[{}] : memref<1xi64>",
-                    iv, islot, z
-                ));
-                let c = fw.v();
-                fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, hi));
-                let c1 = fw.v();
-                fw.op(&format!("    {} = arith.extui {} : i1 to i64", c1, c));
-                fw.cjump(&c1, &doo, &done);
-                fw.label(&doo);
-                // continue lands on the increment, not the head test
-                let cont = fw.newlabel("fc");
-                fw.loops.push((done.clone(), cont.clone()));
-                // bind loop var
-                let vs = fw.v();
-                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    iv, vs, z
-                ));
-                fw.scopes
-                    .last_mut()
-                    .unwrap()
-                    .insert(var.to_string(), (vs, self.r.mk(Ty::I64)));
-                fw.loopvars.push(var.to_string());
-                self.walk_body(fw, body);
-                fw.loopvars.pop();
-                fw.loops.pop();
-                fw.label_br(&cont);
-                // idx += 1 (encoded word: the loop var holds a tagged int)
-                let one2 = fw.v();
-                fw.op(&format!(
-                    "    {} = arith.constant {} : i64",
-                    one2,
-                    enc_i_lit(1)
-                ));
-                let nx = fw.v();
-                fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
-                fw.op(&format!(
-                    "    memref.store {}, {}[{}] : memref<1xi64>",
-                    nx, islot, z
-                ));
-                fw.jump(&head);
-                fw.label(&done);
-                fw.pop_scope();
+                self.emit_range_loop(fw, var, body, &lo, &hi);
             }
             _ => {
                 // array/map iteration: for x in arr|map { ... } with a slotted counter
@@ -970,6 +1218,21 @@ impl ModEmitter {
                         self.emit_proto_loop(fw, var, body, mav.clone(), at.clone(), pos);
                         return;
                     }
+                    // first-class range value: unbox {lo, hi} and run the loop
+                    Ty::Range => {
+                        let lo = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_range_lo({}) : (i64) -> i64",
+                            lo, mav
+                        ));
+                        let hi = fw.v();
+                        fw.op(&format!(
+                            "    {} = call @sloth_range_hi({}) : (i64) -> i64",
+                            hi, mav
+                        ));
+                        self.emit_range_loop(fw, var, body, &lo, &hi);
+                        return;
+                    }
                     _ => {
                         self.err(pos, "for-iteration requires a range, array, map, string, array-backed or iterator value".to_string());
                         return;
@@ -977,6 +1240,84 @@ impl ModEmitter {
                 };
             }
         }
+    }
+}
+
+impl ModEmitter {
+    /// bound-driven integer loop shared by range literals and first-class
+    /// range values. `lo`/`hi` are tagged words; `hi` is the exclusive upper
+    /// bound (inclusive ranges normalize it before calling).
+    pub(crate) fn emit_range_loop(
+        &mut self,
+        fw: &mut FnWalk,
+        var: &str,
+        body: &Stmt,
+        lo: &str,
+        hi: &str,
+    ) {
+        let lo = lo.to_string();
+        let hi = hi.to_string();
+        // slot for range bound; slot for index
+        fw.push_scope();
+        let islot = fw.v();
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", islot));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            lo, islot, z
+        ));
+        let head = fw.newlabel("fr");
+        let doo = fw.newlabel("fb");
+        let done = fw.newlabel("fd");
+        fw.jump(&head);
+        fw.label(&head);
+        let iv = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            iv, islot, z
+        ));
+        let c = fw.v();
+        fw.op(&format!("    {} = arith.cmpi slt, {}, {} : i64", c, iv, hi));
+        let c1 = fw.v();
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", c1, c));
+        fw.cjump(&c1, &doo, &done);
+        fw.label(&doo);
+        // continue lands on the increment, not the head test
+        let cont = fw.newlabel("fc");
+        fw.loops.push((done.clone(), cont.clone()));
+        // bind loop var
+        let vs = fw.v();
+        fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            iv, vs, z
+        ));
+        fw.scopes
+            .last_mut()
+            .unwrap()
+            .insert(var.to_string(), (vs, self.r.mk(Ty::I64)));
+        fw.loopvars.push(var.to_string());
+        self.walk_body(fw, body);
+        fw.loopvars.pop();
+        fw.loops.pop();
+        fw.label_br(&cont);
+        // idx += 1 (encoded word: the loop var holds a tagged int)
+        let one2 = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            one2,
+            enc_i_lit(1)
+        ));
+        let nx = fw.v();
+        fw.op(&format!("    {} = arith.addi {}, {} : i64", nx, iv, one2));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            nx, islot, z
+        ));
+        fw.jump(&head);
+        fw.label(&done);
+        fw.pop_scope();
     }
 }
 
@@ -1163,7 +1504,7 @@ impl ModEmitter {
         let (countfn, getfn, getty) = match kind {
             // tag migration: one word route (float elements ride the word)
             IdxKind::Arr => ("sloth_arr_len", "sloth_arr_get", "(i64, i64) -> i64"),
-            IdxKind::StrChar => ("sloth_str_len", "sloth_str_char", "(i64, i64) -> i64"),
+            IdxKind::StrChar => ("sloth_str_clen", "sloth_str_char", "(i64, i64) -> i64"),
         };
         let lenv = fw.v();
         fw.op(&format!(

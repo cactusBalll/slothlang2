@@ -132,12 +132,17 @@ impl ModEmitter {
             .map(|(i, t)| format!("%p{}: {}", i, t))
             .collect();
         let sigtxt = sigtxt.join(", ");
-        // entry (declared main or script): imported modules' var inits first
-        let entry_text = if entry && !self.init_mods.is_empty() {
+        // entry (declared main or script): imported modules' var inits first,
+        // then the local module's own declared globals
+        let entry_text = if entry {
             let mut pre = String::new();
             for m in self.init_mods.clone() {
                 pre.push_str(&format!("    call @sloth_{}__ginit() : () -> ()\n", m));
             }
+            pre.push_str(&format!(
+                "    call @sloth_{}__ginit() : () -> ()\n",
+                self.name
+            ));
             format!("{}{}", pre, entry_text)
         } else {
             entry_text

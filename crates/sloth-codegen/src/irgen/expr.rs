@@ -61,10 +61,8 @@ impl ModEmitter {
                 match self.r.get(rt) {
                     Ty::Named(c, _) => {
                         let idx = self.field_index(c, name) as i64;
-                        // rc patch B: raw store ONLY — the field slot owns
-                        // the count already and rt transfer followed the
-                        // relocated chunk; a release here would drop the
-                        // field's own count (same address = live handle)
+                        // stable-handle push: the returned word equals the
+                        // field's own handle (raw store, no release)
                         let zi = fw.v();
                         fw.op(&format!(
                             "    {} = arith.constant {} : i64",
@@ -82,10 +80,12 @@ impl ModEmitter {
                     ),
                 }
             }
-            _ => self.err(
-                pos,
-                "push receiver must be a local or object field".to_string(),
-            ),
+            // rvalue chains (nested container elements `g[i].push(v)`,
+            // returned arrays, ...) need no writeback: array handles are
+            // stable, so the element/alias already holds the live handle
+            _ => {
+                let _ = pos;
+            }
         }
     }
 }
@@ -346,20 +346,32 @@ impl ModEmitter {
                         v, a, z
                     ));
                     (v, t)
-                } else if let Some((gsym, t, _)) = self.globals.get(name).cloned() {
-                    let (v, _vt) = self.emit_global_read(fw, &gsym, t);
-                    (v, t)
-                } else if let Some((gsym, t)) = self
-                    .fglobals
-                    .get(&format!("{}.{}", self.cur_mod, name))
-                    .cloned()
-                {
-                    // own-module global while emitting a foreign module's body
-                    let (v, _vt) = self.emit_global_read(fw, &gsym, t);
-                    (v, t)
                 } else {
-                    self.err(&e.pos, format!("unknown identifier `{}`", name));
-                    (String::new(), self.r.mk(Ty::Unit))
+                    // own-module global while emitting a foreign body wins over
+                    // a same-named local global
+                    let cur_mod = self.cur_mod.clone();
+                    let fg = self.fglobals.get(&format!("{}.{}", cur_mod, name)).cloned();
+                    let lg = self.globals.get(name).cloned();
+                    let picked = if cur_mod != self.name {
+                        fg.or(lg)
+                    } else {
+                        lg.or(fg)
+                    };
+                    match picked {
+                        Some((gsym, t, _)) => {
+                            let (v, _vt) = self.emit_global_read(fw, &gsym, t);
+                            (v, t)
+                        }
+                        None => {
+                            // named function used as a first-class value
+                            if let Some(out) = self.emit_fn_named_value(fw, name, &e.pos) {
+                                out
+                            } else {
+                                self.err(&e.pos, format!("unknown identifier `{}`", name));
+                                (String::new(), self.r.mk(Ty::Unit))
+                            }
+                        }
+                    }
                 }
             }
             _ => self.emit_expr_arith_codes(fw, e),
@@ -413,8 +425,10 @@ impl ModEmitter {
                             _ => false,
                         };
                         // patch 42: an optional word is a runtime box-or-nil —
-                        // `x is int` resolves against liveness, not statically
-                        if self.opt_inner(lt).is_some() {
+                        // `x is int` resolves against liveness, not statically.
+                        // Reference optionals (`str?`/`C?`) hold the bare
+                        // handle (0 = nil), so they take the same liveness path.
+                        if matches!(self.r.get(lt).clone(), Ty::Opt(_)) {
                             let zc = fw.v();
                             fw.op(&format!("    {} = arith.constant 0 : i64", zc));
                             let live = fw.v();
@@ -560,12 +574,27 @@ impl ModEmitter {
             }
             ExprNode::Elvis { lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(fw, lhs);
-                let (mut rv, rt) = self.emit_expr(fw, rhs);
+                let (rv, rt) = self.emit_expr(fw, rhs);
                 // patch 42: boxed value optionals unwrap-or-0 on the taken
                 // branch; bare float-Elvis stays rejected
                 let (u, ut) = self.unwrap_opt_word(fw, &lv, lt);
-                if self.is_float(ut) && !self.is_float(rt) {
-                    rv = iw_to_f64_word(fw, &rv);
+                // reference optional (`C?`): the handle word already is the
+                // payload, so `?:` yields the inner type (value optionals were
+                // already unboxed by unwrap_opt_word)
+                let ut = match self.r.get(ut).clone() {
+                    Ty::Opt(e) => e,
+                    _ => ut,
+                };
+                // design §2.1: `?:` joins two operands of the same type — a
+                // mixed int/float pair is a compile error, not a promotion
+                // (a `nil` rhs is exempt: it keeps the optional surface)
+                if self.r.get(rt) != &Ty::Unit
+                    && self.r.get(ut) != &Ty::Unit
+                    && self.is_float(ut) != self.is_float(rt)
+                {
+                    let an = sloth_frontend::ty::ty_name(self.r.get(ut));
+                    let bn = sloth_frontend::ty::ty_name(self.r.get(rt));
+                    self.err_diff(&e.pos, "elvis operand", &an, &bn);
                 }
                 // encoded words select word-wise; nil/0.0 both ride word 0
                 let zc = fw.v();
@@ -621,19 +650,22 @@ impl ModEmitter {
                     self.dangling_producer(fw, &r, st);
                     return (r, st);
                 }
-                let fl = self.is_float(at) || self.is_float(bt);
+                // design §2.1: no implicit numeric conversion — arithmetic
+                // operands must share their type. A mixed int/float pair is a
+                // compile error rather than a silent promotion.
+                if self.is_float(at) != self.is_float(bt) {
+                    let an = sloth_frontend::ty::ty_name(self.r.get(at));
+                    let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+                    self.err_diff(&e.pos, "arithmetic operand", &an, &bn);
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    return (z, self.r.mk(Ty::I64));
+                }
+                let fl = self.is_float(at) && self.is_float(bt);
                 if fl {
                     // tagged words -> f64 scalars for the typed op, then back
-                    let a = if self.is_float(at) {
-                        emit_dec_f(fw, &a)
-                    } else {
-                        iw_to_f64_scalar(fw, &a)
-                    };
-                    let b = if self.is_float(bt) {
-                        emit_dec_f(fw, &b)
-                    } else {
-                        iw_to_f64_scalar(fw, &b)
-                    };
+                    let a = emit_dec_f(fw, &a);
+                    let b = emit_dec_f(fw, &b);
                     let rf = fw.v();
                     let ao = match op {
                         ArithOp::Add => "arith.addf",
@@ -651,7 +683,6 @@ impl ModEmitter {
                 // keep the uniform decode for simpler correctness)
                 let ad = emit_dec_int(fw, &a);
                 let bd = emit_dec_int(fw, &b);
-                let rr = fw.v();
                 let ao = match op {
                     ArithOp::Add => "arith.addi",
                     ArithOp::Sub => "arith.subi",
@@ -659,6 +690,61 @@ impl ModEmitter {
                     ArithOp::Div => "arith.divsi",
                     ArithOp::Mod => "arith.remsi",
                 };
+                if matches!(op, ArithOp::Div | ArithOp::Mod) {
+                    // design §5.5: integer divide/modulo by zero is a panic.
+                    // Split the CFG around the guard; the result travels in a
+                    // slot so both sides dominate the merge.
+                    let resslot = fw.v();
+                    fw.op(&format!(
+                        "    {} = memref.alloca() : memref<1xi64>",
+                        resslot
+                    ));
+                    let zc = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", zc));
+                    let isz = fw.v();
+                    fw.op(&format!(
+                        "    {} = arith.cmpi eq, {}, {} : i64",
+                        isz, bd, zc
+                    ));
+                    let isze = fw.v();
+                    fw.op(&format!("    {} = arith.extui {} : i1 to i64", isze, isz));
+                    let lbl_panic = fw.newlabel("dz");
+                    let lbl_ok = fw.newlabel("dz");
+                    let lbl_end = fw.newlabel("dz");
+                    let saved_dangling = std::mem::take(&mut fw.dangling);
+                    fw.cjump(&isze, &lbl_panic, &lbl_ok);
+                    fw.label(&lbl_panic);
+                    fw.op("    call @sloth_panic_divzero() : () -> i64");
+                    let pz = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", pz));
+                    fw.op(&format!(
+                        "    memref.store {}, {}[{}] : memref<1xi64>",
+                        zc, resslot, pz
+                    ));
+                    fw.jump(&lbl_end);
+                    fw.label(&lbl_ok);
+                    let rr = fw.v();
+                    fw.op(&format!("    {} = {} {}, {} : i64", rr, ao, ad, bd));
+                    let oz = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", oz));
+                    fw.op(&format!(
+                        "    memref.store {}, {}[{}] : memref<1xi64>",
+                        rr, resslot, oz
+                    ));
+                    fw.jump(&lbl_end);
+                    fw.label(&lbl_end);
+                    fw.dangling = saved_dangling;
+                    let lz = fw.v();
+                    let rw = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : index", lz));
+                    fw.op(&format!(
+                        "    {} = memref.load {}[{}] : memref<1xi64>",
+                        rw, resslot, lz
+                    ));
+                    let r = emit_enc_int(fw, &rw);
+                    return (r, self.r.mk(Ty::I64));
+                }
+                let rr = fw.v();
                 fw.op(&format!("    {} = {} {}, {} : i64", rr, ao, ad, bd));
                 let r = emit_enc_int(fw, &rr);
                 (r, self.r.mk(Ty::I64))
@@ -697,6 +783,12 @@ impl ModEmitter {
             ExprNode::Bin { op, lhs, rhs } => {
                 let (a, at) = self.emit_expr(fw, lhs);
                 let (a, at) = self.unwrap_opt_word(fw, &a, at);
+                // logical operators short-circuit: `a and b` only evaluates b
+                // when a is true, `a or b` only when a is false (guard idiom
+                // `i < len and a[i] == x` must not evaluate a[i] out of range)
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    return self.emit_logical(fw, op, a, at, rhs, &e.pos);
+                }
                 let (b, bt) = self.emit_expr(fw, rhs);
                 let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
                 return self.emit_binop(fw, op, a, b, at, bt, &e.pos);
@@ -759,6 +851,78 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// short-circuit `and`/`or`. The lhs word is stored as the provisional
+    /// result; the rhs block runs only when it can change the outcome.
+    pub(crate) fn emit_logical(
+        &mut self,
+        fw: &mut FnWalk,
+        op: &BinOp,
+        a: String,
+        at: TyId,
+        rhs: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let bool_ty = self.r.mk(Ty::Bool);
+        if self.r.get(at) != &Ty::Bool {
+            let tn = sloth_frontend::ty::ty_name(self.r.get(at));
+            self.err_diff(pos, "logical operand", "bool", &tn);
+        }
+        let resslot = fw.v();
+        fw.op(&format!(
+            "    {} = memref.alloca() : memref<1xi64>",
+            resslot
+        ));
+        let rz = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", rz));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            a, resslot, rz
+        ));
+        // cond: dec(a) != 0
+        let ad = emit_dec_int(fw, &a);
+        let zc = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zc));
+        let nz = fw.v();
+        fw.op(&format!("    {} = arith.cmpi ne, {}, {} : i64", nz, ad, zc));
+        let nze = fw.v();
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", nze, nz));
+        let lbl_rhs = fw.newlabel("sc");
+        let lbl_end = fw.newlabel("sc");
+        let saved_dangling = std::mem::take(&mut fw.dangling);
+        match op {
+            // and: a true -> evaluate rhs; a false -> keep a
+            BinOp::And => fw.cjump(&nze, &lbl_rhs, &lbl_end),
+            // or: a true -> keep a; a false -> evaluate rhs
+            BinOp::Or => fw.cjump(&nze, &lbl_end, &lbl_rhs),
+            _ => unreachable!(),
+        }
+        fw.label(&lbl_rhs);
+        let (b, bt) = self.emit_expr(fw, rhs);
+        let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
+        if self.r.get(bt) != &Ty::Bool {
+            let tn = sloth_frontend::ty::ty_name(self.r.get(bt));
+            self.err_diff(&rhs.pos, "logical operand", "bool", &tn);
+        }
+        let bz = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", bz));
+        fw.op(&format!(
+            "    memref.store {}, {}[{}] : memref<1xi64>",
+            b, resslot, bz
+        ));
+        fw.rc_flush();
+        fw.jump(&lbl_end);
+        fw.label(&lbl_end);
+        fw.dangling = saved_dangling;
+        let lz = fw.v();
+        let rv = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", lz));
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            rv, resslot, lz
+        ));
+        (rv, bool_ty)
+    }
+
     pub(crate) fn emit_binop(
         &mut self,
         fw: &mut FnWalk,
@@ -829,7 +993,17 @@ impl ModEmitter {
             };
             return (rv, cmp_ty_id);
         }
-        let fl = self.is_float(at) || self.is_float(bt);
+        // design §2.1: no implicit numeric conversion — comparisons require
+        // both operands to share their type; int vs float is a compile error
+        if self.is_float(at) != self.is_float(bt) {
+            let an = sloth_frontend::ty::ty_name(self.r.get(at));
+            let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+            self.err_diff(pos, "comparison operand", &an, &bn);
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, cmp_ty_id);
+        }
+        let fl = self.is_float(at) && self.is_float(bt);
         if fl {
             // tagged f64 words -> raw scalars for cmpf
             let a = emit_dec_f(fw, &a);
@@ -906,7 +1080,7 @@ impl ModEmitter {
                 if let ExprNode::Ident(m) = &obj.node {
                     self.guard_hidden(m, name, &e.pos);
                     let key = format!("{}.{}", m, name);
-                    if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
+                    if let Some((g, gt, _)) = self.fglobals.get(&key).cloned() {
                         return self.emit_global_read(fw, &g, gt);
                     }
                 }
@@ -918,6 +1092,15 @@ impl ModEmitter {
                             format!("extern type `{}` is opaque (cannot access fields)", c),
                         );
                         return (String::new(), self.r.mk(Ty::Unit));
+                    }
+                    // a method reference `obj.method` (no field of that name)
+                    // yields a first-class function value bound to `obj`
+                    // (design §6 迁移表)
+                    if !self.has_field(&c, name) {
+                        if let Some((defcls, fd)) = self.find_method(&c, name) {
+                            return self
+                                .emit_method_ref_value(fw, &defcls, name, &fd, &recv, &e.pos);
+                        }
                     }
                     let idx = self.field_index(&c, name);
                     let zi = fw.v();
@@ -982,6 +1165,18 @@ impl ModEmitter {
                         }
                     }
                 }
+                if matches!(self.r.get(rt), Ty::Opt(_)) {
+                    // design §3.6: `?.` is not in this version — an optional
+                    // receiver must be narrowed with `is not nil` first
+                    self.err(
+                        &e.pos,
+                        format!(
+                            "field `{}` on an optional receiver; narrow it with `is not nil` first (design §3.6)",
+                            name
+                        ),
+                    );
+                    return (String::new(), self.r.mk(Ty::Unit));
+                }
                 self.err(&e.pos, format!("field `{}` on unknown type", name));
                 (String::new(), self.r.mk(Ty::Unit))
             }
@@ -990,24 +1185,31 @@ impl ModEmitter {
                 high,
                 inclusive,
             } => {
-                // MVP range lit as two-word repr: [lo, hi(+1)] held as i64 lo packed
+                // range as a first-class value: rc box {lo, hi(exclusive)}.
+                // Inclusive `a..=b` normalizes to hi=b+1 (encoded-word add).
                 let (lo, _lt) = self.emit_expr(fw, low);
                 let (hi, _ht) = self.emit_expr(fw, high);
-                // dec + add + enc: encoded word algebra (add is bijective)
-                let hd = emit_dec_int(fw, &hi);
-                let one = fw.v();
-                fw.op(&format!("    {} = arith.constant 1 : i64", one));
-                let hi3 = fw.v();
-                fw.op(&format!("    {} = arith.addi {}, {} : i64", hi3, hd, one));
-                let hi2 = emit_enc_int(fw, &hi3);
-                let _ = inclusive;
-                // pack lo in high word positions: MVP sloth.range helper
+                let hi2 = if *inclusive {
+                    let one = fw.v();
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        one,
+                        enc_i_lit(1)
+                    ));
+                    let h = fw.v();
+                    fw.op(&format!("    {} = arith.addi {}, {} : i64", h, hi, one));
+                    h
+                } else {
+                    hi
+                };
                 let r = fw.v();
                 fw.op(&format!(
                     "    {} = call @sloth_range_pack({}, {}) : (i64, i64) -> i64",
                     r, lo, hi2
                 ));
-                (r, self.r.mk(Ty::Range))
+                let rt = self.r.mk(Ty::Range);
+                self.dangling_producer(fw, &r, rt);
+                (r, rt)
             }
             ExprNode::List(xs) => {
                 // array literal: fixed-length gc allocation of i64/f64 words
@@ -1018,7 +1220,14 @@ impl ModEmitter {
                     evs.push(v);
                     ets.push(t);
                 }
-                let anyf = ets.iter().any(|t| self.is_float(*t));
+                // design §2.1: no implicit numeric conversion — an array
+                // literal mixing int and float elements has no common element
+                // type and is a compile error
+                let nfl = ets.iter().filter(|t| self.is_float(**t)).count();
+                if nfl > 0 && nfl < ets.len() {
+                    self.err_diff(&e.pos, "array literal element", "float", "int");
+                }
+                let anyf = nfl > 0;
                 if anyf {
                     for (v, t) in evs.iter_mut().zip(ets.iter_mut()) {
                         if !self.is_float(*t) {
@@ -1092,7 +1301,16 @@ impl ModEmitter {
                         arr, zi, vv
                     ));
                 }
-                let ty = if !ets.is_empty() && {
+                let hint_el = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                    Some(Ty::Array(e)) => Some(e),
+                    _ => None,
+                };
+                let ty = if ets.is_empty() {
+                    // empty literal: adopt the expected element type from the
+                    // surrounding annotation (`var a: Array<float> = []`)
+                    let ei = hint_el.unwrap_or_else(|| self.r.mk(Ty::I64));
+                    self.r.mk(Ty::Array(ei))
+                } else if {
                     let first = *ets.first().unwrap();
                     ets.iter().all(|t| self.r.get(*t) == self.r.get(first))
                 } {
@@ -1100,6 +1318,13 @@ impl ModEmitter {
                 } else if anyf {
                     let ef = self.r.mk(Ty::F64);
                     self.r.mk(Ty::Array(ef))
+                } else if let Some(n) = self.named_lub(&ets) {
+                    // heterogeneous class instances upcast to their nearest
+                    // common ancestor (e.g. [Animal, Dog, Puppy] -> Array<Animal>)
+                    let e = self.r.mk(Ty::Named(n, Vec::new()));
+                    self.r.mk(Ty::Array(e))
+                } else if let Some(e) = hint_el {
+                    self.r.mk(Ty::Array(e))
                 } else {
                     let ei = self.r.mk(Ty::I64);
                     self.r.mk(Ty::Array(ei))
@@ -1125,8 +1350,11 @@ impl ModEmitter {
                     kvm.iter()
                         .any(|t| matches!(self.r.get(*t).clone(), Ty::Named(_, _)))
                 };
-                if kvm.iter().any(|t| self.is_float(*t)) {
-                    self.err(&e.pos, "map keys must be int, str or Hashable".to_string());
+                // float keys are Hashable (design §2.5) and ride the word route
+                // (bitwise-equal tagged words); mixing families stays an error
+                let anyk_float = kvm.iter().any(|t| self.is_float(*t));
+                if anyk_float && kvm.iter().any(|t| !self.is_float(*t)) {
+                    self.err(&e.pos, "mixed map key types".to_string());
                 }
                 if anyk_str && kvm.iter().any(|t| !self.is_str(*t)) {
                     self.err(&e.pos, "mixed map key types".to_string());
@@ -1153,15 +1381,34 @@ impl ModEmitter {
                         }
                     }
                 }
+                // empty map literal: adopt K/V from the surrounding annotation
+                // (e.g. `var m: Map<str, int> = @()`)
+                let hint_kv = if pairs.is_empty() {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Map(k, v)) => Some((k, v)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let kty = if anyk_str {
                     self.r.mk(Ty::Str)
                 } else if anyk_obj {
                     kvm[0]
+                } else if anyk_float {
+                    self.r.mk(Ty::F64)
+                } else if let Some((k, _)) = hint_kv {
+                    k
                 } else {
                     self.r.mk(Ty::I64)
                 };
-                // value kind: unify int/float like list literals (float wins)
-                let anyf = vevs.iter().any(|x| self.is_float(x.1));
+                // value kind: no implicit numeric conversion — mixed int/float
+                // values have no common type and are a compile error
+                let nvf = vevs.iter().filter(|x| self.is_float(x.1)).count();
+                if nvf > 0 && nvf < vevs.len() {
+                    self.err_diff(&e.pos, "map value type", "float", "int");
+                }
+                let anyf = nvf > 0;
                 if anyf {
                     for x in vevs.iter_mut() {
                         if !self.is_float(x.1) {
@@ -1170,11 +1417,16 @@ impl ModEmitter {
                         }
                     }
                 }
+                let vts: Vec<TyId> = vevs.iter().map(|x| x.1).collect();
                 let vty = match vevs.first() {
                     Some(x) if vevs.iter().all(|y| self.r.get(y.1) == self.r.get(x.1)) => x.1,
                     _ => {
                         if anyf {
                             self.r.mk(Ty::F64)
+                        } else if let Some(n) = self.named_lub(&vts) {
+                            self.r.mk(Ty::Named(n, Vec::new()))
+                        } else if let Some((_, v)) = hint_kv {
+                            v
                         } else {
                             self.r.mk(Ty::I64)
                         }
@@ -1200,12 +1452,12 @@ impl ModEmitter {
                         }
                     }
                 }
-                let kk = if anyk_str {
-                    1i64
-                } else if anyk_obj {
-                    2i64
-                } else {
-                    0i64
+                // key route follows the resolved key surface: str=1, hashable
+                // class=2, int=0 (empty literals take it from the annotation)
+                let kk = match self.r.get(kty).clone() {
+                    Ty::Str => 1i64,
+                    Ty::Named(_, _) => 2i64,
+                    _ => 0i64,
                 };
                 // the vref bit is retired: death cascades are tag-driven
                 let kv0 = fw.v();
@@ -1479,6 +1731,12 @@ impl ModEmitter {
             ExprNode::Ident(n) => n.clone(),
             ExprNode::Field { obj: _, name } => name.clone(),
             _ => {
+                // arbitrary callee expression yielding a first-class function
+                // value, e.g. `make()(x)`, `arr[0](x)`, `(|x| {...})(1)`
+                let (clo, ct) = self.emit_expr(fw, callee);
+                if let Ty::Fn(ft) = self.r.get(ct).clone() {
+                    return self.emit_fn_value_call(fw, &clo, &ft, args, pos);
+                }
                 self.err(pos, "only named calls supported".to_string());
                 return (String::new(), self.r.mk(Ty::Unit));
             }
@@ -1522,7 +1780,7 @@ impl ModEmitter {
                     ));
                     return (r, fs.1);
                 }
-                if let Some((g, gt)) = self.fglobals.get(&key).cloned() {
+                if let Some((g, gt, _)) = self.fglobals.get(&key).cloned() {
                     return self.emit_global_read(fw, &g, gt);
                 }
                 // qualified constructor: lib.Cls(args)
@@ -1593,7 +1851,8 @@ impl ModEmitter {
                             }
                         };
                         if fel && !self.is_float(at) {
-                            // int word -> f64 word
+                            // design §2.1: no implicit int -> float on push
+                            self.err_diff(pos, "push element", "float", "int");
                             v = iw_to_f64_word(fw, &v);
                         }
                         let callv = fw.v();
@@ -1671,10 +1930,29 @@ impl ModEmitter {
                 return self.emit_dyn_call(fw, &tname, &name, &recvv, &argv, &sigargs, pos);
             }
             if let Ty::Named(cls, _) = self.r.get(rt) {
+                let cls = cls.clone();
                 // super.m(...) dispatches at the superclass, skipping own overrides
                 let is_super = matches!(&callee.node, ExprNode::Field { obj, .. } if matches!(&obj.node, ExprNode::Super));
+                // virtual dispatch: a trait method invoked on a class value
+                // (e.g. `this.area()` in a base method) goes through the
+                // vtable so subclass overrides win (design §2.4). super.* and
+                // non-trait methods keep the direct route.
+                if !is_super {
+                    if let Some((tr, _slot)) = self.trait_slot_for(&cls, &name) {
+                        let sargs = sigargs.clone();
+                        return self.emit_dyn_call(fw, &tr, &name, &recvv, &argv, &sargs, pos);
+                    }
+                    // design §2.4: plain class methods called through a
+                    // base-class reference also dispatch on the runtime class
+                    let sargs = sigargs.clone();
+                    if let Some(out) =
+                        self.emit_class_virtual_call(fw, &cls, &name, &recvv, &argv, &sargs, pos)
+                    {
+                        return out;
+                    }
+                }
                 let start = if is_super {
-                    match self.classes.get(cls).and_then(|ci| ci.superclass.clone()) {
+                    match self.classes.get(&cls).and_then(|ci| ci.superclass.clone()) {
                         Some(s) => Some(s),
                         None => {
                             self.err(pos, format!("class `{}` has no superclass", cls));
@@ -1688,6 +1966,23 @@ impl ModEmitter {
                 if let Some((defcls, fd)) = m {
                     return self
                         .emit_method_call(fw, &defcls, &name, &fd, is_super, &argv, &sigargs, pos);
+                }
+                // no method: a field holding a first-class function value
+                let fty = self.field_type(&cls, &name);
+                if let Ty::Fn(ft) = self.r.get(fty).clone() {
+                    let fi = self.field_index(&cls, &name);
+                    let zi = fw.v();
+                    fw.op(&format!(
+                        "    {} = arith.constant {} : i64",
+                        zi,
+                        enc_i_lit(fi as i64)
+                    ));
+                    let fv = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                        fv, recvv, zi
+                    ));
+                    return self.emit_fn_value_call(fw, &fv, &ft, args, pos);
                 }
             }
         } // direct function call
@@ -1788,7 +2083,8 @@ impl ModEmitter {
                     let mut pv: Vec<String> = Vec::new();
                     for (v, t) in &argv[fixed.min(argv.len())..] {
                         if fels && !self.is_float(*t) {
-                            // int word -> f64 word
+                            // design §2.1: no implicit int -> float in variadics
+                            self.err_diff(pos, "variadic argument", "float", "int");
                             pv.push(iw_to_f64_word(fw, v));
                         } else if !fels && self.is_float(*t) {
                             self.err(
@@ -1834,59 +2130,35 @@ impl ModEmitter {
             }
             return (r, plan.ret);
         }
-        // lambda value call: local symbol carrying a lambda frame dispatches via its sym
-        if let Some((_lv, lt)) = fw.lookup(&name) {
-            let larr = match self.r.get(lt) {
-                Ty::Fn(ft) => ft.lam.clone().map(|lam| (ft.ret, lam)),
-                _ => None,
-            };
-            if let Some((lret, lam)) = larr {
-                // lambda invoked via its frame value: capt words loaded back in order
-                let framev = match fw.lookup(&name) {
-                    Some((fv, _)) => {
-                        let z = fw.v();
-                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
-                        let vv = fw.v();
-                        fw.op(&format!(
-                            "    {} = memref.load {}[{}] : memref<1xi64>",
-                            vv, fv, z
-                        ));
-                        Some((fv, vv))
-                    }
-                    None => None,
-                };
-                let mut vals: Vec<String> = Vec::new();
-                let mut tys: Vec<String> = Vec::new();
-                if let Some((_fv, frame)) = framev {
-                    for j in 0..lam.caps.len() {
-                        let zi = fw.v();
-                        fw.op(&format!("    {} = arith.constant {} : i64", zi, j));
-                        let cv = fw.v();
-                        fw.op(&format!(
-                            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
-                            cv, frame, zi
-                        ));
-                        vals.push(cv);
-                        tys.push("i64".to_string());
-                    }
-                }
-                for a in args {
-                    let (v, t) = self.emit_expr(fw, a);
-                    vals.push(v);
-                    tys.push(mlir_word_ty(t, &self.r));
-                }
-                let sig = tys.join(", ");
-                let r = fw.v();
-                let rt = mlir_ret_ty(self, lret);
+        // local/param carrying a first-class function value: indirect call
+        // through the closure object (design §2.3/§2.6)
+        if let Some((slot, lt)) = fw.lookup(&name) {
+            if let Ty::Fn(ft) = self.r.get(lt).clone() {
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                let clo = fw.v();
                 fw.op(&format!(
-                    "    {} = call @{}({}) : ({}) -> {}",
-                    r,
-                    lam.sym,
-                    vals.join(", "),
-                    sig,
-                    rt
+                    "    {} = memref.load {}[{}] : memref<1xi64>",
+                    clo, slot, z
                 ));
-                return (r, lret);
+                return self.emit_fn_value_call(fw, &clo, &ft, args, pos);
+            }
+        }
+        // global holding a first-class function value
+        {
+            let cur_mod = self.cur_mod.clone();
+            let fg = self.fglobals.get(&format!("{}.{}", cur_mod, name)).cloned();
+            let lg = self.globals.get(&name).cloned();
+            let picked = if cur_mod != self.name {
+                fg.or(lg)
+            } else {
+                lg.or(fg)
+            };
+            if let Some((gsym, gt, _)) = picked {
+                if let Ty::Fn(ft) = self.r.get(gt).clone() {
+                    let (clo, _) = self.emit_global_read(fw, &gsym, gt);
+                    return self.emit_fn_value_call(fw, &clo, &ft, args, pos);
+                }
             }
         }
         // foreign-module function: symbol was pre-mangled at import time

@@ -296,7 +296,9 @@ impl Parser {
     fn ty(&mut self) -> PResult<Type> {
         let base = self.ty_base()?;
         if self.eat(Tok::Question) {
-            if matches!(base, Type::Optional(_)) {
+            // design §2.6: nested optional `T??` is rejected outright (the
+            // tag layout has no room for a second layer)
+            if matches!(base, Type::Optional(_)) || matches!(self.peek(), Some(Tok::Question)) {
                 return Err(self.err("nested optional T?? is not allowed"));
             }
             Ok(Type::Optional(Box::new(base)))

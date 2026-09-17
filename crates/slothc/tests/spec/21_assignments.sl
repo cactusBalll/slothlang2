@@ -4,7 +4,7 @@ func main(): unit {
     x = 2;
     print(x);                // expect: 2
     var f = 0.0;
-    f = f + 5;
+    f = f + 5.0;
     print(f);                // expect: 5
     let l = 10;
     print(l);                // expect: 10
