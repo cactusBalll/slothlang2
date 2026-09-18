@@ -30,10 +30,14 @@ const P_ELVIS: u8 = 2;
 const P_OR: u8 = 3;
 const P_AND: u8 = 4;
 const P_CMP: u8 = 5;
-const P_RANGE: u8 = 6;
-const P_ADD: u8 = 7;
-const P_MUL: u8 = 8;
-const P_UNARY: u8 = 9;
+const P_BOR: u8 = 6;
+const P_BXOR: u8 = 7;
+const P_BAND: u8 = 8;
+const P_SHIFT: u8 = 9;
+const P_RANGE: u8 = 10;
+const P_ADD: u8 = 11;
+const P_MUL: u8 = 12;
+const P_UNARY: u8 = 13;
 
 impl Parser {
     fn peek(&self) -> Option<&Tok> {
@@ -673,7 +677,23 @@ impl Parser {
             }
             _ => {
                 let e = self.expr(0)?;
-                if self.eat(Tok::Assign) {
+                let cassign = if self.eat(Tok::PlusEq) {
+                    Some(ArithOp::Add)
+                } else if self.eat(Tok::MinusEq) {
+                    Some(ArithOp::Sub)
+                } else {
+                    None
+                };
+                if let Some(op) = cassign {
+                    let value = self.expr(0)?;
+                    self.expect(Tok::Semi, "';'")?;
+                    let target =
+                        expr_to_path(&e).ok_or_else(|| self.err("invalid assignment target"))?;
+                    Ok(Stmt {
+                        node: StmtNode::AssignOp { target, op, value },
+                        pos,
+                    })
+                } else if self.eat(Tok::Assign) {
                     let value = self.expr(0)?;
                     self.expect(Tok::Semi, "';'")?;
                     let target =
@@ -818,6 +838,41 @@ impl Parser {
                     _ => break,
                 }
             }
+            // int-only bitwise/shift operators (design §3.3). `<`/`>` stay as
+            // single Lt/Gt tokens in the lexer so generic closers like
+            // `Map<int,Array<int>>` keep parsing; `<<`/`>>` are coalesced here
+            // by consuming two adjacent Lt/Gt.
+            let mut ntok = 1usize;
+            let bit = match &t {
+                Tok::Amp => Some((ArithOp::BitAnd, P_BAND)),
+                Tok::Caret => Some((ArithOp::BitXor, P_BXOR)),
+                Tok::Pipe => Some((ArithOp::BitOr, P_BOR)),
+                Tok::Lt if matches!(self.peek_at(1), Some(Tok::Lt)) => {
+                    ntok = 2;
+                    Some((ArithOp::Shl, P_SHIFT))
+                }
+                Tok::Gt if matches!(self.peek_at(1), Some(Tok::Gt)) => {
+                    ntok = 2;
+                    Some((ArithOp::Shr, P_SHIFT))
+                }
+                _ => None,
+            };
+            if let Some((op, bp)) = bit {
+                if bp < min_bp {
+                    break;
+                }
+                self.ptr += ntok;
+                let rhs = self.expr(bp + 1)?;
+                lhs = Expr {
+                    pos,
+                    node: ExprNode::Arith {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                };
+                continue;
+            }
             use ArithOp as A;
             if let Some((op, bp)) = match &t {
                 Tok::Plus => Some((A::Add, P_ADD)),
@@ -946,6 +1001,16 @@ impl Parser {
                 pos,
                 node: ExprNode::Un {
                     op: UnOp::Neg,
+                    expr: Box::new(e),
+                },
+            });
+        }
+        if self.eat(Tok::Tilde) {
+            let e = self.expr(P_UNARY)?;
+            return Ok(Expr {
+                pos,
+                node: ExprNode::Un {
+                    op: UnOp::BitNot,
                     expr: Box::new(e),
                 },
             });

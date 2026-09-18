@@ -146,6 +146,7 @@ pub(crate) fn stmt_has_super_init(s: &Stmt) -> bool {
     match &s.node {
         StmtNode::Expr(e) => expr_has_super_init(e),
         StmtNode::Assign { value, .. } => expr_has_super_init(value),
+        StmtNode::AssignOp { value, .. } => expr_has_super_init(value),
         StmtNode::Let { init, .. } => expr_has_super_init(init),
         StmtNode::If { cond, then_, else_ } => {
             expr_has_super_init(cond)
@@ -158,6 +159,48 @@ pub(crate) fn stmt_has_super_init(s: &Stmt) -> bool {
         StmtNode::Block(ss) => ss.iter().any(stmt_has_super_init),
         _ => false,
     }
+}
+
+/// rebuild an lvalue expression from an assignment path. Used by the
+/// compound-assign desugaring (`t op= v` ⇒ `t = t op v`) to re-read the
+/// target's current value through the ordinary expression route.
+pub(crate) fn path_to_expr(target: &[PathSeg], pos: &Pos) -> Expr {
+    let mut acc: Option<Expr> = None;
+    for seg in target {
+        acc = Some(match seg {
+            PathSeg::Name(n) => match &acc {
+                None => Expr {
+                    pos: pos.clone(),
+                    node: match n.as_str() {
+                        "this" => ExprNode::This,
+                        "super" => ExprNode::Super,
+                        _ => ExprNode::Ident(n.clone()),
+                    },
+                },
+                Some(base) => Expr {
+                    pos: pos.clone(),
+                    node: ExprNode::Field {
+                        obj: Box::new(base.clone()),
+                        name: n.clone(),
+                    },
+                },
+            },
+            PathSeg::Index(ix) => Expr {
+                pos: pos.clone(),
+                node: ExprNode::Index {
+                    obj: Box::new(acc.take().unwrap_or(Expr {
+                        pos: pos.clone(),
+                        node: ExprNode::Nil,
+                    })),
+                    idx: Box::new(ix.clone()),
+                },
+            },
+        });
+    }
+    acc.unwrap_or(Expr {
+        pos: pos.clone(),
+        node: ExprNode::Nil,
+    })
 }
 
 pub(crate) fn mangle(mod_name: &str, cls: Option<&str>, name: &str) -> String {

@@ -3882,3 +3882,135 @@ mod irgen_regress {
         run_src(src, "main").unwrap();
     }
 }
+
+#[cfg(test)]
+mod irgen_te_p0 {
+    use super::*;
+
+    /// compound assignment over every target kind: local, float, array
+    /// element, map element, object field, module global. Also asserts the
+    /// index expression is evaluated exactly once (calls == 1).
+    #[test]
+    fn compound_assign_targets() {
+        let src = r#"
+            var calls: int = 0;
+            func next_index(): int { calls += 1; return 0; }
+            class Acc { var v: int; func __init__(a: int) { this.v = a; } }
+            func main(): unit {
+                var a = 5;
+                a += 3;
+                a -= 1;
+                print(a);
+                var f = 1.5;
+                f += 2.0;
+                print(f);
+                var arr = [1, 2, 3];
+                arr[1] += 10;
+                arr[0] -= 1;
+                print(arr[1]);
+                print(arr[0]);
+                var m = @("k": 1);
+                m["k"] += 5;
+                print(m["k"]);
+                var p = Acc(10);
+                p.v += 4;
+                print(p.v);
+                var data = [10];
+                data[next_index()] += 5;
+                print(data[0]);
+                print(calls);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// int bitwise/shift operators and `~` (design §3.3)
+    #[test]
+    fn bitwise_ops() {
+        let src = r#"
+            func main(): unit {
+                print(6 & 3);
+                print(6 | 3);
+                print(6 ^ 3);
+                print(1 << 4);
+                print(256 >> 4);
+                print(~5);
+                print(1 + 2 << 3);
+                print(1 << 2 + 1);
+                print(6 & 3 == 3);
+                print(1 | 2 ^ 3);
+                var x = 20;
+                x = x & 6;
+                print(x);
+                print(~x);
+                print(~(~7));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `<<` / `>>` are lexed as two Lt/Gt tokens and coalesced in the Pratt
+    /// loop, so generic closers (`Map<int,Array<int>>`) keep parsing.
+    #[test]
+    fn shifts_keep_nested_generics() {
+        let src = r#"
+            func main(): unit {
+                var g: Array<Array<int>> = [[1, 2], [3, 4]];
+                var both: Map<int, Array<int>> = @(1: [7]);
+                print(g[1][1] >> 1);
+                print(both[1][0] << 1);
+                print(1 << 2 >> 1);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn bitwise_float_diag() {
+        let src = r#"
+            func main(): unit {
+                print(1.5 & 1.0);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected bitwise operand diag"),
+            Err(e) => assert!(
+                e.contains("bitwise operators require `int` operands"),
+                "unexpected: {}",
+                e
+            ),
+        }
+    }
+
+    #[test]
+    fn bitnot_float_diag() {
+        let src = r#"
+            func main(): unit {
+                print(~1.5);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected `~` operand diag"),
+            Err(e) => assert!(e.contains("requires an `int` operand"), "unexpected: {}", e),
+        }
+    }
+
+    /// compound assign on a `let` is still rejected (immutability)
+    #[test]
+    fn compound_assign_immutable_diag() {
+        let src = r#"
+            func main(): unit {
+                let x = 1;
+                x += 1;
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected immutability diag"),
+            Err(e) => assert!(
+                e.contains("cannot assign to immutable"),
+                "unexpected: {}",
+                e
+            ),
+        }
+    }
+}

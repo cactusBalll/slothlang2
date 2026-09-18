@@ -205,12 +205,19 @@ pub enum ArithOp {
     Mul,
     Div,
     Mod,
+    /// int-only bitwise/shift operators (design §3.3)
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
     Not,
     Neg,
+    BitNot,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +317,12 @@ pub enum StmtNode {
     },
     Assign {
         target: Vec<PathSeg>,
+        value: Expr,
+    },
+    /// compound assignment `target += value` / `target -= value`
+    AssignOp {
+        target: Vec<PathSeg>,
+        op: ArithOp,
         value: Expr,
     },
     While {

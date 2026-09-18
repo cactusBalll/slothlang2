@@ -295,6 +295,17 @@ pub(crate) fn walk_ids_stmt(
                 }
             }
         }
+        StmtNode::AssignOp { target, value, .. } => {
+            walk_ids_expr(value, push_use, decls);
+            for seg in target {
+                if let PathSeg::Name(n) = seg {
+                    push_use(n);
+                }
+                if let PathSeg::Index(e) = seg {
+                    walk_ids_expr(e, push_use, decls);
+                }
+            }
+        }
         StmtNode::While { cond, body } => {
             walk_ids_expr(cond, push_use, decls);
             walk_ids_stmt(body, push_use, decls);

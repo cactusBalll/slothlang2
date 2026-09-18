@@ -603,6 +603,42 @@ impl ModEmitter {
                 // rc patch B: producer temps of this statement settle here
                 fw.rc_flush();
             }
+            StmtNode::AssignOp { target, op, value } => {
+                // `t op= v` desugars to `t = t op v`, with every index
+                // sub-expression evaluated exactly once (spilled into a fresh
+                // immutable local before the read/write pair) so side-effecting
+                // indices are not run twice.
+                let mut t2: Vec<PathSeg> = Vec::with_capacity(target.len());
+                for seg in target {
+                    match seg {
+                        PathSeg::Name(n) => t2.push(PathSeg::Name(n.clone())),
+                        PathSeg::Index(ix) => {
+                            let (w, ty) = self.emit_expr(fw, ix);
+                            let nm = self.spill_temp(fw, &w, ty);
+                            t2.push(PathSeg::Index(Expr {
+                                pos: ix.pos.clone(),
+                                node: ExprNode::Ident(nm),
+                            }));
+                        }
+                    }
+                }
+                let rhs = Expr {
+                    pos: s.pos.clone(),
+                    node: ExprNode::Arith {
+                        op: *op,
+                        lhs: Box::new(path_to_expr(&t2, &s.pos)),
+                        rhs: Box::new(value.clone()),
+                    },
+                };
+                let desugared = Stmt {
+                    pos: s.pos.clone(),
+                    node: StmtNode::Assign {
+                        target: t2,
+                        value: rhs,
+                    },
+                };
+                self.walk_stmt(fw, &desugared);
+            }
             StmtNode::Return(None) => {
                 self.emit_ret_flag_store(fw);
                 // rc patch B: unsettled producer temps die before the jump
@@ -660,6 +696,29 @@ impl ModEmitter {
                     _ => None,
                 }),
         }
+    }
+
+    /// materialize `w:ty` into a fresh immutable local slot and return the
+    /// synthetic binding name. Mirrors the `let` ownership rule (retain, or
+    /// take a transferred call result, so the slot owns the word) and registers
+    /// it for scope-exit release. Used by the compound-assign desugaring to
+    /// evaluate index sub-expressions exactly once.
+    pub(crate) fn spill_temp(&mut self, fw: &mut FnWalk, w: &str, ty: TyId) -> String {
+        let nm = fw.v();
+        let fl = self.is_float(ty);
+        let a = fw.declare(&nm, ty, fl, false);
+        if self.is_ref(ty) && !fl {
+            let rv = if fw.rc_take_xfer(w) {
+                w.to_string()
+            } else {
+                self.emit_retain(fw, w)
+            };
+            fw.assign(&nm, &rv, fl);
+            fw.scope_decls.last_mut().unwrap().insert(nm.clone(), a);
+        } else {
+            fw.assign(&nm, w, fl);
+        }
+        nm
     }
 
     /// evaluate the container denoted by an assignment prefix into a word:

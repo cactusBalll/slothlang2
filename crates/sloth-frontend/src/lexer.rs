@@ -87,10 +87,15 @@ pub enum Tok {
     Range,       // ..
     RangeInc,    // ..=
     Variadic,    // ...
-    Pipe,        // |  lambda start
+    Pipe,        // |  lambda start / bitwise or
     PipeOp,      // |>
     AmpAmp,      // &&
     PipePipe,    // ||
+    PlusEq,      // +=
+    MinusEq,     // -=
+    Amp,         // &
+    Caret,       // ^
+    Tilde,       // ~
     Question,    // ?
     Elvis,       // ?:
     QuestionDot, // ?. (reserved; parser rejects)
@@ -429,6 +434,16 @@ impl Lexer {
             self.advance();
             return Ok(Tok::Arrow);
         }
+        if pair(('+', '=')) {
+            self.advance();
+            self.advance();
+            return Ok(Tok::PlusEq);
+        }
+        if pair(('-', '=')) {
+            self.advance();
+            self.advance();
+            return Ok(Tok::MinusEq);
+        }
         let tok = match cur {
             '+' => Tok::Plus,
             '-' => Tok::Minus,
@@ -449,6 +464,9 @@ impl Lexer {
             '<' => Tok::Lt,
             '>' => Tok::Gt,
             '|' => Tok::Pipe,
+            '&' => Tok::Amp,
+            '^' => Tok::Caret,
+            '~' => Tok::Tilde,
             '@' => Tok::At,
             '?' => {
                 self.advance();

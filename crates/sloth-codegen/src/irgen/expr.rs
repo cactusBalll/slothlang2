@@ -613,6 +613,26 @@ impl ModEmitter {
                 let (a, at) = self.unwrap_opt_word(fw, &a, at);
                 let (b, bt) = self.emit_expr(fw, rhs);
                 let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
+                // int-only bitwise/shift operators (design §3.3): no float
+                // route and no operator overload — both operands must be
+                // `int` words. Valid cases fall through to the int route.
+                if matches!(
+                    op,
+                    ArithOp::BitAnd
+                        | ArithOp::BitOr
+                        | ArithOp::BitXor
+                        | ArithOp::Shl
+                        | ArithOp::Shr
+                ) && !(matches!(self.r.get(at), Ty::I64) && matches!(self.r.get(bt), Ty::I64))
+                {
+                    self.err(
+                        &e.pos,
+                        "bitwise operators require `int` operands".to_string(),
+                    );
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    return (z, self.r.mk(Ty::I64));
+                }
                 // operator overload: class receiver dispatches __add__ etc;
                 // carry the rhs word as payload (a + b ≡ a.__op__(b))
                 if let Ty::Named(cls, _) = self.r.get(at).clone() {
@@ -622,6 +642,11 @@ impl ModEmitter {
                         ArithOp::Mul => "__mul__",
                         ArithOp::Div => "__div__",
                         ArithOp::Mod => "__mod__",
+                        ArithOp::BitAnd => "__and__",
+                        ArithOp::BitOr => "__or__",
+                        ArithOp::BitXor => "__xor__",
+                        ArithOp::Shl => "__shl__",
+                        ArithOp::Shr => "__shr__",
                     };
                     if let Some((defcls, fd)) = self.find_method(&cls, oname) {
                         let oargv = vec![(a.clone(), at), (b.clone(), bt)];
@@ -673,6 +698,12 @@ impl ModEmitter {
                         ArithOp::Mul => "arith.mulf",
                         ArithOp::Div => "arith.divf",
                         ArithOp::Mod => "arith.remf",
+                        // unreachable: bitwise operands are rejected above
+                        ArithOp::BitAnd
+                        | ArithOp::BitOr
+                        | ArithOp::BitXor
+                        | ArithOp::Shl
+                        | ArithOp::Shr => "arith.addf",
                     };
                     fw.op(&format!("    {} = {} {}, {} : f64", rf, ao, a, b));
                     let r = emit_enc_f(fw, &rf);
@@ -689,6 +720,11 @@ impl ModEmitter {
                     ArithOp::Mul => "arith.muli",
                     ArithOp::Div => "arith.divsi",
                     ArithOp::Mod => "arith.remsi",
+                    ArithOp::BitAnd => "arith.andi",
+                    ArithOp::BitOr => "arith.ori",
+                    ArithOp::BitXor => "arith.xori",
+                    ArithOp::Shl => "arith.shli",
+                    ArithOp::Shr => "arith.shrsi",
                 };
                 if matches!(op, ArithOp::Div | ArithOp::Mod) {
                     // design §5.5: integer divide/modulo by zero is a panic.
@@ -844,6 +880,21 @@ impl ModEmitter {
                         let z2 = fw.v();
                         fw.op(&format!("    {} = arith.subi {}, {} : i64", z2, one, vd));
                         (emit_enc_int(fw, &z2), t)
+                    }
+                    UnOp::BitNot => {
+                        // int-only: `~x` = decode, xor with -1, encode
+                        if !matches!(self.r.get(t), Ty::I64) {
+                            self.err(&e.pos, "`~` requires an `int` operand".to_string());
+                            let z = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                            return (z, self.r.mk(Ty::I64));
+                        }
+                        let vd = emit_dec_int(fw, &v);
+                        let m1 = fw.v();
+                        fw.op(&format!("    {} = arith.constant -1 : i64", m1));
+                        let r2 = fw.v();
+                        fw.op(&format!("    {} = arith.xori {}, {} : i64", r2, vd, m1));
+                        (emit_enc_int(fw, &r2), t)
                     }
                 }
             }
