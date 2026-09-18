@@ -96,11 +96,12 @@ print(a + 0.0);    // 1        运行时编码路径 -> 多丢 1 位
 
 ## A.8 协程扩展（CE-P0–CE-P2）
 
-《协程扩展设计文档》的两处实现与设计稿不同，均为**定案的简化**：
+《协程扩展设计文档》的若干实现与设计稿不同：
 
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
 | §4.3 载荷按「转移」语义做发射器插桩（owned 临时不插 release；借用值先 retain 再转移） | 载荷按普通 **borrowed 实参**递交，由运行时 `sloth_fiber_*` 在接收侧 `retain`；`yield`/`resume` 的引用返回仍走规则 4/5 的 +1 交付 | 定案（消除设计稿风险 #2「转移插桩遗漏」） |
-| §4.4 `fiber.cancel` 使控制流逐帧走完作用域退出的 `release`（完整拆栈） | `setjmp`/`longjmp` 直达协程入口：协程被置 `Done`、栈回收，但**被跳过帧的 `release` 不执行**，其引用滞留（泄漏但不悬垂） | 受限（有栈取消的固有限制） |
+| §4.3.5 / §4.4 弃置或取消时，跳过帧的 `release` 不执行、引用滞留 | 局部槽**逐帧登记**（发射器在 ref 局部声明/退出处插入 `@sloth_fiber_track`/`@sloth_fiber_untrack`，仅协程上下文生效）：错误经 `terminate`、取消经 `cancel_abort` 在**栈仍有效时**释放所有在册槽，弃置则在析构处释放。跳过帧不再泄漏引用（temp 级极端情形除外） | 定案（完整拆栈） |
+| §4.4 `fiber.cancel` 用 `setjmp`/`longjmp` 直达入口 | 同左；差别在于出栈前先结算在册局部槽，再 `longjmp`（`longjmp` 会重置栈指针，必须先于其完成释放） | 定案 |
 | §4.1 仅保存 x86_64 的 `rsp/rbp/rbx/r12-r15`、aarch64 的 `x19-x30/sp/lr` | aarch64 额外保存 AAPCS64 被调用者保存的 `d8-d15`（设计稿遗漏） | 修正 |
 | §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline` 为 crate 内 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |

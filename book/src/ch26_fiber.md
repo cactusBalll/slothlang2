@@ -78,11 +78,11 @@ func churn(n: int): unit {
 ## 26.4 取消与限制
 
 - `fiber.cancel(f)` 对 Suspended 协程置取消标志并注入哨兵；其下一次 `fiber.yield`
-  经 `setjmp`/`longjmp` 回到协程入口，栈被回收。**被跳过帧的 `release` 不会执行**，
-  其中的引用滞留（泄漏但不悬垂）——这是有栈取消的已知限制。
+  经 `setjmp`/`longjmp` 回到协程入口，栈被回收。**出栈前会结算所有在册的局部引用槽**
+  （局部槽在声明/退出处逐帧登记，仅协程上下文生效），因此取消不泄漏引用。
 - **弃置挂起协程**：一个 Suspended 的 `Fiber` 计数归零时，debug 构建在析构处
-  panic（`abandoned suspended fiber`），release 构建回收对象与栈、滞留栈上引用。
-  协程应驱动至 `Done`/`Error`，或显式 `fiber.cancel` 收尾。
+  panic（`abandoned suspended fiber`）以暴露问题；release 构建在析构时结算在册
+  局部槽、回收对象与栈。协程仍应驱动至 `Done`/`Error`，或显式 `fiber.cancel` 收尾。
 - 入口函数受一等函数值既有规则限制（泛型/可变参/`extern`/跨模块函数需闭包包装）。
 - **固定栈 + 保护页**：栈溢出触发 `SIGSEGV`，运行时信号处理器打印
   `fiber stack overflow` 并终止；深递归用 `fiber.create_with` 调大栈。

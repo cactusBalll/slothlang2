@@ -162,6 +162,7 @@ impl FnWalk {
                 w, a, z
             ));
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+            self.untrack_slot(&a);
         }
     }
 
@@ -185,6 +186,7 @@ impl FnWalk {
                 w, a, z
             ));
             self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+            self.untrack_slot(&a);
         }
     }
 
@@ -229,6 +231,7 @@ impl FnWalk {
                         w, a, z
                     ));
                     self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+                    self.untrack_slot(&a);
                 }
             }
         }
@@ -261,6 +264,43 @@ impl FnWalk {
         }
         None
     }
+    /// CE: register an owned-local slot so a fiber unwinding past this frame
+    /// (error/cancel/abandon) can release its current word. No-op on main.
+    pub(crate) fn track_slot(&mut self, a: &str) {
+        let pi = self.v();
+        self.op(&format!(
+            "    {} = memref.extract_aligned_pointer_as_index {} : memref<1xi64> -> index",
+            pi, a
+        ));
+        let pw = self.v();
+        self.op(&format!(
+            "    {} = arith.index_cast {} : index to i64",
+            pw, pi
+        ));
+        self.op(&format!(
+            "    call @sloth_fiber_track({}) : (i64) -> i64",
+            pw
+        ));
+    }
+
+    /// CE: unregister a slot released by its owning scope/path
+    pub(crate) fn untrack_slot(&mut self, a: &str) {
+        let pi = self.v();
+        self.op(&format!(
+            "    {} = memref.extract_aligned_pointer_as_index {} : memref<1xi64> -> index",
+            pi, a
+        ));
+        let pw = self.v();
+        self.op(&format!(
+            "    {} = arith.index_cast {} : index to i64",
+            pw, pi
+        ));
+        self.op(&format!(
+            "    call @sloth_fiber_untrack({}) : (i64) -> i64",
+            pw
+        ));
+    }
+
     pub(crate) fn assign(&mut self, name: &str, val: &str, _fl: bool) {
         if let Some((a, _t)) = self.lookup(name) {
             let z = self.v();

@@ -58,6 +58,10 @@ pub(crate) struct FiberObj {
     /// setjmp landing pad used by cooperative cancellation
     jb: [u64; 32],
     cancel: i64,
+    /// addresses of live owned-local slots on this fiber's stack; unwinding
+    /// (error/cancel/abandon) releases each slot's current word so skipped
+    /// frames cannot leak references
+    slots: Vec<usize>,
 }
 
 // ---------------- assembly primitives ----------------
@@ -159,6 +163,7 @@ static mut MAIN: FiberObj = FiberObj {
     init: 0,
     jb: [0; 32],
     cancel: 0,
+    slots: Vec::new(),
 };
 
 #[inline]
@@ -167,6 +172,40 @@ unsafe fn cur() -> *mut FiberObj {
         CUR = core::ptr::addr_of_mut!(MAIN);
     }
     CUR
+}
+
+/// once any fiber exists the emitter's slot-tracking calls become live
+static FIBER_ON: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+unsafe fn trackable() -> bool {
+    FIBER_ON.load(Ordering::Relaxed) != 0 && !CUR.is_null() && CUR != core::ptr::addr_of_mut!(MAIN)
+}
+
+/// register an owned-local slot on the running fiber (no-op on the main stack
+/// and in programs that never create a fiber)
+#[no_mangle]
+pub extern "C" fn sloth_fiber_track(addr_w: i64) -> i64 {
+    unsafe {
+        if trackable() {
+            (*CUR).slots.push(addr_w as usize);
+        }
+    }
+    0
+}
+
+/// unregister a slot (scope exit / return / loop break paths)
+#[no_mangle]
+pub extern "C" fn sloth_fiber_untrack(addr_w: i64) -> i64 {
+    unsafe {
+        if trackable() {
+            let a = addr_w as usize;
+            if let Some(p) = (*CUR).slots.iter().rposition(|x| *x == a) {
+                (*CUR).slots.remove(p);
+            }
+        }
+    }
+    0
 }
 
 // ---------------- guard page diagnostics ----------------
@@ -312,6 +351,8 @@ unsafe fn fiber_setup(entry_w: i64, init_w: i64, stack_w: i64) -> i64 {
         rc::sloth_rc_retain(init_w)
     };
     f.cancel = 0;
+    f.slots = Vec::new();
+    FIBER_ON.store(1, Ordering::Relaxed);
     prime_ctx(p);
     rc::w_ref(p as usize)
 }
@@ -333,7 +374,7 @@ fn fiber_dtor(p: usize, _aux: u64) {
         if f.state == STATE_SUSPENDED {
             panics::panic_msg("abandoned suspended fiber");
         }
-        if f.state == STATE_NEW && f.init != 0 {
+        if f.init != 0 {
             rc::sloth_rc_release(f.init);
         }
         if f.inbox != 0 {
@@ -341,6 +382,15 @@ fn fiber_dtor(p: usize, _aux: u64) {
         }
         if f.entry != 0 {
             rc::sloth_rc_release(f.entry);
+        }
+        // abandoned suspended fiber: release its tracked locals (release
+        // build) so skipped frames do not leak, then drop the registry
+        let slots = std::mem::take(&mut f.slots);
+        for a in slots {
+            let w = *(a as *const i64);
+            if w != 0 {
+                rc::sloth_rc_release(w);
+            }
         }
         if !f.stack_base.is_null() {
             unregister_guard(f.stack_base as usize);
@@ -366,17 +416,14 @@ pub(crate) extern "C" fn sloth_fiber_entry(f: *mut FiberObj) -> ! {
         }
         ff.state = STATE_RUNNING;
         let init = ff.init;
-        ff.init = 0;
         let entry = ff.entry;
         let fnptr_w = crate::objects::sloth_obj_field(entry, rc::enc_i(0));
         let env = crate::objects::sloth_obj_field(entry, rc::enc_i(1));
         let raw = (fnptr_w & !1) as usize;
         let cb: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(raw);
+        // the closure ABI borrows `init`; the fiber's owning +1 is settled in
+        // `terminate` so error/cancel paths release it too
         cb(env, init);
-        // the closure ABI borrows its argument: drop the fiber's owning +1
-        if init != 0 {
-            rc::sloth_rc_release(init);
-        }
         terminate(f);
     }
 }
@@ -387,10 +434,25 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
     if ff.state != STATE_ERROR {
         ff.state = STATE_DONE;
     }
-    // an unconsumed resume payload (closure that never yielded) is released
+    // release the fiber's own +1 on the entry argument (the closure borrowed
+    // it) and any unconsumed resume payload
+    if ff.init != 0 {
+        rc::sloth_rc_release(ff.init);
+        ff.init = 0;
+    }
     if ff.inbox != 0 {
         rc::sloth_rc_release(ff.inbox);
         ff.inbox = 0;
+    }
+    // unwind any frames skipped by error/cancel: release their owned locals.
+    // For the error path the fiber stack is intact (a normal context switch),
+    // so the recorded slot addresses are still valid here.
+    let slots = std::mem::take(&mut ff.slots);
+    for a in slots {
+        let w = *(a as *const i64);
+        if w != 0 {
+            rc::sloth_rc_release(w);
+        }
     }
     let to = ff.prev;
     (*to).inbox = 0;
@@ -477,9 +539,6 @@ pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
         if (*f).prev.is_null() {
             panics::panic_msg("fiber.yield outside a fiber");
         }
-        if (*f).cancel != 0 {
-            longjmp((*f).jb.as_mut_ptr(), 1);
-        }
         // consume the resume payload that woke us *before* suspending, so a
         // later resume cannot overwrite an undelivered value
         let incoming = (*f).inbox;
@@ -495,10 +554,34 @@ pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
         sloth_fiber_switch_asm(&mut (*f).ctx, &(*to).ctx);
         CUR = f;
         (*f).state = STATE_RUNNING;
-        if (*f).cancel != 0 {
-            longjmp((*f).jb.as_mut_ptr(), 1);
-        }
         incoming
+    }
+}
+
+/// has the running fiber been asked to cancel? After this returns a truthy
+/// (encoded bool) word the emitter unwinds the current frame and calls
+/// `sloth_fiber_cancel_abort`.
+#[no_mangle]
+pub extern "C" fn sloth_fiber_cancelled() -> i64 {
+    unsafe { rc::enc_i(((*cur()).cancel != 0) as i64) }
+}
+
+/// land the cancellation: release every remaining tracked local *before*
+/// longjmping to the fiber entry. The longjmp resets the stack pointer, after
+/// which the abandoned frames' slot addresses are no longer valid; the current
+/// frame's own slots were already settled by the emitter.
+#[no_mangle]
+pub extern "C" fn sloth_fiber_cancel_abort() -> ! {
+    unsafe {
+        let f = cur();
+        let slots = std::mem::take(&mut (*f).slots);
+        for a in slots {
+            let w = *(a as *const i64);
+            if w != 0 {
+                rc::sloth_rc_release(w);
+            }
+        }
+        longjmp((*f).jb.as_mut_ptr(), 1)
     }
 }
 
@@ -512,6 +595,11 @@ pub extern "C" fn sloth_fiber_error(msg_w: i64) -> i64 {
             let _ = e.write_all(b"sloth fiber error: ");
             let _ = e.write_all(sl);
             let _ = e.write_all(b"\n");
+        }
+        // the emitter transfers an owning +1 on the message so the skipped
+        // caller frame cannot leak the literal/slot value
+        if msg_w != 0 {
+            rc::sloth_rc_release(msg_w);
         }
         let f = cur();
         (*f).state = STATE_ERROR;
@@ -635,6 +723,10 @@ mod tests {
     extern "C" fn cancel_entry(_env: i64, _init: i64) -> i64 {
         loop {
             let _ = sloth_fiber_yield(rc::enc_i(1));
+            // mirrors the emitter's cancel guard
+            if rc::dec_i(sloth_fiber_cancelled()) != 0 {
+                sloth_fiber_cancel_abort();
+            }
         }
     }
 

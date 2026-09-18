@@ -170,6 +170,31 @@ impl ModEmitter {
             "    {} = call @sloth_fiber_yield({}) : (i64) -> i64",
             r, vv
         ));
+        // cooperative cancellation: when the fiber was cancelled while
+        // suspended, unwind this frame (settle its owned locals/temps) before
+        // longjmping to the entry landing pad
+        let c = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_fiber_cancelled() : () -> i64",
+            c
+        ));
+        let lbl_abort = fw.newlabel("fx");
+        let lbl_cont = fw.newlabel("fx");
+        let saved_dangling = std::mem::take(&mut fw.dangling);
+        let saved_xfer = std::mem::take(&mut fw.xfer);
+        fw.cjump(&c, &lbl_abort, &lbl_cont);
+        fw.label(&lbl_abort);
+        fw.dangling = saved_dangling.clone();
+        fw.xfer = saved_xfer.clone();
+        fw.rc_flush();
+        fw.rc_release_scope_slots();
+        // the resume payload returned by this yield is abandoned on cancel
+        fw.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", r));
+        fw.op("    call @sloth_fiber_cancel_abort() : () -> ()");
+        fw.jump(&lbl_cont);
+        fw.label(&lbl_cont);
+        fw.dangling = saved_dangling;
+        fw.xfer = saved_xfer;
         if self.is_ref(vt) {
             fw.rc_mark_xfer(&r);
         }
@@ -178,9 +203,20 @@ impl ModEmitter {
 
     pub(crate) fn emit_fiber_error(&mut self, fw: &mut FnWalk, marg: &Expr) -> (String, TyId) {
         let (mv, _mt) = self.emit_expr(fw, marg);
+        // transfer an owning +1 on the message to the runtime (it prints then
+        // releases), so the skipped caller frame cannot leak the value
+        let owned = if fw.rc_consume(&mv) {
+            mv.clone()
+        } else {
+            self.emit_retain(fw, &mv)
+        };
+        // `fiber.error` never returns: settle this frame's owned temps/locals
+        // now (the normal scope teardown is unreachable)
+        fw.rc_flush();
+        fw.rc_release_scope_slots();
         fw.op(&format!(
             "    call @sloth_fiber_error({}) : (i64) -> i64",
-            mv
+            owned
         ));
         let z = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", z));

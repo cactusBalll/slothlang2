@@ -306,6 +306,7 @@ impl ModEmitter {
     ) -> String {
         let a = fw.declare(name, t, fl, mutable);
         if self.is_ref(t) {
+            fw.track_slot(&a);
             fw.scope_decls
                 .last_mut()
                 .unwrap()

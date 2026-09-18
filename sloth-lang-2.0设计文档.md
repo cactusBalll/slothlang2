@@ -643,7 +643,7 @@ extern func floor(x: float): float;          // 链接期解析符号
 | 4 | 单态化代码膨胀与编译速度 | 中 | 泛型实例爆炸；对策：实例缓存 + 后续考虑对引用类型共享实例（类型擦除混合策略） |
 | 5 | 动态模块加载能力丢失 | 低 | `import` 编译期化后失去运行时脚本热加载；对策：文档明确，插件场景由宿主 FFI 承接 |
 | 6 | 标准库缺口 | 中 | 1.0 标准库本就不完整，2.0 同步建设（容器方法、`Display`、`Result`、张量/llama 等）；对策：标准库以 sloth2 自身编写（`lib/sloth/*.slt`），仅 IO/ARC/张量走运行时 |
-| 7 | 弃置挂起协程的 ARC 泄漏 | 中 | 挂起态 `Fiber` 被丢弃时栈上 retain 的对象滞留；对策：debug 构建析构 panic 暴露 + `fiber.cancel` 协作式收尾，文档明示「驱动至 Done/Error」纪律 |
+| 7 | 弃置挂起协程的 ARC 泄漏 | 低 | 协程局部引用槽逐帧登记（`@sloth_fiber_track`），error/cancel/弃置在栈有效时结算在册槽，不再滞留；对策：debug 构建仍对弃置析构 panic 以暴露纪律问题，文档明示「驱动至 Done/Error」 |
 | 8 | ARC 引用环 | 中 | 强引用环按设计泄漏；对策：`Weak<T>` 破环（`sloth_weak_*`），文档明示 |
 | 9 | 固定协程栈溢出 | 低 | 默认 256 KiB + 保护页，溢出触发 SIGSEGV 诊断终止（无 1.0 的动态增长）；对策：`fiber.create_with` 调大栈 |
 | 10 | 汇编切换可移植性 | 中 | 仅覆盖 x86_64 SysV / aarch64 AAPCS64；对策：接口收敛为 `sloth_fiber_switch_asm` + trampoline 单点 |

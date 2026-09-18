@@ -192,6 +192,7 @@ impl ModEmitter {
                     };
                     let _ = xf;
                     fw.assign(name, &rv, fl);
+                    fw.track_slot(&a);
                     fw.scope_decls
                         .last_mut()
                         .unwrap()
@@ -809,6 +810,7 @@ impl ModEmitter {
                 self.emit_retain(fw, w)
             };
             fw.assign(&nm, &rv, fl);
+            fw.track_slot(&a);
             fw.scope_decls.last_mut().unwrap().insert(nm.clone(), a);
         } else {
             fw.assign(&nm, w, fl);
@@ -1936,6 +1938,7 @@ impl ModEmitter {
         let it_owned = itv_xfer || (recv_owned && !has_iter);
         fw.push_scope();
         if it_owned {
+            fw.track_slot(&islot);
             fw.scope_decls
                 .last_mut()
                 .unwrap()

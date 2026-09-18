@@ -35,10 +35,41 @@ func cancel_values(): unit {
     print("check: ${fiber.check(f)}");
 }
 
+func helper_err(): unit {
+    let h = "helper held";
+    fiber.error("nested");
+}
+
+func nested_err(): unit {
+    let f = fiber.create(|init: int| -> unit {
+        let e = "entry held";
+        helper_err();
+    }, 0);
+    let r = fiber.resume(f, 0);
+}
+
+func helper_yield(): int {
+    let h = "helper held";
+    let a = fiber.yield(1);
+    return a;
+}
+
+func nested_cancel(): unit {
+    let f = fiber.create(|init: int| -> unit {
+        let e = "entry held";
+        let x = helper_yield();
+        let y = fiber.yield(2);
+    }, 0);
+    let r = fiber.resume(f, 0);
+    fiber.cancel(f);
+}
+
 func main(): unit {
     let base = sloth_rc_live();
     churn(50);
     cancel_values();
+    nested_err();
+    nested_cancel();
     print("balanced: ${sloth_rc_live() == base}");
     // expect: first: 0
     // expect: resumable: true

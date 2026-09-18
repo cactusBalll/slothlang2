@@ -294,7 +294,11 @@ pub fn rt_decls() -> String {
   func.func private @sloth_fiber_error(i64) -> i64
   func.func private @sloth_fiber_check(i64) -> i64
   func.func private @sloth_fiber_resumable(i64) -> i64
-  func.func private @sloth_fiber_cancel(i64) -> i64\n",
+  func.func private @sloth_fiber_cancel(i64) -> i64
+  func.func private @sloth_fiber_cancelled() -> i64
+  func.func private @sloth_fiber_cancel_abort() -> ()
+  func.func private @sloth_fiber_track(i64) -> i64
+  func.func private @sloth_fiber_untrack(i64) -> i64\n",
     );
     s
 }
