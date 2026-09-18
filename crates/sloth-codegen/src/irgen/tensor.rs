@@ -14,6 +14,20 @@ use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 
+/// MLIR f64 literal spelling: MLIR requires a decimal point (so `1e-5` is
+/// rejected while `1.0e-5` is accepted); Rust's `{:?}` drops the `.0`.
+fn fmt_f64(v: f64) -> String {
+    let s = format!("{:?}", v);
+    if let Some(epos) = s.find(['e', 'E']) {
+        if !s[..epos].contains('.') {
+            return format!("{}.0{}", &s[..epos], &s[epos..]);
+        }
+    } else if !s.contains('.') {
+        return format!("{}.0", s);
+    }
+    s
+}
+
 impl ModEmitter {
     /// `(elem, rank)` of a tensor surface, if it is one
     pub(crate) fn tensor_info(&self, t: TyId) -> Option<(TyId, u32)> {
@@ -80,7 +94,7 @@ impl ModEmitter {
     }
 
     /// error-path zero word for an operator that could not be emitted
-    fn tensor_bail(&mut self, fw: &mut FnWalk) -> (String, TyId) {
+    pub(crate) fn tensor_bail(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let z = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", z));
         (z, self.r.mk(Ty::F64))
@@ -913,6 +927,491 @@ impl ModEmitter {
         ));
         fw.op(&format!("      linalg.yield {} : {}", s, et));
         fw.op("    }");
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::Unit))
+    }
+
+    // ---- TE-P3: fused elementwise / reduction kernels ----------------------
+
+    /// open a same-shape `linalg.generic` map over `inputs` (`(value, type)`)
+    /// writing `out`; returns the block-argument names (inputs then output)
+    fn open_map(
+        &mut self,
+        fw: &mut FnWalk,
+        inputs: &[(String, String)],
+        out: &(String, String),
+        rank: u32,
+        elem: TyId,
+    ) -> Vec<String> {
+        let (map, iters) = Self::parallel_maps(rank);
+        let maps: Vec<String> = (0..inputs.len() + 1).map(|_| map.clone()).collect();
+        let names: Vec<String> = inputs.iter().map(|(n, _)| n.clone()).collect();
+        let tys: Vec<String> = inputs.iter().map(|(_, t)| t.clone()).collect();
+        let ins_clause = format!("ins({} : {})", names.join(", "), tys.join(", "));
+        fw.op(&format!(
+            "    linalg.generic {{indexing_maps = [{}], iterator_types = [{}]}} {} outs({} : {}) {{",
+            maps.join(", "),
+            iters,
+            ins_clause,
+            out.0,
+            out.1
+        ));
+        let et = self.tensor_elem_mlir(elem).to_string();
+        let mut names: Vec<String> = Vec::new();
+        let mut sig: Vec<String> = Vec::new();
+        for _ in inputs {
+            let a = fw.v();
+            sig.push(format!("{}: {}", a, et));
+            names.push(a);
+        }
+        let o = fw.v();
+        sig.push(format!("{}: {}", o, et));
+        names.push(o);
+        fw.op(&format!("    ^bb0({}):", sig.join(", ")));
+        names
+    }
+
+    fn close_map(&mut self, fw: &mut FnWalk, yieldv: &str, elem: TyId) {
+        let et = self.tensor_elem_mlir(elem).to_string();
+        fw.op(&format!("      linalg.yield {} : {}", yieldv, et));
+        fw.op("    }");
+    }
+
+    fn fconst(&mut self, fw: &mut FnWalk, v: f64) -> String {
+        let c = fw.v();
+        fw.op(&format!("    {} = arith.constant {} : f64", c, fmt_f64(v)));
+        c
+    }
+
+    /// tagged dim word decoded to a bare `i64`
+    fn emit_tensor_dim_i64(&mut self, fw: &mut FnWalk, tv: &str, axis: i64) -> String {
+        let dw = self.emit_tensor_dim_word(fw, tv, axis);
+        let one = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+        let di = fw.v();
+        fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
+        di
+    }
+
+    /// allocate a same-shape output for `av` and return `(word, memref, ty, elem)`
+    fn emit_same_shape_out(
+        &mut self,
+        fw: &mut FnWalk,
+        av: &str,
+        elem: TyId,
+        rank: u32,
+    ) -> (String, TyId, String, String) {
+        let mut dims = Vec::new();
+        for k in 0..rank {
+            dims.push(self.emit_tensor_dim_word(fw, av, k as i64));
+        }
+        let (ov, ot) = self.emit_tensor_alloc_dims(fw, &dims, elem);
+        let (om, oty) = self.emit_tensor_memref(fw, &ov, elem, rank);
+        (ov, ot, om, oty)
+    }
+
+    /// `tensor.exp/sqrt/sin/cos/tan(a)`: elementwise `math.*` (rank 1/2)
+    pub(crate) fn emit_tensor_unary(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        op: &str,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (elem, rank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, format!("`tensor.{}` operand must be a tensor", op));
+                return self.tensor_bail(fw);
+            }
+        };
+        if !(1..=2).contains(&rank) || !self.is_float(elem) {
+            self.err(
+                pos,
+                format!("`tensor.{}` requires a rank 1/2 `float` tensor", op),
+            );
+            return self.tensor_bail(fw);
+        }
+        let (ov, ot, om, oty) = self.emit_same_shape_out(fw, &av, elem, rank);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, elem, rank);
+        let a = self.open_map(fw, &[(am, aty)], &(om, oty), rank, elem);
+        let r = fw.v();
+        fw.op(&format!("      {} = math.{} {} : f64", r, op, a[0]));
+        self.close_map(fw, &r, elem);
+        (ov, ot)
+    }
+
+    /// `tensor.silu(a)`: `x * sigmoid(x)` fused into one generic (rank 1/2)
+    pub(crate) fn emit_tensor_silu(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (elem, rank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.silu` operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        if !(1..=2).contains(&rank) || !self.is_float(elem) {
+            self.err(
+                pos,
+                "`tensor.silu` requires a rank 1/2 `float` tensor".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        let (ov, ot, om, oty) = self.emit_same_shape_out(fw, &av, elem, rank);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, elem, rank);
+        let a = self.open_map(fw, &[(am, aty)], &(om, oty), rank, elem);
+        let s = self.emit_silu_body(fw, &a[0]);
+        self.close_map(fw, &s, elem);
+        (ov, ot)
+    }
+
+    /// `silu(x)` body value (fused: `x / (1 + exp(-x))`)
+    fn emit_silu_body(&mut self, fw: &mut FnWalk, x: &str) -> String {
+        let neg = fw.v();
+        fw.op(&format!("      {} = arith.negf {} : f64", neg, x));
+        let e = fw.v();
+        fw.op(&format!("      {} = math.exp {} : f64", e, neg));
+        let one = self.fconst(fw, 1.0);
+        let den = fw.v();
+        fw.op(&format!("      {} = arith.addf {}, {} : f64", den, one, e));
+        let r = fw.v();
+        fw.op(&format!("      {} = arith.divf {}, {} : f64", r, x, den));
+        r
+    }
+
+    /// `tensor.silu_mul_into(a, b)`: in-place `a = silu(a) * b` (SwiGLU)
+    pub(crate) fn emit_tensor_silu_mul_into(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        be: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (bv, bt) = self.emit_expr(fw, be);
+        let (elem, rank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.silu_mul_into` first operand must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        match self.tensor_info(bt) {
+            Some((be, br)) if be == elem && br == rank => {}
+            _ => {
+                self.err(
+                    pos,
+                    "`tensor.silu_mul_into` operands must share element kind and rank".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        }
+        if !self.is_float(elem) {
+            self.err(
+                pos,
+                "`tensor.silu_mul_into` requires `float` elements".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_shape_eq(fw, &av, &bv);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, elem, rank);
+        let (bm, bty) = self.emit_tensor_memref(fw, &bv, elem, rank);
+        let a = self.open_map(
+            fw,
+            &[(am.clone(), aty.clone()), (bm, bty)],
+            &(am, aty),
+            rank,
+            elem,
+        );
+        let s = self.emit_silu_body(fw, &a[0]);
+        let r = fw.v();
+        fw.op(&format!("      {} = arith.mulf {}, {} : f64", r, s, a[1]));
+        self.close_map(fw, &r, elem);
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::Unit))
+    }
+
+    /// `tensor.rmsnorm(x, w): Tensor<float,1>` — one reduction plus a fused
+    /// `x * inv * w` scale generic (no intermediate allocation)
+    pub(crate) fn emit_tensor_rmsnorm(
+        &mut self,
+        fw: &mut FnWalk,
+        xe: &Expr,
+        we: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (xv, xt) = self.emit_expr(fw, xe);
+        let (wv, wt) = self.emit_expr(fw, we);
+        let (elem, rank) = match self.tensor_info(xt) {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.rmsnorm` first operand must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        match self.tensor_info(wt) {
+            Some((we2, wr2)) if we2 == elem && wr2 == rank => {}
+            _ => {
+                self.err(
+                    pos,
+                    "`tensor.rmsnorm` weight must share element kind and rank".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        }
+        if rank != 1 || !self.is_float(elem) {
+            self.err(
+                pos,
+                "`tensor.rmsnorm` requires rank-1 `float` tensors".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_shape_eq(fw, &xv, &wv);
+        let (am, aty) = self.emit_tensor_memref(fw, &xv, elem, 1);
+        let (wm, wty) = self.emit_tensor_memref(fw, &wv, elem, 1);
+        let n = self.emit_tensor_dim_index(fw, &xv, 0);
+        let ni = self.emit_tensor_dim_i64(fw, &xv, 0);
+        // sum of squares (reuse the dot loop as x*x)
+        let zero = self.fconst(fw, 0.0);
+        let ss = self.emit_reduce_loop(
+            fw,
+            &[(am.clone(), aty.clone()), (am.clone(), aty.clone())],
+            &n,
+            &zero,
+            elem,
+            true,
+        );
+        let nf = fw.v();
+        fw.op(&format!("    {} = arith.sitofp {} : i64 to f64", nf, ni));
+        let mean = fw.v();
+        fw.op(&format!("    {} = arith.divf {}, {} : f64", mean, ss, nf));
+        let eps = self.fconst(fw, 1e-5);
+        let den = fw.v();
+        fw.op(&format!("    {} = arith.addf {}, {} : f64", den, mean, eps));
+        let root = fw.v();
+        fw.op(&format!("    {} = math.sqrt {} : f64", root, den));
+        let one = self.fconst(fw, 1.0);
+        let inv = fw.v();
+        fw.op(&format!("    {} = arith.divf {}, {} : f64", inv, one, root));
+        let (ov, ot, om, oty) = self.emit_same_shape_out(fw, &xv, elem, 1);
+        let a = self.open_map(fw, &[(am, aty), (wm, wty)], &(om, oty), 1, elem);
+        let t = fw.v();
+        fw.op(&format!("      {} = arith.mulf {}, {} : f64", t, a[0], inv));
+        let r = fw.v();
+        fw.op(&format!("      {} = arith.mulf {}, {} : f64", r, t, a[1]));
+        self.close_map(fw, &r, elem);
+        (ov, ot)
+    }
+
+    /// `tensor.softmax(x)` (fresh) / `tensor.softmax_into(x)` (in place)
+    pub(crate) fn emit_tensor_softmax(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        in_place: bool,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (elem, rank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.softmax` operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        if rank != 1 || !self.is_float(elem) {
+            self.err(
+                pos,
+                "`tensor.softmax` requires a rank-1 `float` tensor".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        let (am, aty) = self.emit_tensor_memref(fw, &av, elem, 1);
+        let n = self.emit_tensor_dim_index(fw, &av, 0);
+        // pass 1: max (finite sentinel; MLIR rejects `-inf` literals)
+        let neg_inf = self.fconst(fw, f64::MIN);
+        let c0 = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", c0));
+        let c1 = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : index", c1));
+        let mx = fw.v();
+        let i1 = fw.v();
+        let acc1 = fw.v();
+        fw.op(&format!(
+            "    {} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (f64) {{",
+            mx, i1, c0, n, c1, acc1, neg_inf
+        ));
+        let xi = fw.v();
+        fw.op(&format!(
+            "      {} = memref.load {}[{}] : {}",
+            xi, am, i1, aty
+        ));
+        let cm = fw.v();
+        fw.op(&format!(
+            "      {} = arith.maximumf {}, {} : f64",
+            cm, acc1, xi
+        ));
+        fw.op(&format!("      scf.yield {} : f64", cm));
+        fw.op("    }");
+        // output: fresh allocation or the operand itself
+        let (ov, ot, om, oty) = if in_place {
+            (av.clone(), at, am.clone(), aty.clone())
+        } else {
+            self.emit_same_shape_out(fw, &av, elem, 1)
+        };
+        // pass 2: exp(x-max) -> out, accumulate sum
+        let zero = self.fconst(fw, 0.0);
+        let sum = fw.v();
+        let i2 = fw.v();
+        let acc2 = fw.v();
+        fw.op(&format!(
+            "    {} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (f64) {{",
+            sum, i2, c0, n, c1, acc2, zero
+        ));
+        let xi2 = fw.v();
+        fw.op(&format!(
+            "      {} = memref.load {}[{}] : {}",
+            xi2, am, i2, aty
+        ));
+        let dv = fw.v();
+        fw.op(&format!("      {} = arith.subf {}, {} : f64", dv, xi2, mx));
+        let ev = fw.v();
+        fw.op(&format!("      {} = math.exp {} : f64", ev, dv));
+        fw.op(&format!(
+            "      memref.store {}, {}[{}] : {}",
+            ev, om, i2, oty
+        ));
+        let sv = fw.v();
+        fw.op(&format!("      {} = arith.addf {}, {} : f64", sv, acc2, ev));
+        fw.op(&format!("      scf.yield {} : f64", sv));
+        fw.op("    }");
+        // pass 3: divide out by sum
+        let i3 = fw.v();
+        fw.op(&format!(
+            "    scf.for {} = {} to {} step {} {{",
+            i3, c0, n, c1
+        ));
+        let xo = fw.v();
+        fw.op(&format!(
+            "      {} = memref.load {}[{}] : {}",
+            xo, om, i3, oty
+        ));
+        let qv = fw.v();
+        fw.op(&format!("      {} = arith.divf {}, {} : f64", qv, xo, sum));
+        fw.op(&format!(
+            "      memref.store {}, {}[{}] : {}",
+            qv, om, i3, oty
+        ));
+        fw.op("    }");
+        (ov, ot)
+    }
+
+    /// `tensor.add_scaled_into(dst, src, a)`: in-place `dst += a * src`
+    pub(crate) fn emit_tensor_add_scaled_into(
+        &mut self,
+        fw: &mut FnWalk,
+        de: &Expr,
+        se: &Expr,
+        scale: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (dv, dt) = self.emit_expr(fw, de);
+        let (sv, st) = self.emit_expr(fw, se);
+        let (scv, sct) = self.emit_expr(fw, scale);
+        let (elem, rank) = match self.tensor_info(dt) {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.add_scaled_into` destination must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        match self.tensor_info(st) {
+            Some((se2, sr2)) if se2 == elem && sr2 == rank => {}
+            _ => {
+                self.err(
+                    pos,
+                    "`tensor.add_scaled_into` operands must share element kind and rank".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        }
+        if !self.is_float(elem) {
+            self.err(
+                pos,
+                "`tensor.add_scaled_into` requires `float` elements".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        if !self.is_float(sct) {
+            self.err(pos, "`tensor.add_scaled_into` scale must be `float`".into());
+            return self.tensor_bail(fw);
+        }
+        self.emit_shape_eq(fw, &dv, &sv);
+        let scf = emit_dec_f(fw, &scv);
+        let (dm, dty) = self.emit_tensor_memref(fw, &dv, elem, rank);
+        let (sm, sty) = self.emit_tensor_memref(fw, &sv, elem, rank);
+        let a = self.open_map(fw, &[(sm, sty)], &(dm, dty), rank, elem);
+        let m = fw.v();
+        fw.op(&format!("      {} = arith.mulf {}, {} : f64", m, scf, a[0]));
+        let r = fw.v();
+        fw.op(&format!("      {} = arith.addf {}, {} : f64", r, a[1], m));
+        self.close_map(fw, &r, elem);
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::Unit))
+    }
+
+    /// `tensor.div_scalar_into(dst, s)`: in-place `dst /= s`
+    pub(crate) fn emit_tensor_div_scalar_into(
+        &mut self,
+        fw: &mut FnWalk,
+        de: &Expr,
+        scale: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (dv, dt) = self.emit_expr(fw, de);
+        let (scv, sct) = self.emit_expr(fw, scale);
+        let (elem, rank) = match self.tensor_info(dt) {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.div_scalar_into` destination must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        if !self.is_float(elem) || !self.is_float(sct) {
+            self.err(
+                pos,
+                "`tensor.div_scalar_into` requires `float` tensor and scalar".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        let scf = emit_dec_f(fw, &scv);
+        let (dm, dty) = self.emit_tensor_memref(fw, &dv, elem, rank);
+        let a = self.open_map(fw, &[(dm.clone(), dty.clone())], &(dm, dty), rank, elem);
+        let r = fw.v();
+        fw.op(&format!("      {} = arith.divf {}, {} : f64", r, a[0], scf));
+        self.close_map(fw, &r, elem);
         let z = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", z));
         (z, self.r.mk(Ty::Unit))

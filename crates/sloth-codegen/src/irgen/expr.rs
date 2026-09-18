@@ -1859,6 +1859,32 @@ impl ModEmitter {
                     "add_into" if args.len() == 2 => {
                         return self.emit_tensor_add_into(fw, &args[0], &args[1], pos);
                     }
+                    // TE-P3 fused kernels / math elementwise
+                    "exp" | "sqrt" | "sin" | "cos" | "tan" if args.len() == 1 => {
+                        return self.emit_tensor_unary(fw, &args[0], name.as_str(), pos);
+                    }
+                    "silu" if args.len() == 1 => {
+                        return self.emit_tensor_silu(fw, &args[0], pos);
+                    }
+                    "silu_mul_into" if args.len() == 2 => {
+                        return self.emit_tensor_silu_mul_into(fw, &args[0], &args[1], pos);
+                    }
+                    "rmsnorm" if args.len() == 2 => {
+                        return self.emit_tensor_rmsnorm(fw, &args[0], &args[1], pos);
+                    }
+                    "softmax" if args.len() == 1 => {
+                        return self.emit_tensor_softmax(fw, &args[0], false, pos);
+                    }
+                    "softmax_into" if args.len() == 1 => {
+                        return self.emit_tensor_softmax(fw, &args[0], true, pos);
+                    }
+                    "add_scaled_into" if args.len() == 3 => {
+                        return self
+                            .emit_tensor_add_scaled_into(fw, &args[0], &args[1], &args[2], pos);
+                    }
+                    "div_scalar_into" if args.len() == 2 => {
+                        return self.emit_tensor_div_scalar_into(fw, &args[0], &args[1], pos);
+                    }
                     "fill_zero" if args.len() == 1 => {
                         let (v, _t) = self.emit_expr(fw, &args[0]);
                         fw.op(&format!(
@@ -1871,6 +1897,47 @@ impl ModEmitter {
                     }
                     _ => {}
                 }
+            }
+        }
+        // TE-P3 scalar math faces (design D6): `float_sqrt/exp/sin/cos/tan/pow`
+        if let ExprNode::Ident(fname) = &callee.node {
+            let sym = match fname.as_str() {
+                "float_sqrt" => Some("sloth_rt_sqrt"),
+                "float_exp" => Some("sloth_rt_exp"),
+                "float_sin" => Some("sloth_rt_sin"),
+                "float_cos" => Some("sloth_rt_cos"),
+                "float_tan" => Some("sloth_rt_tan"),
+                "float_floor" => Some("sloth_rt_floor"),
+                _ => None,
+            };
+            if let Some(sym) = sym {
+                if args.len() == 1 {
+                    let (av, at) = self.emit_expr(fw, &args[0]);
+                    if !self.is_float(at) {
+                        self.err(pos, format!("`{}` requires a `float` argument", fname));
+                        return self.tensor_bail(fw);
+                    }
+                    let af = emit_dec_f(fw, &av);
+                    let r = fw.v();
+                    fw.op(&format!("    {} = call @{}({}) : (f64) -> f64", r, sym, af));
+                    return (emit_enc_f(fw, &r), self.r.mk(Ty::F64));
+                }
+            }
+            if fname == "float_pow" && args.len() == 2 {
+                let (av, at) = self.emit_expr(fw, &args[0]);
+                let (bv, bt) = self.emit_expr(fw, &args[1]);
+                if !self.is_float(at) || !self.is_float(bt) {
+                    self.err(pos, "`float_pow` requires `float` arguments".into());
+                    return self.tensor_bail(fw);
+                }
+                let af = emit_dec_f(fw, &av);
+                let bf = emit_dec_f(fw, &bv);
+                let r = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_rt_pow({}, {}) : (f64, f64) -> f64",
+                    r, af, bf
+                ));
+                return (emit_enc_f(fw, &r), self.r.mk(Ty::F64));
             }
         }
         let mut name = match &callee.node {

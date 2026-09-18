@@ -4192,6 +4192,77 @@ mod irgen_te_p2 {
     }
 }
 
+/// TE-P3 fused kernels + math elementwise + scalar math faces
+#[cfg(test)]
+mod irgen_te_p3 {
+    use super::*;
+
+    #[test]
+    fn fused_kernels_run() {
+        let src = r#"
+            func main(): unit {
+                var v: Tensor<float, 1> = tensor.from_array([0.0, 1.0, 4.0], [3]);
+                var e: Tensor<float, 1> = tensor.exp(v);
+                print(e[1]);
+                var r: Tensor<float, 1> = tensor.sqrt(v);
+                print(r[2]);
+                var x: Tensor<float, 1> = tensor.from_array([0.0, 1.0, -1.0], [3]);
+                var si: Tensor<float, 1> = tensor.silu(x);
+                print(si[1]);
+                var a: Tensor<float, 1> = tensor.from_array([1.0, 0.0], [2]);
+                var b: Tensor<float, 1> = tensor.from_array([2.0, 2.0], [2]);
+                tensor.silu_mul_into(a, b);
+                print(a[0]);
+                var rn: Tensor<float, 1> = tensor.from_array([3.0, 4.0], [2]);
+                var w: Tensor<float, 1> = tensor.from_array([1.0, 1.0], [2]);
+                var rr: Tensor<float, 1> = tensor.rmsnorm(rn, w);
+                print(rr[1]);
+                var sm: Tensor<float, 1> = tensor.from_array([1.0, 2.0, 3.0], [3]);
+                var p: Tensor<float, 1> = tensor.softmax(sm);
+                print(p[2]);
+                tensor.softmax_into(sm);
+                var dst: Tensor<float, 1> = tensor.from_array([1.0, 1.0], [2]);
+                var s2: Tensor<float, 1> = tensor.from_array([2.0, 3.0], [2]);
+                tensor.add_scaled_into(dst, s2, 0.5);
+                print(dst[1]);
+                tensor.div_scalar_into(dst, 2.0);
+                print(dst[1]);
+                print(float_sqrt(9.0));
+                print(float_pow(2.0, 8.0));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn rmsnorm_rank_diag() {
+        let src = r#"
+            func main(): unit {
+                var x: Tensor<float, 2> = tensor.zeros([2, 2]);
+                var w: Tensor<float, 2> = tensor.zeros([2, 2]);
+                var r: Tensor<float, 1> = tensor.rmsnorm(x, w);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected rmsnorm rank diag"),
+            Err(e) => assert!(e.contains("rank-1"), "unexpected: {}", e),
+        }
+    }
+
+    #[test]
+    fn scalar_math_int_diag() {
+        let src = r#"
+            func main(): unit {
+                print(float_sqrt(4));
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected scalar math diag"),
+            Err(e) => assert!(e.contains("float"), "unexpected: {}", e),
+        }
+    }
+}
+
 /// TE-P2 R1 gate: the `sloth_tensor_basis` memref ABI. Validates that a
 /// runtime-built tensor's element buffer can cross into MLIR as a memref
 /// descriptor, be `memref.reinterpret_cast` to its runtime shape/strides,

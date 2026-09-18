@@ -148,6 +148,38 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     let ir0 = ModEmitter::take_ir(&mut me);
     Ok(normalize_indices(&ir0))
 }
+/// dev-tree stdlib root: `<repo>/lib` (design D5 search order item 4)
+const DEV_LIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../lib");
+
+/// resolve an import path (D5): importer dir → `$SLOTH_STDLIB` → `<exe>/../lib`
+/// → dev-tree `<repo>/lib`, so `import "sloth/tensor.slt"` works in-tree and
+/// once installed.
+fn find_import(dir: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    let cand = dir.join(rel);
+    if cand.is_file() {
+        return Some(cand);
+    }
+    if let Ok(root) = std::env::var("SLOTH_STDLIB") {
+        let p = std::path::Path::new(&root).join(rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            let p = d.join("../lib").join(rel);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let p = std::path::Path::new(DEV_LIB).join(rel);
+    if p.is_file() {
+        return Some(p);
+    }
+    None
+}
+
 fn resolve_program(
     src: &str,
     dir: &std::path::Path,
@@ -157,7 +189,15 @@ fn resolve_program(
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     let mut mods: Vec<(String, Program, Option<String>)> = Vec::new();
     for imp in &prog.imports {
-        let pb = dir.join(&imp.path);
+        let pb = match find_import(dir, &imp.path) {
+            Some(p) => p,
+            None => {
+                return Err(format!(
+                    "cannot resolve import {:?} (searched {:?}, $SLOTH_STDLIB, <exe>/../lib, {})",
+                    imp.path, dir, DEV_LIB
+                ));
+            }
+        };
         let pb2 = match std::fs::canonicalize(&pb) {
             Ok(p) => p,
             Err(_) => pb.clone(),

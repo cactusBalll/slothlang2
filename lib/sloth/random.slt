@@ -1,0 +1,30 @@
+// sloth2 stdlib: random (TE-P3).
+//
+// Pure-sloth RNG. The linalg/tensor kernels are compiler builtins; this file
+// holds the integer-only pieces (design D5). xorshift is written with the
+// TE-P0 integer bit operators (`^`, `<<`, `>>`) and kept non-negative via a
+// 31-bit mask. Exact run.c (`xorshift64*`) numeric alignment is refined in
+// TE-P4/P5.
+
+pub class XorShift {
+    var state: int;
+
+    func __init__(seed: int): unit {
+        this.state = seed & 2147483647;
+    }
+
+    func next_u32(): int {
+        var x = this.state;
+        x = x ^ (x << 13);
+        x = x & 2147483647;
+        x = x ^ (x >> 17);
+        x = x ^ (x << 5);
+        x = x & 2147483647;
+        this.state = x;
+        return x;
+    }
+
+    func next_f32(): float {
+        return float(this.next_u32()) / 2147483648.0;
+    }
+}

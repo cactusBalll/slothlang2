@@ -9,6 +9,7 @@ pub mod boxopt;
 pub mod console;
 pub mod externs;
 pub mod maps;
+pub mod math;
 pub mod objects;
 pub mod panics;
 pub mod ranges;

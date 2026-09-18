@@ -41,5 +41,16 @@ echo "reference (gcc -O3): ${ref_ms} ms"
 echo "sloth2 AOT (clang -O3): ${sloth_ms} ms"
 
 ratio=$(awk -v r="$ref_ms" -v s="$sloth_ms" 'BEGIN { printf "%.2f", r / s }')
-echo "ratio: ${ratio}x (target >= 0.70x)"
-awk -v x="$ratio" 'BEGIN { exit (x >= 0.70) ? 0 : 1 }'
+echo "matvec ratio: ${ratio}x (target >= 0.70x)"
+
+# fusion benchmark: fused rmsnorm vs the naive multi-op decomposition (§8.2)
+"$SLOTHC" build rmsnorm_fused.sl "$tmp/fused.bin" > /dev/null || exit 1
+"$SLOTHC" build rmsnorm_naive.sl "$tmp/naive.bin" > /dev/null || exit 1
+fused_ms=$(timeit "$tmp/fused.bin")
+naive_ms=$(timeit "$tmp/naive.bin")
+echo "rmsnorm fused: ${fused_ms} ms, naive: ${naive_ms} ms"
+fratio=$(awk -v n="$naive_ms" -v f="$fused_ms" 'BEGIN { printf "%.2f", n / f }')
+echo "fusion speedup: ${fratio}x (target >= 1.30x)"
+
+awk -v r="$ratio" -v f="$fratio" \
+    'BEGIN { exit (r >= 0.70 && f >= 1.30) ? 0 : 1 }'

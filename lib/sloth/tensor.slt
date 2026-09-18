@@ -1,0 +1,21 @@
+// sloth2 stdlib: tensor (TE-P3).
+//
+// The compute kernels that need `linalg` lowering (`matvec`, `matmul`,
+// `rmsnorm`, `softmax`, `silu`, `dot`, …) are compiler builtins recognized at
+// `tensor.*` call sites (design D5). This file holds pure-sloth convenience
+// wrappers so user code can `import "sloth/tensor.slt"`.
+
+pub func normalize(x: Tensor<float, 1>, w: Tensor<float, 1>): Tensor<float, 1> {
+    return tensor.rmsnorm(x, w);
+}
+
+// sum of squares of a rank-1 float tensor
+pub func sumsq(x: Tensor<float, 1>): float {
+    let s: Tensor<float, 1> = tensor.mul(x, x);
+    return tensor.sum(s);
+}
+
+// Euclidean length; scalar `float_sqrt` is a compiler builtin
+pub func l2(x: Tensor<float, 1>): float {
+    return float_sqrt(sumsq(x));
+}

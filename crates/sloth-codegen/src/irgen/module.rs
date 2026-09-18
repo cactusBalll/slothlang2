@@ -241,6 +241,16 @@ pub fn rt_decls() -> String {
   func.func private @sloth_map_keys(i64) -> i64
   func.func private @sloth_map_values(i64) -> i64\n",
     );
+    // scalar math faces (design D6): libm wrappers for sloth source calls
+    s.push_str(
+        "  func.func private @sloth_rt_sqrt(f64) -> f64
+  func.func private @sloth_rt_exp(f64) -> f64
+  func.func private @sloth_rt_sin(f64) -> f64
+  func.func private @sloth_rt_cos(f64) -> f64
+  func.func private @sloth_rt_tan(f64) -> f64
+  func.func private @sloth_rt_pow(f64, f64) -> f64
+  func.func private @sloth_rt_floor(f64) -> f64\n",
+    );
     // tensor extension TE-P1: descriptor + views + element access
     s.push_str(
         "  func.func private @sloth_tensor_new_1(i64, i64) -> i64
