@@ -4539,3 +4539,80 @@ mod irgen_te_p2_r1 {
         }
     }
 }
+
+/// CE-P1 formal: `fiber.*` builtins are recognized at the call site, typed as
+/// `Fiber<Y>` and lowered to the `sloth_fiber_*` runtime entry points.
+#[cfg(test)]
+mod irgen_ce_p1 {
+    use super::*;
+
+    #[test]
+    fn fiber_builtins_emit_runtime_calls() {
+        let src = r#"
+            func main(): unit {
+                let f = fiber.create(|init: int| -> unit {
+                    let got = fiber.yield(init);
+                }, 7);
+                let r = fiber.resume(f, 1);
+                let b = fiber.check(f);
+                let c = fiber.resumable(f);
+            }
+        "#;
+        let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
+        for sym in [
+            "@sloth_fiber_create",
+            "@sloth_fiber_yield",
+            "@sloth_fiber_resume",
+            "@sloth_fiber_check",
+            "@sloth_fiber_resumable",
+        ] {
+            assert!(ir.contains(sym), "missing {} in:\n{}", sym, ir);
+        }
+    }
+
+    #[test]
+    fn fiber_runs_in_jit() {
+        let src = r#"
+            func main(): unit {
+                let f = fiber.create(|init: int| -> unit {
+                    var i = 0;
+                    while i < 3 {
+                        let got = fiber.yield(i);
+                        i = i + 1;
+                    }
+                }, 0);
+                while fiber.resumable(f) {
+                    print(fiber.resume(f, 0));
+                }
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn resume_non_fiber_diag() {
+        let src = r#"
+            func main(): unit {
+                let x = 3;
+                let r = fiber.resume(x, 1);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected non-fiber diag"),
+            Err(e) => assert!(e.contains("Fiber<Y>"), "unexpected: {}", e),
+        }
+    }
+
+    #[test]
+    fn create_bad_entry_diag() {
+        let src = r#"
+            func main(): unit {
+                let f = fiber.create(3, 1);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected bad-entry diag"),
+            Err(e) => assert!(e.contains("entry function"), "unexpected: {}", e),
+        }
+    }
+}

@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后由单一发射器**一趟融合**完成符号收集、局部推断、约束检查、单态化与 MLIR 生成 | 定案 |
 | §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | **没有** sloth dialect；直接发射标准 `func`/`arith`/`cf`/`memref`/`llvm`，运行时能力用 `func.func private @sloth_*` C-ABI 调用表达 | 定案 |
-| §4.1 循环依赖通过依赖图拓扑检测 | 依赖按 `import` 递归装配；未实现显式的循环依赖诊断 | 未实现 |
+| §4.1 循环依赖通过依赖图拓扑检测 | `resolve_program` 在按 `import` 递归装配时用 DFS 栈比对规范化路径，命中即报 `circular import`（`crates/sloth-codegen/src/irgen/mod.rs:205`）；`done` 集合去重。无独立依赖图/拓扑排序阶段 | 定案（等价检测，无独立阶段） |
 | §4.2 闭包捕获结构体 + 逃逸性分析 | 闭包统一为 2 词 `{ fnptr, env }` 对象；捕获语义见 §10 | 等价实现 |
 
 ## A.2 类型与内存表示
@@ -44,6 +44,10 @@ print(a + 0.0);    // 1        运行时编码路径 -> 多丢 1 位
 | `for_stmt ::= 'for' '(' 'var' IDENT ':' expr ')' block` | 两种形式：`for x in expr {}` 与 `for (var x: expr) {}` |
 | `if`/`while` 条件必须带括号 | 带/不带括号均可 |
 | 逻辑运算符 `and`/`or`/`not` | 另有 `&&`/`||` 同义 |
+| （设计未列）位运算 | **增补** int-only `& \| ^ << >> ~`（TE-P0） |
+| （设计未列）复合赋值 | **增补** `+=` `-=`（展开为 `a = a op b`） |
+| （设计未列）`Weak<T>` / `Tensor<T,R>` | **增补类型**（`Tensor` 秩语法 0..=8、语义 1..=3，见 A.7） |
+| §5.4 `extern func`（设计已声明） | 已实现；`EBNF §3.9` 原未列，现补入 `extern func` / `extern type` |
 | §2.2 "函数无返回标注且体仅单个 `return` 时可推断返回类型" | **不推断**：省略返回标注即 `unit`；`return expr;` 在 unit 函数里静默丢弃，不报错 |
 | §3.4 运算符重载以 trait 参数化（`Add<Rhs,Out>` 等） | 直接用魔术方法名（`__add__`/`__eq__`/…），不做 trait 参数化 |
 | §4.3.2 `sloth.string_literal` 等高层操作 | 字符串字面量内联为 8 字节打包的 `i64` 常量 + `sloth_str_push`/`str_finish` |
@@ -83,9 +87,20 @@ print(a + 0.0);    // 1        运行时编码路径 -> 多丢 1 位
 | §5.1 自定义 `!sloth.tensor` / `sloth.tensor_*` | 标准 `tensor`/`linalg`/`memref`/`scf`/`math` 组合 + `sloth_tensor_*` C-ABI 助手 | 定案 |
 | §5.1 数据区免 GC 扫描 + mmap 外部根 | 无 GC；`Tensor` = ARC 描述符（7 词）+ 非追踪 `calloc` 数据缓冲，视图用 `owner` 保活（无扫描器，数据区天然不参与） | 定案（架构改向） |
 | §4.4 `view_as_f32` 零拷贝 f32 视图 | 元素是 f64，checkpoint 是 f32 → **一次性加宽拷贝**（`sloth_tensor_from_f32_ptr`），内存 ×2；真零拷贝需后续 `Tensor<f32,R>` | 定案 |
-| rank 作为泛型整型常量参数 | `Ty::Tensor(TyId, u32)`，仅整数字面量、限 rank 1..=3，**独立通道**不进泛型单态化帧 | 定案（受控扩展） |
+| rank 作为泛型整型常量参数 | `Ty::Tensor(TyId, u32)`，仅整数字面量；parser 接受 0..=8（`parser.rs:374`），语义限 rank 1..=3（`tensor.rs::tensor_rank_ok`），**独立通道**不进泛型单态化帧 | 定案（受控扩展） |
 | 广播逐元素运算 | 要求 rank 与各轴完全同形，否则运行期 panic（`sloth_tensor_shape_eq`） | 受限 |
 | `sort_desc_index`/`cumsum`/`sample_topp` 作内置 | 排序/前缀扫描/采样在手写 `.slt` 中实现（`tokenizer.slt`/`llama.slt`） | 等价实现 |
 | top-p/multinomial 依赖 stdlib 排序 | `sample_topp` 手写插入排序 + CDF；`argmax` 手写扫描 | 等价实现 |
 | run.c 权重指针算术 | 整块加宽为扁平张量 + `reshape` 共享视图按层切 `(dim,dim)` | 定案 |
 | 同 seed 采样逐位对齐 | RNG 为 31-bit `XorShift`，与 run.c 的 64-bit `xorshift64*` **未**逐位对齐；greedy（temp=0）路径不用 RNG，token 序列与 run.c 完全一致 | 未实现（后续项） |
+
+## A.8 协程扩展（CE-P0–CE-P2）
+
+《协程扩展设计文档》的两处实现与设计稿不同，均为**定案的简化**：
+
+| 设计 | 实现 | 性质 |
+| --- | --- | --- |
+| §4.3 载荷按「转移」语义做发射器插桩（owned 临时不插 release；借用值先 retain 再转移） | 载荷按普通 **borrowed 实参**递交，由运行时 `sloth_fiber_*` 在接收侧 `retain`；`yield`/`resume` 的引用返回仍走规则 4/5 的 +1 交付 | 定案（消除设计稿风险 #2「转移插桩遗漏」） |
+| §4.4 `fiber.cancel` 使控制流逐帧走完作用域退出的 `release`（完整拆栈） | `setjmp`/`longjmp` 直达协程入口：协程被置 `Done`、栈回收，但**被跳过帧的 `release` 不执行**，其引用滞留（泄漏但不悬垂） | 受限（有栈取消的固有限制） |
+| §4.1 仅保存 x86_64 的 `rsp/rbp/rbx/r12-r15`、aarch64 的 `x19-x30/sp/lr` | aarch64 额外保存 AAPCS64 被调用者保存的 `d8-d15`（设计稿遗漏） | 修正 |
+| §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline` 为 crate 内 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |

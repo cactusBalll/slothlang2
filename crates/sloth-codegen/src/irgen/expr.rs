@@ -1899,6 +1899,42 @@ impl ModEmitter {
                 }
             }
         }
+        // coroutine extension CE-P1 builtin module: `fiber.*` (recognized
+        // before any receiver evaluation; payload ownership rides the runtime)
+        if let ExprNode::Field { obj, name } = &callee.node {
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "fiber") {
+                match name.as_str() {
+                    "create" if args.len() == 2 => {
+                        return self.emit_fiber_create(fw, &args[0], &args[1], None, pos);
+                    }
+                    "create_with" if args.len() == 3 => {
+                        return self.emit_fiber_create(fw, &args[0], &args[1], Some(&args[2]), pos);
+                    }
+                    "resume" if args.len() == 2 => {
+                        return self.emit_fiber_resume(fw, &args[0], &args[1], pos);
+                    }
+                    "transfer" if args.len() == 2 => {
+                        return self.emit_fiber_transfer(fw, &args[0], &args[1], pos);
+                    }
+                    "yield" if args.len() == 1 => {
+                        return self.emit_fiber_yield(fw, &args[0], pos);
+                    }
+                    "error" if args.len() == 1 => {
+                        return self.emit_fiber_error(fw, &args[0]);
+                    }
+                    "check" if args.len() == 1 => {
+                        return self.emit_fiber_check(fw, &args[0]);
+                    }
+                    "resumable" if args.len() == 1 => {
+                        return self.emit_fiber_resumable(fw, &args[0]);
+                    }
+                    "cancel" if args.len() == 1 => {
+                        return self.emit_fiber_cancel(fw, &args[0]);
+                    }
+                    _ => {}
+                }
+            }
+        }
         // TE-P3 scalar math faces (design D6): `float_sqrt/exp/sin/cos/tan/pow`
         if let ExprNode::Ident(fname) = &callee.node {
             let sym = match fname.as_str() {

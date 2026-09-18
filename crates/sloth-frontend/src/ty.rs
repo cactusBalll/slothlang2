@@ -24,6 +24,9 @@ pub enum Ty {
     /// Weak<T> reference box (ARC patch D2): holds a weak reference to a
     /// (possibly boxed) target; upgrade() yields T?
     Weak(TyId),
+    /// stackful coroutine handle (CE): single payload type Y shared by the
+    /// resume/yield channel
+    Fiber(TyId),
     Dyn(String),
     /// type param placeholder (during monomorphization substitution)
     Tp(String),
@@ -124,6 +127,10 @@ impl Reg {
                 let ne = self.subst(e, map);
                 self.mk(Ty::Weak(ne))
             }
+            Ty::Fiber(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Fiber(ne))
+            }
             other => self.mk(other.clone()),
         }
     }
@@ -154,6 +161,7 @@ fn fmt_ty(t: &Ty) -> String {
         }
         Ty::Opt(e) => format!("opt:{}", e.0),
         Ty::Weak(e) => format!("weak:{}", e.0),
+        Ty::Fiber(e) => format!("fiber:{}", e.0),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("tp:{}", n),
     }
@@ -174,6 +182,7 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Named(n, _a) => n.clone(),
         Ty::Opt(_e) => "opt".to_string(),
         Ty::Weak(_e) => "weak".to_string(),
+        Ty::Fiber(_e) => "fiber".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("?tp:{}", n),
     }

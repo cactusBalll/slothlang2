@@ -8,6 +8,7 @@ pub mod arrays;
 pub mod boxopt;
 pub mod console;
 pub mod externs;
+pub mod fiber;
 pub mod maps;
 pub mod math;
 pub mod mmap;

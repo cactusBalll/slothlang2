@@ -111,6 +111,14 @@ impl ModEmitter {
                     let u0 = self.r.mk(Ty::Unit);
                     return self.r.mk(Ty::Weak(u0));
                 }
+                // Fiber<Y> coroutine handle (CE): payload type Y
+                if n == "Fiber" {
+                    if let Some(e0) = a.into_iter().next() {
+                        return self.r.mk(Ty::Fiber(e0));
+                    }
+                    let u0 = self.r.mk(Ty::Unit);
+                    return self.r.mk(Ty::Fiber(u0));
+                }
                 // generic class instance: C<A1,A2> -> monomorphic C_<A>_...
                 if !a.is_empty() {
                     if let Some((_, cdef)) = self.class_defs.get(n).cloned() {
@@ -239,6 +247,7 @@ impl ModEmitter {
                     | Ty::Named(_, _)
                     | Ty::Dyn(_)
                     | Ty::Weak(_)
+                    | Ty::Fiber(_)
                     | Ty::Range
             ),
         }
@@ -489,6 +498,7 @@ impl ModEmitter {
                     && self.surface_compat(self.r.get(x.ret), self.r.get(y.ret))
             }
             (Ty::Array(x), Ty::Array(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
+            (Ty::Fiber(x), Ty::Fiber(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
             // tensor surfaces require element AND rank to match exactly
             (Ty::Tensor(x, rx), Ty::Tensor(y, ry)) => {
                 rx == ry && self.surface_compat(self.r.get(*x), self.r.get(*y))
@@ -585,6 +595,9 @@ impl ModEmitter {
                     sloth_frontend::ty::ty_name(self.r.get(*k)),
                     sloth_frontend::ty::ty_name(self.r.get(*v))
                 )
+            }
+            Ty::Fiber(e) => {
+                format!("Fiber<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
             }
             other => sloth_frontend::ty::ty_name(other),
         }
@@ -892,6 +905,7 @@ impl ModEmitter {
                 map.entry(n).or_insert(act);
             }
             (Ty::Array(pe), Ty::Array(ae)) => self.unify_tp(tnames, pe, ae, map),
+            (Ty::Fiber(pe), Ty::Fiber(ae)) => self.unify_tp(tnames, pe, ae, map),
             (Ty::Opt(pe), Ty::Opt(ae)) => self.unify_tp(tnames, pe, ae, map),
             (Ty::Map(pk, pv), Ty::Map(ak, av)) => {
                 self.unify_tp(tnames, pk, ak, map);

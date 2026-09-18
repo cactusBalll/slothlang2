@@ -45,6 +45,10 @@
 
 - [25. 张量扩展与 llama2.c 推理](ch25_llama.md)
 
+# 协程扩展
+
+- [26. 协程（fiber）](ch26_fiber.md)
+
 # 附录
 
 - [A. 与设计文档的偏差清单](appendix_a_deviations.md)

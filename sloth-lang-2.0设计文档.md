@@ -4,11 +4,18 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.0（草案） |
-| 文档日期 | 2026-09-14 |
-| 基准版本 | 《sloth-lang 语言参考手册》2026-09-08 版 |
-| 文档状态 | 设计评审稿 |
-| 前置决策 | **移除用户态协程（fiber）特性** |
+| 文档版本 | v1.1（与实现对齐稿） |
+| 文档日期 | 2026-09-18 |
+| 基准版本 | v1.0 设计评审稿（2026-09-14） |
+| 文档状态 | **已与当前实现对齐**；原 v1.0 中已被实现废弃的表述就地改写，并在段首以 `【已过时·v1.0】` 注明原设计与现行替代 |
+| 前置决策 | **有栈协程（fiber）以 `Fiber<Y>` 扩展恢复**（原 v1.0 的「移除 fiber」已随 ARC 改向与原生 ABI 推翻，见 `sloth-lang-2.0协程扩展设计文档.md`） |
+
+> **一致性说明**
+>
+> 本文修订自 v1.0 设计稿，正文已改写为**当前实现**（`crates/sloth-frontend`、`crates/sloth-codegen`、`crates/sloth-rt`、`slothc`）。
+> 与 v1.0 不一致处就地标记 `【已过时·v1.0】`；实现偏差的完整清单另见
+> `book/src/appendix_a_deviations.md`，滚动状态见 `PLAN-2026-09-15.md`，
+> 张量扩展的独立设计见 `sloth-lang-2.0张量扩展设计文档.md`。
 
 ---
 
@@ -34,12 +41,12 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 2. **AOT 编译**：基于 MLIR 构建中端与后端，经 LLVM 生成原生机器码，性能目标为数量级提升（对标同类 MLIR/LLVM 语言）；
 3. **语义一致性**：基础类型与类实例遵守统一的类型规则，消除 1.0 中"基础类型不是类"等不一致；
 4. **语法延续**：保留 C-like 语法外壳与核心惯用法（管道运算符、字符串插值、迭代器 for 循环、运算符重载），降低迁移成本；
-5. **可实现的运行时**：移除 fiber 后，运行时收敛为 GC、字符串池、容器、IO/FFI 四个组件。
+5. **可实现的运行时**：运行时收敛为 ARC 引用计数（含 `Weak<T>`）、字符串池、容器、IO/FFI、张量/mmap 与有栈协程（fiber）栈切换六个组件。
 
 ### 1.3 非目标
 
 - 不追求与 sloth-lang 1.0 的源代码兼容（语义差异见 §10）；
-- 不实现线程/并行（fiber 移除后语言为单线程模型，线程留待 3.0 评估）；
+- 不实现线程/并行（语言为单线程模型；协程为线程内 1:m 复用，线程留待 3.0 评估）；
 - 不实现宏系统、异步/await、类型类（type class）等高阶特性；
 - 首版不提供增量编译与 IDE 工具链（语言服务器列为后续工作）。
 
@@ -50,8 +57,10 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | sloth2 | 本文档描述的 sloth-lang 2.0 |
 | 单态化（Monomorphization） | 编译期为每个泛型实例生成具体类型副本 |
 | `dyn Trait` | 动态分派的对象类型（trait object） |
-| statepoint | LLVM 用于精确 GC 的栈上根定位机制 |
-| dialect | MLIR 中自定义类型与操作的扩展包 |
+| ARC | 引用计数所有权；`retain`/`release` 插入点在发射期静态确定，配合 `Weak<T>` 破环（见 §5.1） |
+| 词面（word plane） | 一切 SSA 词/槽/字段/容器元素的统一表示：带 tag 的单 i64（见 §2.6） |
+| dialect | MLIR 中自定义类型与操作的扩展包（**本实现不使用自定义 dialect**，见 §4.3） |
+| ~~statepoint~~ | ~~LLVM 用于精确 GC 的栈上根定位机制~~ `【已过时·v1.0】` 已弃用 GC，无需栈图/statepoint |
 
 ---
 
@@ -63,7 +72,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | --- | --- | --- |
 | 单元 | `unit` | 空类型，替代 1.0 中"无返回值函数隐式返回 nil" |
 | 布尔 | `bool` | `true` / `false`，**取消** 1.0 的"任意值隐式转 bool" |
-| 数值 | `int`（i64）、`float`（f64） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数；f64 定名为 `float`，不做 1.0 兼容保留 |
+| 数值 | `int`（**63 bit**）、`float`（**f63**） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数；`float` 为降精度 f64（见 §2.6）。`【已过时·v1.0】` 原为 `int`=i64、`float`=f64 |
 | 字符串 | `str` | UTF-8 不可变字符串，保留 string interning |
 | 范围 | `range` | 由 `..`、`..=` 构造，元素类型 `int` |
 | 数组 | `Array<T>` | 同构动态数组，替代 1.0 的异构数组 |
@@ -72,27 +81,35 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | 函数 | `(A, B) -> R` | 函数与闭包的一等类型 |
 | 类 | `class C ...` | 用户定义引用类型，单继承 |
 | 接口 | `trait T ...` | 结构化能力的静态抽象，类可 `impl` 多个 trait |
-| 动态对象 | `dyn Trait` | 运行时多态的唯一出口（虚表 + 数据指针） |
+| 动态对象 | `dyn Trait` | 运行时多态的唯一出口（单字段虚表指针 + class-id，见 §2.6） |
+| 弱引用 | `Weak<T>` | ARC 破环用的弱引用盒；`upgrade()` 返回 `T?`（见 §5.1） |
+| 张量 | `Tensor<T, R>` | 元素类型 `T`（`float`/`int`）+ 静态秩 `R`（见 §5.6） |
+| 协程 | `Fiber<Y>` | 有栈协程句柄，载荷类型 `Y`；`fiber.*` 内建模块（见协程扩展设计文档 §3） |
 
 关键决策说明：
 
 - **`T?` 替代通用 `nil`**：1.0 中任何类型都可为 `nil` 是运行时错误的主要来源（对 `nil` 的运算报错）。sloth2 中只有显式声明为 `T?` 的类型可持有 `nil`，使用值前必须判空（`if` 条件中的 `is not nil` 收窄或 `?.` 语法，见 §3.6）。
 - **取消隐式布尔转换**：`while (x)` 要求 `x: bool`。1.0 的"Nil 转 false、其余转 true"规则与强类型冲突，且与 `T?` 判空习惯重叠。
 - **无隐式数值转换**：`int` 与 `float` 之间不隐式转换，提供显式内置函数 `int(x)` / `float(x)`。算术运算两侧类型必须一致。
+- **统一词面表示**：所有类型在运行期统一为带 tag 的单 i64 词（引用 `ptr|1`、`int` 63 bit、`float` f63、`bool` `0/2`、`nil` `0`），这是实现层 ABI，见 §2.6 与 §5.1。`int` 的 63 bit 与 `float` 的尾数损失是这一取舍的直接结果。
 
 ### 2.2 类型推断
 
-采用**局部类型推断**（类比 Rust，而非全局 Hindley-Milner）：
+> `【已过时·v1.0】` 原文描述“局部类型推断 + 强制标注（含单 `return` 推断返回）+ 标注优先的子类型检查”。现行实现为**单趟融合推断**，无独立类型检查阶段。
 
-- 变量声明 `var x = expr;` 可省略标注，类型取自初始化表达式；
-- **以下位置类型标注强制**：函数参数、函数返回值（无标注且函数体仅单个 `return` 时可推断）、类字段、泛型无法从参数推断的类型参数；
-- `var x: int = 1;` 显式标注与推断冲突时以标注为准做子类型/可空性检查。
+采用**局部、单趟**推断（解析后由发射器在同一趟内完成符号收集、推断、约束检查与单态化）：
+
+- 变量声明 `var x = expr;` / `let x = expr;` 可省略标注，类型取自初始化表达式；
+- 函数参数可省略标注（由调用面/lambda 上下文推断）；**函数返回值不做推断**：省略返回标注即视为 `unit`（`return expr;` 在 `unit` 函数中静默丢弃，不报错）；
+- 泛型实例化可为“返回值驱动”：`let r: T = f(...)` 的注解或无注解 `Result<T,E>` 构造器上下文可回填类型实参；
+- 声明面与赋值面做结构化词类检查（`surface_compat`）：int/str/bool/类/Array/Map 形状、子类→父类链、`dyn`、`nil` 宽松匹配；**不承诺跨语句的流敏感推断**（`if`/`else` 的类型收窄除外，见 §2.4/§3.6）。
 
 ### 2.3 泛型
 
 - 函数与类型均可泛型：`func map<T, R>(arr: Array<T>, f: (T) -> R): Array<R>`；
 - 泛型参数可带 trait 约束：`func sort<T: Comparable>(arr: Array<T>)`；
-- 实现策略：**单态化**（编译期为每个具体类型实例生成代码副本）。相比字典传递，单态化生成代码更快、对 MLIR 优化更友好，代价是代码膨胀，可接受。
+- 实现策略：**单态化**（编译期为每个具体类型实例生成代码副本），函数与泛型类同样处理。相比字典传递，单态化生成代码更快、对 MLIR 优化更友好，代价是代码膨胀，可接受；
+- 实例可由参数推断，也可由返回值驱动（`let r: T = ...`、Result 构造器上下文）；无法推断时报诊断。**泛型/可变参/`extern`/跨模块函数不能作为一等函数值**（见 §3.3）。
 
 ### 2.4 类与继承
 
@@ -120,42 +137,46 @@ class Fish impl Speaker {
 func announce(s: Speaker): unit { s.say(); }
 ```
 
-- 运算符重载改为实现预定义 trait（见 §3.4）；
+- 运算符重载由类实现预定义的**魔术方法名**（`__add__`/`__eq__`/`__index__` 等，见 §3.4）；
 - `dyn Trait` 提供运行时多态：`var s: dyn Speaker = Fish();`；
 - trait 无字段、无构造器，方法可提供默认实现；
-- 预定义基础 trait 包括：`Hashable`（可哈希，`Map<K, V>` 的键约束，含 `hash(): int` 方法）、`Equatable`、`Comparable`、`Display`。`int`、`float`、`bool`、`str`、`range` 内置实现 `Hashable`；用户类型显式 `impl Hashable` 后即可作为 `Map` 的键类型。`Hashable` 类型必须同时实现 `Equatable`（哈希相等性契约）。
+- 预定义基础 trait 包括：`Hashable`、`Equatable`、`Comparable`、`Display`。`int`、`float`、`bool`、`str`、`range` 内置可哈希；用户类型实现 `__hash__` 方法族后即可作为 `Map` 的键类型（无 `__hash__` 时回退为指针恒等，并给出编译期提示）。`Hashable` 类型必须同时满足 `Equatable` 契约（编译期联带校验）；
+- **迭代协议是结构化的**：类型只要提供 `iter()`/`next()` 即可用于 `for`，不要求显式 `impl Iterable`（见 §3.5）。
 
 ### 2.6 值类型、引用类型与内存表示
 
-类型按内存表示明确划分为两类（与 §4.3.1 的 MLIR 类型映射一一对应）：
+> `【已过时·v1.0】` 原文为“值类型直接内联到原生栈 / 引用类型 GC 堆分配 / `int`=i64、`float`=f64 / `range` 双 i64 / `T?` 用 `{payload, has_value}` 标签布局 / `dyn` 两字 fat pointer”。现行实现**统一为带 tag 的单 i64 词面**，引用由 ARC 管理；以下为现行表示。
 
-**值类型**——直接内联存储，局部变量分配在原生栈上，赋值/传参为复制语义：
+**统一词面（word plane）**——所有 SSA 词、局部槽、对象字段、容器元素、闭包捕获与内存词均为带 tag 的单个 i64（编解码常量见 `crates/sloth-codegen/src/irgen/util.rs`、`crates/sloth-rt/src/rc.rs`）：
 
-| 类型 | 表示 |
-| --- | --- |
-| `unit` | 零大小，无表示 |
-| `bool` | `i1` |
-| `int` | `i64` |
-| `float` | `f64` |
-| `range` | 两个 `i64`（下界、上界；开闭性由上界编码区分） |
+| 面 | 编码 | 解码 |
+| --- | --- | --- |
+| 引用句柄 | `ptr \| 1`（payload 16 对齐，bit0 恒空） | `w & !1` |
+| `int` | `v << 1`（**收窄为 63 bit**，环绕语义） | 算术右移 1 |
+| `float` | 字面量 `(bits & !1) >> 1`；**运行时算术 `(bits & ~2) >> 1`**（**最多丢 2 个尾数 LSB**） | `w << 1` 后 bitcast |
+| `bool` | `0` / `2` | `!= 0` |
+| `nil` | `0` | `0` |
 
-**引用类型**——GC 堆分配，变量持有指针，赋值/传参为引用语义：
+**语言语义归类**（仅用于类型检查与所有权，不再对应不同的机器布局）：
 
-| 类型 | 表示 |
-| --- | --- |
-| `str` | 字符串池 Entry 指针（interned，相等比较即指针比较） |
-| `Array<T>` / `Map<K, V>` | 指向 GC 堆容器对象的指针，元素按单态化后的具体类型内联存储（无装箱） |
-| 类实例 | GC 堆对象指针，对象头含类型描述符（见 §5.1） |
-| 闭包 `(A) -> R` | 环境指针 + 函数指针，共两个机器字 |
-| `dyn Trait` | 数据指针 + 虚表指针（fat pointer），共两个机器字 |
+- `unit` 零大小；数值/布尔/引用在机器层都是词；
+- **引用类型**（`str`、`Array<T>`、`Map<K,V>`、类实例、闭包、`dyn`、`range`、`Tensor<T,R>`、`Weak<T>`、`Fiber<Y>`、值型 optional 盒）由 ARC 管理，变量持有句柄词：
+  - `str`：字符串池 Entry 指针词（interned，相等比较即指针比较）；
+  - `Array<T>` / `Map<K,V>`：稳定句柄对象，元素按单态化后的具体类型内联存储；数组增长只替换独立的数据缓冲，句柄不移动（`crates/sloth-rt/src/arrays.rs`）；
+  - 类实例：ARC 对象，RC 计数**带内**藏在对象头 `Hdr` 中（见 §5.1），头部含 class-id/类型信息；
+  - 闭包 `(A) -> R`：2 词 ARC 对象 `{ tagged fnptr, env }`（`lambda.rs`/`closure.rs`）；
+  - `dyn Trait`：**单字段虚表指针 + class-id**（运行时等价于两字 fat pointer）；
+  - `range`：rc 双词盒 `{ lo, hi }`（`crates/sloth-rt/src/ranges.rs`）；
+  - `Tensor<T,R>`：ARC 描述符（7 词 payload，见 §5.6）；
+  - `Fiber<Y>`：ARC 对象，payload 为 `[state, prev, inbox, stack_base, stack_size, ctx, entry, init, jmp_buf, cancel]`，`entry` 持有入口闭包；独立 `mmap` 栈 + 保护页（见协程扩展设计文档 §3.1/§4）。
 
 **可空类型 `T?` 的表示：**
 
-- **`T` 为引用类型**：`T?` 复用指针表示，`nil` 即空指针（null pointer optimization），`is not nil` 编译为一次指针判零，零额外开销；
-- **`T` 为值类型**：`T?` 采用带标签布局 `{ payload: T, has_value: i1 }`。例如 `int?` 占 16 字节（8 字节有效载荷 + 1 字节标志 + 对齐填充），`bool?` 占 2 字节；
-- 不允许嵌套可空：`T??` 编译期报错，避免多层标签歧义。
+- **`T` 为引用类型**：复用句柄词，`nil` 即词 `0`；`is not nil` 编译为一次判零；
+- **`T` 为值类型**（`int?`/`float?`/`bool?`）：**一词 payload 盒**（`sloth_box_new`/`sloth_box_get`，盒本身由 ARC 跟踪，归零即 `free`）；槽仍为 1 词，`nil` 仍为词 `0`，因此“值 0”与 `nil` 不再混淆（值 0 是合法盒句柄）；`【已过时·v1.0】` 原为 `{payload, has_value}` 两字标签布局；
+- 不允许嵌套可空：`T??` 编译期报错（parser 专用诊断）。
 
-**实现表示（定案）**：上表为语言语义表示；运行时统一采用 §5.1 的**带 tag 单 i64 词面**——引用 `ptr|1`、`int` 63 bit（`v<<1`）、`float` f63（`(bits&!1)>>1`，牺牲尾数 LSB）、`bool` `0/2`。由此 `int` 收窄为 63 bit、`float` 损失 1 ULP，属有意取舍（换取掩码/平行函数族消除）。
+**浮点精度说明**：`float` 是降精度 f64——字面量丢 1 个尾数 LSB，而**运行时算术路径的掩码为 `-3`（`~2`）**，比字面量多丢 1 位，二者不一致，属已记录的实现不一致（详见 `book/src/appendix_a_deviations.md` §A.2.1）。写浮点数值代码时应假定约 f62 精度。
 
 ---
 
@@ -171,12 +192,20 @@ func announce(s: Speaker): unit { s.say(); }
 | 可变参数 | `...` + `va_arg()` | 类型化可变参数 `func f(xs...: Array<int>)`，实参由编译器自动收集为数组 |
 | 顶层导出 | 全部自动导出 | `pub` 关键字显式导出 |
 | trait | 无 | `trait` / `impl` / `dyn` |
-| fiber | `fiber.*` 扩展函数 | **全部移除** |
+| fiber | `fiber.*` 扩展函数（动态） | **类型化恢复**：内建模块 `fiber.*` + `Fiber<Y>`（见协程扩展设计文档 §2.2） |
 | 匿名函数 | `\\|a, b\\| { ... }` | 保留，参数类型可推断或标注 `\\|a: int\\| -> int { ... }` |
 | 管道 `\\|>` | 动态调用单参函数 | 保留为语法糖，编译期解析类型 |
 | 字符串插值 | `"${expr}"` | 保留，编译期展开 |
 | map 字面量 | `@("k": v)` | 保留 `@(k: v)`，类型 `Map<K, V>`，K 需实现 `Hashable`，K/V 取各键值公共类型 |
-| 关键字 | 19 个 | 新增 `pub` `trait` `impl` `dyn` `int` `float` `str` `bool`，移除（无 fiber 关键字） |
+| 逻辑运算 | `and or not` | 保留，另接受同义 `&&` `\|\|` |
+| 复合赋值 | 无 | 新增 `+=` `-=`（`crates/sloth-frontend/src/lexer.rs` `PlusEq`/`MinusEq`） |
+| 位运算 | 无 | 新增 int-only `& \| ^ << >> ~`，优先级见 §3.9 |
+| 返回标注 | `:` | `:` 或 `->` 均可 |
+| for 循环 | `for (var x: expr)` | 另接受 `for x in expr` |
+| 外部函数/类型 | 无 | 新增 `extern func ...;` / `extern type Foo;`（见 §5.4） |
+| 显式泛型调用 | 无 | 新增 `f<A, B>(args)` |
+| 张量类型 | 无 | 新增 `Tensor<T, R>`、`Weak<T>`（见 §5.6/§5.1） |
+| 关键字 | 19 个 | **25 个保留字**：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`；`int float bool str unit range Array Map Weak Tensor Fiber dyn extern` 为上下文关键字，仅在类型/声明位置有特殊含义（见 §3.9） |
 
 ### 3.2 变量与常量
 
@@ -223,25 +252,30 @@ func add_all(xs...: Array<int>): int {
 print(add_all(1, 2, 3, 4, 5));   // 15
 ```
 
-- 函数重载：首版**不支持**同名重载（降低解析复杂度，后续版本评估）。
+- 函数重载：首版**不支持**同名重载（降低解析复杂度，后续版本评估）；
+- 返回标注可用 `:` 或 `->`；省略即 `unit`（不做返回类型推断，见 §2.2）；
+- 函数作为一等值已支持（具名函数取值、函数型参数/返回、IIFE、方法引用）；但**泛型 / 可变参 / `extern` / 跨模块函数不能作值**（见 §2.3）。
 
 ### 3.4 运算符重载
 
-由"魔术方法"改为实现预定义 trait，解析在编译期完成：
+> `【已过时·v1.0】` 原文描述“实现参数化 trait `Add<Rhs, Out>`/`Sub`/…”。现行实现**不做 trait 参数化**，而是由类实现预定义**魔术方法名**，解析在编译期完成。
 
-| 运算符 | trait | 方法签名 |
-| --- | --- | --- |
-| `+` | `Add<Rhs, Out>` | `func __add__(rhs: Rhs): Out` |
-| `-` | `Sub<Rhs, Out>` | `__sub__` |
-| `*` | `Mul<Rhs, Out>` | `__mul__` |
-| `/` | `Div<Rhs, Out>` | `__div__` |
-| `%` | `Mod<Rhs, Out>` | `__mod__` |
-| 一元 `-` | `Neg<Out>` | `func __neg__(): Out` |
-| `> >= < <=` | `Comparable` | `__gt__ __ge__ __lt__ __le__` |
-| `== !=` | `Equatable` | `__eq__ __ne__` |
-| `[]` / `[]=` | `Indexable<Idx, V>` | `__index__(idx: Idx): V` / `__assign__(idx: Idx, val: V)` |
+| 运算符 | 方法签名 |
+| --- | --- |
+| `+` | `func __add__(rhs): Out` |
+| `-` | `func __sub__(rhs): Out` |
+| `*` | `func __mul__(rhs): Out` |
+| `/` | `func __div__(rhs): Out` |
+| `%` | `func __mod__(rhs): Out` |
+| 一元 `-` | `func __neg__(): Out` |
+| `> >= < <=` | `__gt__ __ge__ __lt__ __le__` |
+| `== !=` | `__eq__ __ne__` |
+| `[]` / `[]=` | `__index__(idx): V` / `__assign__(idx, val)` |
 
-1.0 的 `+` 拼接字符串/数组语义保留为标准库对 `str`、`Array<T>` 的内置 `Add` 实现。
+- 1.0 的 `+` 拼接字符串/数组语义保留为对 `str`、`Array<T>` 的内置实现；
+- 类族若缺少对应比较重载，比较改编译期报错（不再静默退化为词面比较）；
+- **位运算 `& \| ^ << >> ~` 是 int 内置运算，不可重载**；
+- **复合赋值 `+=` `-=`** 由 `a op= b` 展开为 `a = a op b`（仅这两种，不引入其它复合赋值）。
 
 ### 3.5 控制流与迭代
 
@@ -277,16 +311,23 @@ let n = name ?: "anon";  // 空合并运算符（新增）
 `import` 从运行时函数改为**编译期声明**（这是静态化的硬性要求：无法对运行时字符串路径做类型检查）：
 
 ```rust
-import "sloth/sloth_lib/func_tool.slt";
+import "sloth/tensor.slt";
 import "./geometry.slt" as geo;
 
 let p = geo.Vec2(1, 2);
 ```
 
-- 编译期解析模块依赖图，循环依赖报错；
+- **路径解析顺序**（D5，`crates/sloth-codegen/src/irgen/mod.rs::find_import`）：
+  1. 导入者文件所在目录 `dir.join(rel)`；
+  2. 环境变量 `$SLOTH_STDLIB` 根目录；
+  3. `<当前可执行文件目录>/../lib`；
+  4. 开发树 `<repo>/lib`（`CARGO_MANIFEST_DIR/../../lib`）。
+  因此 `import "sloth/tensor.slt"` 在源码树内与安装后都可解析；
 - 被导入模块中只有 `pub` 声明可见（1.0 的"顶层全部自动导出"废弃）；
-- 模块缓存：同一编译单元内每个模块只编译一次，等价于 1.0 "模块只执行一次"的语义；
-- 不再隐式启动新协程加载模块（1.0 依赖 fiber 的加载机制随 fiber 一并移除）。
+- 循环依赖**在编译期检测并报 `circular import`**（DFS 栈比对规范化路径，`mod.rs::resolve_program`）；同一模块在 `done` 集合中去重，只装配/编译一次，等价于 1.0 "模块只执行一次"；
+- 模块级全局变量由 `sloth_<mod>__ginit()` 初始化，`@sloth_main` 入口先调用各依赖的 `ginit`；
+- 模块加载为编译期装配，不经协程启动（1.0 依赖 fiber 的隐式加载协程机制不再需要）；
+- 标准库以真实 `.slt` 文件提供于 `lib/sloth/`：`tensor.slt`、`random.slt`、`fs.slt`、`tokenizer.slt`、`llama.slt`（见 §5.6）。
 
 ### 3.8 字符串插值与管道运算符
 
@@ -295,83 +336,99 @@ let p = geo.Vec2(1, 2);
 
 ### 3.9 EBNF 文法（sloth2 完整定义）
 
+> `【已过时·v1.0】` 原 EBNF 缺 `extern`、位运算、复合赋值、`Weak<T>`/`Tensor<T,R>`、`for x in`、`->` 返回标注，且优先级表不完整。下列文法直接提炼自 `crates/sloth-frontend` 的 lexer/parser，为**当前实现**。
+
 ```ebnf
-prog            ::= ( import_decl | stmt | decl )*
+prog            ::= ( import_decl | decl | stmt )*
 
-import_decl     ::= 'import' STRING ( 'as' IDENTIFIER )? ';'
+import_decl     ::= 'import' STRING ( 'as' IDENT )? ';'
 
-decl            ::= 'pub'? ( var_decl | let_decl | func_decl | class_decl | trait_decl )
+decl            ::= 'pub'? ( func_decl | var_let_decl | class_decl
+                           | trait_decl | extern_decl )
 
-var_decl        ::= 'var' IDENTIFIER ( ':' type )? '=' expr ';'
-let_decl        ::= 'let' IDENTIFIER ( ':' type )? '=' expr ';'
+var_let_decl    ::= ( 'var' | 'let' ) IDENT ( ':' type )? '=' expr ';'
 
-func_decl       ::= 'func' IDENTIFIER type_params? '(' param_list ')' ( ':' type )? block
-type_params     ::= '<' IDENTIFIER ( ':' IDENTIFIER )? ( ',' IDENTIFIER ( ':' IDENTIFIER )? )* '>'
-param_list      ::= ( param ( ',' param )* ( ',' variadic_param )? | variadic_param )?
-param           ::= IDENTIFIER ( ':' type )?
-variadic_param  ::= IDENTIFIER '...' ':' 'Array' '<' type '>'   // 仅可位于参数列表末尾
+func_decl       ::= 'func' IDENT type_params? '(' params ')' ret_ann? block
+ret_ann         ::= ( ':' | '->' ) type
+type_params     ::= '<' IDENT ( ':' IDENT )? ( ',' IDENT ( ':' IDENT )? )* '>'
+params          ::= ( param ( ',' param )* ( ',' variadic )? | variadic )?
+param           ::= IDENT ( ':' type )?
+variadic        ::= IDENT '...' ':' 'Array' '<' type '>'      (* 仅可位于参数列表末尾 *)
 
-class_decl      ::= 'class' IDENTIFIER type_params? ( ':' IDENTIFIER )?
-                    ( 'impl' IDENTIFIER ( ',' IDENTIFIER )* )?
-                    '{' ( 'pub'? ( field_decl | func_decl ) )* '}'
-field_decl      ::= ('var' | 'let') IDENTIFIER ':' type ';'
+extern_decl     ::= 'extern' 'type' IDENT ';'
+                  | 'extern' 'func' IDENT '(' params ')' ret_ann? ';'
+                    (* 无泛型、无可变参、参数必须有类型 *)
 
-trait_decl      ::= 'trait' IDENTIFIER '{' func_decl* '}'
+class_decl      ::= 'class' IDENT type_params? ( ':' IDENT )?
+                    ( 'impl' IDENT ( ',' IDENT )* )?
+                    '{' class_item* '}'
+class_item      ::= 'pub'? ( field_decl | func_decl )
+field_decl      ::= ( 'var' | 'let' ) IDENT ':' type ( '=' expr )? ';'
 
-type            ::= 'int' | 'float' | 'bool' | 'str' | 'unit' | 'range'
+trait_decl      ::= 'trait' IDENT '{' trait_method* '}'
+trait_method    ::= 'func' IDENT '(' params ')' ':' type ( block | ';' )
+                                                    (* block = 默认实现 *)
+
+type            ::= type_base '?'?                    (* T?? 报错 *)
+type_base       ::= 'unit' | 'int' | 'float' | 'bool' | 'str' | 'range'
                   | 'Array' '<' type '>'
                   | 'Map' '<' type ',' type '>'
+                  | 'Weak' '<' type '>'
+                  | 'Fiber' '<' type '>'
+                  | 'Tensor' '<' ( 'int' | 'float' ) ',' INT '>'
+                    (* 秩字面量语法范围 0..=8，语义限 1..=3 *)
+                  | 'dyn' IDENT
                   | '(' ( type ( ',' type )* )? ')' '->' type
-                  | 'dyn' IDENTIFIER
-                  | IDENTIFIER type_args?
-                  | type '?'
+                  | IDENT type_args?
 type_args       ::= '<' type ( ',' type )* '>'
 
-stmt            ::= expr_stmt
-                  | while_stmt
-                  | for_stmt
-                  | if_stmt
-                  | break_stmt
-                  | continue_stmt
-                  | return_stmt
-                  | assignment_stmt
-
 block           ::= '{' stmt* '}'
+stmt            ::= block
+                  | var_let_decl
+                  | if_stmt | while_stmt | for_stmt
+                  | 'return' expr? ';'
+                  | 'break' ';' | 'continue' ';'
+                  | assign_stmt | expr_stmt
+
+if_stmt         ::= 'if' ( '(' expr ')' | expr ) stmt ( 'else' stmt )?
+while_stmt      ::= 'while' ( '(' expr ')' | expr ) stmt
+for_stmt        ::= 'for' ( '(' 'var' IDENT ':' expr ')' | IDENT 'in' expr ) stmt
+assign_stmt     ::= assignable ( '=' | '+=' | '-=' ) expr ';'
+assignable      ::= IDENT ( '.' IDENT | '[' expr ']' )*
 expr_stmt       ::= expr ';'
-while_stmt      ::= 'while' '(' expr ')' block
-for_stmt        ::= 'for' '(' 'var' IDENTIFIER ':' expr ')' block
-if_stmt         ::= 'if' '(' expr ')' block ( 'else' block )?
-break_stmt      ::= 'break' ';'
-continue_stmt   ::= 'continue' ';'
-return_stmt     ::= 'return' expr? ';'
-assignment_stmt ::= assignable '=' expr ';'
-assignable      ::= IDENTIFIER ( '.' IDENTIFIER | '[' expr ']' )*
 
-expr            ::= literal
-                  | lambda_expr
-                  | list_expr
-                  | map_expr
-                  | IDENTIFIER
-                  | expr '(' ( expr ( ',' expr )* )? ')'
-                  | expr '[' expr ']'
-                  | expr '.' IDENTIFIER
-                  | expr binop expr
-                  | unop expr
-                  | '(' expr ')'
-
-literal         ::= INT | FLOAT | STRING | 'true' | 'false' | 'nil'
-lambda_expr     ::= '|' param_list '|' ( '->' type )? block
-list_expr       ::= '[' ( expr ( ',' expr )* )? ']'
-map_expr        ::= '@' '(' ( entry_pair ( ',' entry_pair )* )? ')'
-entry_pair      ::= expr ':' expr                 // 键表达式类型须实现 Hashable
-
-binop           ::= '+' | '-' | '*' | '/' | '%'
-                  | '>' | '<' | '>=' | '<=' | '==' | '!='
-                  | 'and' | 'or' | '..' | '..=' | 'is' ( 'not' )? | '|>' | '?:'
-unop            ::= 'not' | '-'
+(* 表达式按 Pratt 解析，优先级 低 -> 高 *)
+expr            ::= pipe
+pipe            ::= elvis ( '|>' elvis )*                       (* 左结合 *)
+elvis           ::= or ( '?:' elvis )?                          (* 右结合 *)
+or              ::= and ( ( 'or' | '||' ) and )*
+and             ::= cmp ( ( 'and' | '&&' ) cmp )*
+cmp             ::= bor ( ( '==' | '!=' | '<' | '>' | '<=' | '>='
+                          | 'is' | 'is' 'not' ) bor )?
+bor             ::= bxor ( '|' bxor )*
+bxor            ::= band ( '^' band )*
+band            ::= shift ( '&' shift )*
+shift           ::= range ( ( '<<' | '>>' ) range )*
+range           ::= add ( ( '..' | '..=' ) add )?
+add             ::= mul ( ( '+' | '-' ) mul )*
+mul             ::= unary ( ( '*' | '/' | '%' ) unary )*
+unary           ::= ( 'not' | '-' | '~' ) unary | postfix
+postfix         ::= primary ( '(' args? ')'
+                          | '[' expr ']'
+                          | '.' IDENT
+                          | '<' type ( ',' type )* '>' '(' args? ')' )*
+primary         ::= INT | FLOAT | STRING | 'true' | 'false' | 'nil'
+                  | IDENT | 'this' | 'super'
+                  | list | map | lambda | '(' expr ')'
+args            ::= expr ( ',' expr )*
+list            ::= '[' ( expr ( ',' expr )* )? ']'
+map             ::= '@' '(' ( expr ':' expr ( ',' expr ':' expr )* )? ')'
+lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 ```
 
-关键字全集（27 个）：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`（`int float bool str unit range Array Map dyn` 为上下文关键字，仅在类型位置保留，可作标识符使用以兼容旧代码）。
+**词法要点**：`||` 空参数 lambda / `||` 逻辑或、`|` lambda 起始 / 位或、`|>` 管道、`?:` Elvis 均为独立 token；`<<`/`>>` 在解析期由相邻的两个 `Lt`/`Gt` 合并，以便 `Map<int, Array<int>>` 的泛型闭合不受影响；`?.` 已被词法识别（`QuestionDot`）但 parser 明确拒绝（可选链推迟）。
+
+关键字全集（**25 个保留字**）：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`。上下文关键字（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit range Array Map Weak Tensor dyn extern`。
 
 ---
 
@@ -379,116 +436,97 @@ unop            ::= 'not' | '-'
 
 ### 4.1 总体流水线
 
+> `【已过时·v1.0】` 原文为“10 阶段、含独立 [3] 名称解析 / [4] 类型检查推断 / [5] 单态化 / [6] sloth dialect 高层 IR”。现行实现把 [3][4][5] 融合进**单趟发射器**，且**不使用自定义 dialect**，直接发射标准 dialect。
+
 ```javascript
 源代码 (.slt)
    │
    ▼
-[1] 词法分析 Lexer ──────────► Token 流
+[1] 词法分析 Lexer ──────────► Token 流            (sloth-frontend/src/lexer.rs)
    │
    ▼
-[2] 语法分析 Parser ─────────► AST（递归下降，复用 1.0 语法规则）
+[2] 语法分析 Parser ─────────► AST（递归下降）      (sloth-frontend/src/parser.rs)
    │
    ▼
-[3] 名称解析 ────────────────► 作用域/模块符号表，循环依赖检查
-   │
+[3] 单趟发射器（融合） ───────► 文本 MLIR          (sloth-codegen/src/irgen/)
+   │      ├─ 符号收集/作用域解析（collect）
+   │      ├─ 局部推断 + 结构化词类检查（tybind）
+   │      ├─ 单态化 + 类型收窄 + 所有权插桩（fnwalk/expr/stmt）
+   │      └─ 批量诊断（不做 fail-fast）
    ▼
-[4] 类型检查/推断 ───────────► 带类型标注的 AST（Typed AST）
-   │      ├─ 局部类型推断
-   │      ├─ trait 约束求解
-   │      ├─ 闭包捕获分析（替代 1.0 的运行时 UpValue Close）
-   │      └─ 类型收窄（flow typing）
+[4] MLIR pass 管线 ──────────► 标准 dialect 降级   (sloth-codegen/src/pipeline.rs)
+   │      canonicalize → cse → one-shot-bufferize
+   │      → linalg-fuse-elementwise-ops → convert-linalg-to-loops
+   │      → convert-scf-to-cf → convert-math-to-llvm
+   │      → convert-func/arith/index/cf-to-llvm
+   │      → finalize-memref-to-llvm → reconcile-unrealized-casts
    ▼
-[5] 单态化 ──────────────────► 泛型函数/类型展开为具体实例
-   │
+[5] 后端（二选一）
+   │      ├─ run（JIT）：MLIR ExecutionEngine（ORC），invokePacked("sloth_main")
+   │      └─ build（AOT）：mlir-opt → mlir-translate --mlir-to-llvmir
+   │                       → clang -O3 app.ll libsloth_rt.so -o out
    ▼
-[6] MLIR 生成 ───────────────► sloth dialect 高层 IR
-   │
-   ▼
-[7] Dialect Lowering ────────► func / scf / cf / arith / llvm dialects
-   │
-   ▼
-[8] MLIR 优化 pass ──────────► 内联、CSE、DCE、消虚、循环优化
-   │
-   ▼
-[9] LLVM 后端 ───────────────► 目标机器码 / 目标文件
-   │
-   ▼
-[10] 链接 libsloth_rt ───────► 可执行文件
+[6] 链接 libsloth_rt（Rust 编译的静态/动态库）────► 可执行文件
 ```
 
-**与 1.0 的本质区别**：1.0 是 one-pass 直出字节码，无前述 [3][4][5] 阶段，也没有 AST。sloth2 前端整体重写，词法与语法规则可复用，解析器骨架可改造复用。
+**与 1.0 的本质区别**：1.0 是 one-pass 直出字节码；sloth2 前端新增 AST，但不设独立名称解析/类型检查阶段，而是在发射 MLIR 的同一趟内完成（见 `irgen/mod.rs` 模块注释与 `book/src/appendix_a_deviations.md` §A.1）。词法与文法规则、测试用例最大化复用。
 
 ### 4.2 前端要点
 
-1. **AST**：新增。节点携带源码位置（诊断用）与类型槽（供 [4] 回填）；
-2. **名称解析**：模块符号表 + 词法作用域栈；`import` 在此阶段完成依赖图构建与拓扑排序，检测循环依赖；
-3. **类型检查**：
+> `【已过时·v1.0】` 原文声称“两遍类型检查 + 显式名称解析阶段 + 闭包捕获结构体/逃逸分析”。现行实现为单趟融合，闭包为统一的 2 词对象。
 
-- 两遍策略：第一遍收集所有顶层声明签名（允许前向引用与递归函数/类——1.0 one-pass 无法做到）；
-- 第二遍检查函数体，执行局部推断、trait 约束求解、`is` 收窄；
-- 闭包捕获分析：静态确定捕获变量及其逃逸性，直接决定捕获环境结构体的字段布局与内存分配方式（替代 1.0 的 `UpValue::Ref/Closed` 运行时机制）；
+1. **AST**：`sloth-frontend/src/ast.rs`；节点携带源码位置（诊断用）。类型由 `ty.rs` 的 `Ty`/`TyId` 注册表在发射期建立，不回填 AST 类型槽；
+2. **名称解析与依赖装配**：作为发射的一部分；`import` 由 `irgen::resolve_program` 递归装配，DFS 栈检测 `circular import`，`done` 集合去重（**无独立依赖图/拓扑排序阶段**）；
+3. **类型检查/推断**：单趟——收集符号/规划函数与 vtable、推断局部类型、做结构化 `surface_compat` 检查、求解 trait 约束、执行 `is` 收窄；允许前向引用与递归函数/类；
+4. **单态化**：以“泛型定义 + 具体类型实参”为键缓存实例（函数与类），可由参数或返回值驱动；
+5. **闭包**：统一为 2 词 ARC 对象 `{ tagged fnptr, env }`，捕获的标量按值快照、引用按引用共享（不做逃逸性/结构体布局分析）；
+6. **错误诊断**：所有类型错误携带源码位置（行:列）与期望/实际类型，一次编译尽可能报多个错误（batch diagnostics，不做 fail-fast）。消息为英文。
 
-4. **单态化**：以"泛型定义 + 具体类型实参"为键缓存实例；递归泛型（如 `f<T>` 调用 `f<Array<T>>`）需实例化深度限制与诊断；
-5. **错误诊断**：所有类型错误携带源码位置与期望/实际类型，一次编译尽可能报多个错误（不做 fail-fast）。
+### 4.3 MLIR 生成（无自定义 dialect）
 
-### 4.3 sloth MLIR Dialect 设计
+> `【已过时·v1.0】` 原文设计了自定义 `sloth` dialect（`!sloth.*` 类型、`sloth.gc_alloc`/`sloth.string_literal` 等操作、三轮 lowering、`gc.strategy` 标注）。**该 dialect 未实现**：当前直接发射标准 dialect，运行时能力以 `func.func private @sloth_*` C-ABI 调用表达（完整前导清单见 `book/src/appendix_b_mlir.md` §B.2）。
 
-#### 4.3.1 类型
+#### 4.3.1 类型映射（词面 ABI）
 
-```mlir
-!sloth.string                      // interned str
-!sloth.array<T>                    // GC 托管数组
-!sloth.map<K, V>                   // GC 托管字典（K 须实现 Hashable）
-!sloth.optional<T>                 // T?
-!sloth.range
-!sloth.class<@Cat>                 // 类实例引用（GC 托管）
-!sloth.closure<(i64) -> i64>       // 闭包（环境指针 + 函数指针）
-!sloth.dyn<@Speaker>               // trait object（数据指针 + 虚表指针）
-```
+所有值（`int`/`float`/`bool`、引用、optional、闭包、`dyn`、张量）在 SSA 层统一为 `i64` 词；局部变量/可变槽是 `memref<1xi64>` 的 alloca；函数签名参数与返回均为 `i64`。`float` 不直接以 MLIR `f64` 出境，只在算子内部 `dec_f`/`enc_f` 转换。张量算子额外进入张量通道（`tensor`/`linalg`/`memref`/`scf`/`math`，见 §5.6）。`【已过时·v1.0】` 原为 `int`/`float`/`bool` 直接映射 `i64`/`f64`/`i1` 且“不再装箱”。
 
-`int`/`float`/`bool`/`unit` 直接映射 MLIR 内建类型（`i64`/`f64`/`i1`/无返回值），作为值类型直接分配在原生栈上、**不再装箱**——这是性能收益的根本来源；引用类型与 `T?` 的具体内存布局见 §2.6。
+#### 4.3.2 标准 dialect 与运行时调用（对照原 dialect 表）
 
-#### 4.3.2 操作（节选）
-
-| 操作 | 语义 | Lowering 目标 |
-| --- | --- | --- |
-| `sloth.gc_alloc` | GC 堆分配（对象头 + 类型描述符） | 调用运行时 `sloth_gc_alloc` |
-| `sloth.string_literal` | interned 字符串字面量 | 运行时字符串池查询/插入 |
-| `sloth.string_concat` | 字符串拼接 | 运行时 `sloth_str_concat` |
-| `sloth.string_interp` | 插值展开（Display 调用序列） | `scf` + 运行时 |
-| `sloth.array_new / push / get / set` | 数组操作（带边界检查） | 运行时 + `arith`（越界 → `sloth.panic`） |
-| `sloth.call_indirect` | 闭包/trait object 调用 | `func.call_indirect`（虚表/环境指针拆解） |
-| `sloth.call_virtual` | 类虚方法调用 | 虚表加载 + 间接调用 |
-| `sloth.type_test` | `is` 测试 | 类型描述符比对（考虑继承链的祖先表） |
-| `sloth.closure_create` | 闭包创建（捕获环境打包） | `gc_alloc` + 字段写入 |
-| `sloth.iter_begin / iter_next` | 迭代协议 | 内联展开 `Iterable` 实现为 `scf.while` |
-| `sloth.panic` | 不可恢复运行时错误 | 运行时 `sloth_panic`（打印 + 退出） |
+| v1.0 设想操作 | 现行实现 |
+| --- | --- |
+| `sloth.gc_alloc` | `call @sloth_obj_new` / `@sloth_arr_new` / ……（malloc 基确定性分配 + ARC，见 §5.1） |
+| `sloth.string_literal` | 8 字节打包 `i64` 常量 + `@sloth_str_push` / `@sloth_str_finish`（intern） |
+| `sloth.string_concat` | `@sloth_str_concat` |
+| `sloth.string_interp` | 逐段 `str_push` / `str_pushp` / `str_push_i\|_f\|_b` + `str_finish` |
+| `sloth.array_new / push / get / set` | `@sloth_arr_new` / `_get` / `_set` / `_push` / `_pop`（越界/除零 → `@sloth_panic_*`） |
+| `sloth.call_indirect` | 闭包 `{fnptr, env}` 拆解后经 `llvm.call`（每目标生成 bridge） |
+| `sloth.call_virtual` | 对象头虚表指针 + class-id 分支/间接调用 |
+| `sloth.type_test` | class-id / 运行时活跃判定 |
+| `sloth.closure_create` | `@sloth_closure_new` + env 字段写入 |
+| `sloth.iter_begin / iter_next` | 结构化 `iter()`/`next()` 协议，展开发射到 `cf`/`scf` |
+| `sloth.panic` | `@sloth_panic_divzero` / `@sloth_panic_unwrap` / `@sloth_panic_noimpl` |
 
 #### 4.3.3 Lowering 路径
 
-```javascript
-sloth dialect
-  ├─ 第一轮：迭代/插值/管道展开，闭包转换（closure conversion）
-  │     → 剩余 sloth 对象操作
-  ├─ 第二轮：对象/虚表/字符串/容器操作
-  │     → func, scf, cf, arith + 运行时调用
-  └─ 第三轮：--convert-func-to-llvm 等标准 conversion
-        → llvm dialect（gc.strategy 标注，见 §5.1）
-        → LLVM IR → 机器码
+```text
+发射端（irgen）直接产出标准 dialect（func / arith / cf / memref；张量追加 linalg / scf / math / tensor）
+  → pipeline.rs 的统一 pass 列表（见 §4.1 [4]）
+  → llvm dialect
+  → JIT（ORC ExecutionEngine）或 AOT（mlir-translate → clang -O3）
 ```
 
 #### 4.3.4 可直接复用的 MLIR 优化
 
-- `-inline`（配合类型已知信息完成消虚）；
-- `-cse` / `-canonicalize` / `-sccp`；
-- `-loop-invariant-code-motion` 等 `scf`/`affine` 循环优化（`for` 循环 lowering 到 `scf.for` 后自然获得）；
-- 数值代码（`int`/`float` 不装箱）直接进入 `arith` 优化管线，这是相对 1.0 虚拟机最大的单项性能来源。
+- `canonicalize` / `cse`：通用化简；**无语言特定 pass**（所有权与类型信息已在发射端显式化）；
+- 张量通道：`one-shot-bufferize`、`linalg-fuse-elementwise-ops`、`convert-linalg-to-loops`、`convert-math-to-llvm`（见 §5.6）；
+- 数值代码（词面 i64 + 算子内部 f64）进入 `arith` 优化管线；
+- AOT 链接期由 `clang -O3` 完成最终优化（`examples/tensor` 基准 matvec ≈0.9x、fusion ≈1.7x vs gcc -O3）。
 
 ---
 
 ## 5. 运行时设计（libsloth_rt）
 
-fiber 移除后，运行时不再有协程栈管理，收敛为四个组件，以 Rust 实现并编译为静态/动态库随程序链接。
+运行时由 ARC 引用计数（含 `Weak<T>`）、字符串池、容器、IO/FFI、张量/mmap 与有栈协程（fiber，`crates/sloth-rt/src/fiber.rs`，含 `sloth_fiber_switch_asm` 汇编切换）等组件构成，以 Rust 实现并编译为静态/动态库随程序链接。
 
 ### 5.1 内存管理：引用计数（ARC）
 
@@ -523,6 +561,7 @@ fiber 移除后，运行时不再有协程栈管理，收敛为四个组件，�
 6. **转移（transfer）**：owned 临时量被持有者接管（绑定局部/全局、字段/容器写、`return`）时**不再 retain**，所有权直接转移；接管点必须注销临时登记。
 7. **临时量回收**：owned 临时量若在语句结束前未被接管，由发射器在**语句结束**插入 `release`；在条件终止（`cjump`）与 CFG 分裂（虚分派/短路/分支 merge）处，临时量于**当前块内**冲刷，避免跨 merge 引用非支配 SSA 值。
 8. **`Weak<T>`**：弱持有不增加目标计数（弱盒本身参与 rc）；目标归零时沿弱链失效，`upgrade()` 返回 `T?`（死目标为 `nil`）。闭包捕获的标量按值快照、引用类型按引用共享（捕获即 retain）。
+9. **跨协程边界载荷**：`fiber.create/resume/yield/transfer` 的载荷按普通 borrowed 实参递交，接收侧由运行时 `retain` 接管（`sloth_fiber_*`）；`yield`/`resume` 的引用型返回值交付 +1（同规则 4/5）。协程挂起栈帧中已 `retain` 的引用由计数自然保活，无需根枚举（详见协程扩展设计文档 §4.3）。
 
 **插入点汇总**：绑定/赋值、字段与元素写、作用域退出、`return`、语句级临时量冲刷、条件分支前与 merge 处的冲刷，以及容器迭代协议——`iter()` 结果为 owned（循环退出时释放），`next()` 结果为 owned（每轮迭代末释放，`continue` 路径同样覆盖）。
 
@@ -537,8 +576,9 @@ fiber 移除后，运行时不再有协程栈管理，收敛为四个组件，�
 
 ### 5.3 容器与内建类型方法
 
-- `Array<T>` / `Map<K, V>` 运行时实现（容量增长、哈希），元素布局由单态化后的具体类型决定（无装箱，直接内联存储）；`Map` 键的哈希与相等比较经由 `Hashable`/`Equatable` 的单态化实现调用；
-- 基础类型方法（如 `arr.len()`、`str.len()`）由编译器解析为标准库泛型函数——彻底解决 1.0 "基础类型不是类导致方法依赖折衷实现"的不一致，顺带补齐 1.0 缺失的 `len()` 等标准库。
+- `Array<T>` / `Map<K, V>` 运行时实现（容量增长、哈希），元素布局由单态化后的具体类型决定（无装箱，直接内联存储）；数组采用**稳定句柄**，增长只替换独立数据缓冲（`crates/sloth-rt/src/arrays.rs`）；`Map` 键的哈希与相等比较经单态化 `__hash__`/`__eq__` 路由；
+- 基础类型方法（如 `arr.len()`、`str.len()`）由编译器**直接发射运行时调用**（`arr.len()` → `@sloth_arr_len` 等），而非生成 stdlib 泛型函数。`【已过时·v1.0】` 原计划“解析为标准库泛型函数”；直接 rt 调用为定案，功能面等价；
+- `Result<T,E>` 与 `Entry<K,V>` 由编译器**自动注入**为标准库类。
 
 ### 5.4 FFI 与宿主互操作
 
@@ -550,15 +590,27 @@ extern func floor(x: float): float;          // 链接期解析符号
 
 - 参数/返回值按 C ABI 或定义的 sloth ABI 传递，编译器自动生成 marshalling；
 - `OpaqueData` 由 `extern type`（不透明类型声明）替代，仅能经 extern 函数传递，编译期保证脚本侧无法解引用；
-- 移除 fiber 后无协程栈切换约束，extern 函数就是普通原生调用。
+- extern 函数仍是普通原生调用；但宿主帧不在受管协程栈上，`extern func` 体内不得出现 `fiber.yield`（body-less 声明天然满足）；宿主侧异步由宿主自行管理。
 
 ### 5.5 错误模型
 
 首版不提供异常机制：
 
 - 编译期：所有类型错误；
-- 运行时不可恢复错误（数组越界、`nil` 解引用、整数除零、断言失败）：`sloth.panic`，打印诊断并终止进程；
-- 可恢复错误：约定返回 `T?` 或标准库 `Result<T, E>`（以泛型枚举类实现）。
+- 运行时不可恢复错误（数组越界、`nil` 解引用、整数除零、张量形状不匹配、`Result` unwrap-on-err、断言失败）：调用运行时 `@sloth_panic_noimpl` / `@sloth_panic_divzero` / `@sloth_panic_unwrap` 等，打印诊断并终止进程（`crates/sloth-rt/src/panics.rs`）。`【已过时·v1.0】` 原文写作 `sloth.panic` op；
+- 可恢复错误：约定返回 `T?` 或标准库 `Result<T, E>`（以泛型枚举类实现，构造器 `ok()`/`err()`）；
+- 协程内 panic 仍终止进程；协程级协作式出错用 `fiber.error(msg)`（置 Error、打印诊断并切回 prev，使该处 `resume` 返回 `nil`）。
+
+### 5.6 张量扩展与标准库（TE-P0–TE-P4）
+
+张量是为“单机 fp32 跑通 llama2.c 推理”引入的受控扩展，独立设计见 `sloth-lang-2.0张量扩展设计文档.md` 与实现方案文档。要点：
+
+- **类型**：`Tensor<T, R>`（元素 `float`/`int`，秩 `R` 为整数字面量；语法 0..=8，语义限 1..=3）。运行时为 ARC 描述符（7 词 payload `[flags, ndim, shape, stride, data, owner, total]`），数据缓冲为**非追踪** `calloc`；视图（reshape / 切片 / 索引）共享存储并靠 `owner` 保活；
+- **算子**：`matvec`/`matmul`/`dot`/`sum`/`add`/`sub`/`mul`/`div` 及融合算子 `exp`/`sqrt`/`sin`/`cos`/`tan`/`silu`/`silu_mul_into`/`rmsnorm`/`softmax`/`add_scaled_into`/`div_scalar_into`。走**真 MLIR `linalg` 通道**（`memref.reinterpret_cast` + 运行期 shape/stride，绕开 bufferization），非 rt 内核回退；
+- **标准库**：以真实 `.slt` 文件提供于 `lib/sloth/`：`tensor.slt`、`random.slt`、`fs.slt`（`ByteBuffer` + mmap checkpoint IO）、`tokenizer.slt`、`llama.slt`；
+- **位运算/复合赋值（TE-P0）**：`& \| ^ << >> ~`（int-only）、`+=`/`-=`，见 §3.4；
+- **验收**：tiny / stories42M 与 `run.c` 逐字节一致（greedy）；性能 matvec ≈0.9x、fusion ≈1.7x vs gcc -O3；
+- **已知未对齐**：RNG 为 31-bit XorShift，未与 `run.c` 的 64-bit `xorshift64*` 逐位对齐（temp=0 路径不用 RNG，故输出一致）；详见 `book/src/appendix_a_deviations.md` §A.7。
 
 ---
 
@@ -573,9 +625,9 @@ extern func floor(x: float): float;          // 链接期解析符号
 | `func f(...)` + `va_arg()` | 类型化可变参数 `func f(xs...: Array<T>)`（调用写法不变），或显式 `Array<T>` 参数 |
 | `nil` 任意赋用 | `T?` + `?:` + `is not nil` 收窄 |
 | `if (x)` 真值判断 | `if (x != nil)` / `if (x is not nil)` / 显式 bool 表达式 |
-| `fiber.create/resume/yield/...` | **无替代**（特性移除）；并发需求由宿主语言承担 |
-| 魔术方法 `__iter__`/`__next__` | 实现 `Iterable<T>`/`Iterator<T>` trait |
-| 魔术方法 `__add__` 等 | 实现对应运算符 trait（语义等价，仅组织方式变化） |
+| `fiber.create/resume/yield/...` | 类型化恢复为内建模块 `fiber.*` + `Fiber<Y>`；载荷收敛为单类型 `Y`，`resume` 返回 `Y?`（见协程扩展设计文档 §2.2） |
+| 魔术方法 `__iter__`/`__next__` | 结构化提供 `iter()`/`next()` 即可用于 `for`（不要求显式 `impl Iterable`） |
+| 魔术方法 `__add__` 等 | 保留魔术方法名（`__add__`/`__eq__`/…，见 §3.4；不做 trait 参数化） |
 | 方法引用 `orange.whoami` | 保留，类型为 `() -> unit`，this 绑定语义不变 |
 | 字符串插值、管道、范围、map 字面量 | 语法不变，获得编译期类型检查 |
 
@@ -587,13 +639,18 @@ extern func floor(x: float): float;          // 链接期解析符号
 | --- | --- | --- | --- |
 | 1 | 前端整体重写 | 高 | one-pass 架构无法演进式改造，AST+类型检查必须重写；对策：词法/文法规则与测试用例最大化复用 |
 | 2 | 类型系统落地复杂度 | 高 | 手册作者自述"不亚于实现一种语言"；对策：局部推断（非全局 HM）、首版不做函数重载、trait 不带关联类型，严格控制特性面 |
-| 3 | 精确 GC 工程风险 | 中 | statepoint 重写与 stack map 生成易出隐蔽 bug；对策：MVP 先用 Boehm GC 解耦编译器与 GC 的开发进度 |
+| 3 | ~~精确 GC 工程风险~~ `【已过时·v1.0】` | 已消除 | 原对策为“MVP Boehm → statepoint 精确 GC”。架构改向 **ARC + `Weak<T>`** 后，GC/栈图/statepoint 风险整体消除；新风险转为 ARC 引用环（需 `Weak<T>` 破环）与漏插 `release` 导致的内存滞留 |
 | 4 | 单态化代码膨胀与编译速度 | 中 | 泛型实例爆炸；对策：实例缓存 + 后续考虑对引用类型共享实例（类型擦除混合策略） |
 | 5 | 动态模块加载能力丢失 | 低 | `import` 编译期化后失去运行时脚本热加载；对策：文档明确，插件场景由宿主 FFI 承接 |
-| 6 | 标准库缺口 | 中 | 1.0 标准库本就不完整，2.0 需同步建设（容器方法、`Display`、`Result` 等）；对策：标准库以 sloth2 自身编写（自举验证），仅 IO/GC 走运行时 |
-| 7 | fiber 移除的用户影响 | 已接受 | 前置决策，文档与迁移指南明示无替代方案 |
+| 6 | 标准库缺口 | 中 | 1.0 标准库本就不完整，2.0 同步建设（容器方法、`Display`、`Result`、张量/llama 等）；对策：标准库以 sloth2 自身编写（`lib/sloth/*.slt`），仅 IO/ARC/张量走运行时 |
+| 7 | 弃置挂起协程的 ARC 泄漏 | 中 | 挂起态 `Fiber` 被丢弃时栈上 retain 的对象滞留；对策：debug 构建析构 panic 暴露 + `fiber.cancel` 协作式收尾，文档明示「驱动至 Done/Error」纪律 |
+| 8 | ARC 引用环 | 中 | 强引用环按设计泄漏；对策：`Weak<T>` 破环（`sloth_weak_*`），文档明示 |
+| 9 | 固定协程栈溢出 | 低 | 默认 256 KiB + 保护页，溢出触发 SIGSEGV 诊断终止（无 1.0 的动态增长）；对策：`fiber.create_with` 调大栈 |
+| 10 | 汇编切换可移植性 | 中 | 仅覆盖 x86_64 SysV / aarch64 AAPCS64；对策：接口收敛为 `sloth_fiber_switch_asm` + trampoline 单点 |
 
-> 原方案中最难的两项——fiber 与 LLVM 无栈协程模型的错配、fiber 栈与 GC 根扫描的交互——随 fiber 移除**整体消除**，这是本次裁剪的最大架构收益。
+> 原方案中最难的两项——fiber 与 LLVM 无栈协程模型的错配、fiber 栈与 GC 根扫描的交互——已随 ARC 改向与原生 ABI **消解**：有栈协程用原生栈切换而非 LLVM coroutine intrinsic，挂起栈中引用由 ARC 计数自然保活、无需根扫描；fiber 因此以原生有栈方案恢复（见协程扩展设计文档）。
+>
+> `【已过时·v1.0】` 原方案中的 GC 相关风险（Boehm、statepoint、标记-清理）已随 ARC 改向一并消除（见 §5.1）。
 
 ---
 
@@ -603,13 +660,14 @@ extern func floor(x: float): float;          // 链接期解析符号
 | --- | --- | --- |
 | **P0 语言定稿** | 类型系统与语法冻结；编写语言规范测试集（正/负类型用例） | 本文档评审通过；≥200 条规范测试用例 |
 | **P1 前端** | Lexer/Parser/AST、名称解析、类型检查（非泛型子集） | 非泛型程序的类型检查通过/报错符合规范 |
-| **P2 MLIR 端到端 MVP** | sloth dialect（标量 + 函数 + 控制流）→ LLVM；Boehm GC；`hello world` 级程序原生运行 | 算术/分支/循环/函数程序编译运行，数值正确 |
+| **P2 MLIR 端到端 MVP** | ~~sloth dialect~~ `【已过时·v1.0】` 标准 dialect（标量 + 函数 + 控制流）→ LLVM；~~Boehm GC~~ ARC；`hello world` 级程序原生运行 | 算术/分支/循环/函数程序编译运行，数值正确 |
 | **P3 对象与闭包** | class/继承/虚表、trait 与 `dyn`、闭包转换、字符串池 | 1.0 面向对象示例（Cat/Dog/Fish 改写版）运行正确 |
 | **P4 泛型与单态化** | 泛型函数/类型、trait 约束、容器泛型化、迭代协议 | `map`/`reduce` 泛型版管道示例运行正确 |
 | **P5 模块与标准库** | 编译期 `import`、`pub` 可见性、核心标准库 | 多模块程序编译；标准库自举 |
-| **P6 优化与精确 GC** | 消虚/内联调优、statepoint 精确 GC 替换 Boehm | 性能基准 vs 1.0 提升 ≥ 10x；GC 压力测试无泄漏/误回收 |
+| **P6 优化与内存** | 消虚/内联/融合调优；~~statepoint 精确 GC 替换 Boehm~~ `【已过时·v1.0】` **ARC 所有权协议 + 全词 tag 化已完成**（见 §5.1/§5.1.1）；张量 linalg 通道与融合算子 | ARC 压力测试（`examples/arc/`）计数回落基线无泄漏；张量 matvec/fusion 相对 gcc -O3 达标 |
 
 里程碑建议：P2 完成即具备持续集成价值（端到端可跑），P4 完成即语言特性完备，可开放试用。
+> **执行状态（2026-09-18）**：P0–P6 均已落地或按 ARC 改向定案；另完成张量扩展 TE-P0–TE-P4（见 §5.6）与协程扩展 CE-P0–CE-P2（见协程扩展设计文档 §9：运行时栈切换、类型化 `fiber.*`、ARC 交接与取消）。真实进度与测试规模见 `PLAN-2026-09-15.md`。
 
 ---
 
@@ -618,7 +676,7 @@ extern func floor(x: float): float;          // 链接期解析符号
 ### 9.1 示例：1.0 Hello World 变体的 2.0 版本
 
 ```rust
-import "sloth/sloth_lib/func_tool.slt";
+import "sloth/tensor.slt";   // 标准库以真实 .slt 提供于 lib/sloth/，见 §5.6
 
 pub func main(): unit {
     let names = ["Curry", "Dijkstra", "Benjamin", "Hitori", "foo"];
@@ -632,7 +690,8 @@ pub func main(): unit {
 }
 ```
 
-差异仅在于：`import` 为编译期声明；`map` 为标准库泛型函数；顶层以 `pub func main()` 组织。输出与 1.0 完全一致。
+差异仅在于：`import` 为编译期声明；`map` 为泛型函数；顶层以 `pub func main()` 组织。
+> `【已过时·v1.0】` 原示例路径 `sloth/sloth_lib/func_tool.slt` 已不存在；现行标准库文件为 `lib/sloth/{tensor,random,fs,tokenizer,llama}.slt`（§5.6）。示例中 `map` 仅作示意，实际需由所导入模块提供（当前标准库未内置 `map`）。
 
 ### 9.2 示例：面向对象改写
 
@@ -666,7 +725,8 @@ pub func main(): unit {
 | 组件 | 选型 | 备注 |
 | --- | --- | --- |
 | 编译器实现语言 | Rust | 与 1.0 一致，团队经验延续 |
-| MLIR 接入 | melior（Rust MLIR 绑定）或 C API | 首版建议 C API，绑定成熟度高 |
-| MVP GC | Boehm-Demers-Weiser libgc | 见 §5.1 |
-| 目标版 GC | LLVM statepoint + 自研标记-清理 | P6 阶段 |
+| MLIR 接入 | `mlir-sys`（C API） | 现状；未采用 melior |
+| MLIR 工具链 | `mlir-opt` / `mlir-translate` + `clang -O3`（AOT）；ORC JIT（`run`） | 见 §4.1 |
+| 内存管理 | **ARC + `Weak<T>`**，malloc 基确定性分配器 | `【已过时·v1.0】` 原为 MVP Boehm、目标版 statepoint + 标记-清理 |
+| 张量后端 | 标准 `linalg`/`memref`/`scf`/`math` + 运行时助手 | 真 MLIR 通道，见 §5.6 |
 | 构建/包管理 | 暂不涉及，随标准库阶段评估 | — |

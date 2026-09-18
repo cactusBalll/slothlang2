@@ -202,6 +202,10 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
                 | "float"
                 | "bool"
                 | "range"
+                | "fiber"
+                | "tensor"
+                | "true"
+                | "false"
         ) || me.funcs.contains_key(&u)
             || me.cross_funcs.contains_key(&u)
             || me.class_defs.contains_key(&u);
@@ -242,6 +246,17 @@ fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
             };
             Some(Type::Simple(SimpleType::Named(
                 "Weak".into(),
+                vec![Type::Simple(ea)],
+            )))
+        }
+        Ty::Fiber(e) => {
+            let et = syn_ty_of(me, e)?;
+            let ea = match et {
+                Type::Simple(s) => s,
+                other => SimpleType::Ident(plain_ty_name(&other)),
+            };
+            Some(Type::Simple(SimpleType::Named(
+                "Fiber".into(),
                 vec![Type::Simple(ea)],
             )))
         }

@@ -284,6 +284,18 @@ pub fn rt_decls() -> String {
   func.func private @sloth_tensor_shape_eq(i64, i64) -> i64
   func.func private @sloth_tensor_dim_eq(i64, i64, i64, i64) -> i64\n",
     );
+    // coroutine extension CE-P1: stackful fiber entry points
+    s.push_str(
+        "  func.func private @sloth_fiber_create(i64, i64) -> i64
+  func.func private @sloth_fiber_create_with(i64, i64, i64) -> i64
+  func.func private @sloth_fiber_resume(i64, i64, i64) -> i64
+  func.func private @sloth_fiber_transfer(i64, i64, i64) -> i64
+  func.func private @sloth_fiber_yield(i64) -> i64
+  func.func private @sloth_fiber_error(i64) -> i64
+  func.func private @sloth_fiber_check(i64) -> i64
+  func.func private @sloth_fiber_resumable(i64) -> i64
+  func.func private @sloth_fiber_cancel(i64) -> i64\n",
+    );
     s
 }
 

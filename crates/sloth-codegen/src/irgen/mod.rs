@@ -28,6 +28,7 @@ mod class;
 mod closure;
 mod collect;
 mod expr;
+mod fiber;
 mod fnwalk;
 mod func;
 mod lambda;
@@ -48,6 +49,8 @@ pub(crate) use class::*;
 pub(crate) use collect::*;
 #[allow(unused_imports)]
 pub(crate) use expr::*;
+#[allow(unused_imports)]
+pub(crate) use fiber::*;
 #[allow(unused_imports)]
 pub(crate) use fnwalk::*;
 #[allow(unused_imports)]
