@@ -52,7 +52,21 @@ impl ModEmitter {
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
-                    let mangled = mangle(mname, None, &d.name);
+                    // extern funcs keep their raw C-ABI symbol (their body-less
+                    // declaration is emitted under it); sloth funcs are mangled
+                    let mangled = if f.is_extern {
+                        d.name.clone()
+                    } else {
+                        mangle(mname, None, &d.name)
+                    };
+                    // an extern declaration has no body and a globally unique
+                    // C symbol, so expose it on the ordinary `funcs` table too:
+                    // unqualified calls inside this module (and the root) then
+                    // take the extern ABI path (arg decode / return re-encode)
+                    // instead of the mangled foreign-call path
+                    if f.is_extern {
+                        self.funcs.insert(d.name.clone(), (**f).clone());
+                    }
                     let plan = self.plan_func(&d.name, None, f, None);
                     if d.visible {
                         self.cross_funcs

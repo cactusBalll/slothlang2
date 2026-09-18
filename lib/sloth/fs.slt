@@ -1,0 +1,37 @@
+// sloth2 stdlib: fs (TE-P3).
+//
+// llama2.c checkpoint loading (design D7). `ByteBuffer` is an opaque mmap
+// handle; `read_config` reads the 7 header i32s and `view_as_f32` widens an
+// f32 weight region into a rank-1 f64 tensor (the documented non-zero-copy
+// correction — never alias the f32 file bytes).
+
+extern type ByteBuffer;
+
+extern func sloth_mmap(path: str): ByteBuffer;
+extern func sloth_mmap_len(b: ByteBuffer): int;
+extern func sloth_mmap_i32(b: ByteBuffer, off: int): int;
+extern func sloth_tensor_from_f32_ptr(b: ByteBuffer, off: int, len: int): Tensor<float, 1>;
+
+pub func open_file(path: str): ByteBuffer {
+    return sloth_mmap(path);
+}
+
+pub func size(b: ByteBuffer): int {
+    return sloth_mmap_len(b);
+}
+
+// 7 header i32s: dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size,
+// seq_len (vocab_size < 0 means unshared classifier weights)
+pub func read_config(b: ByteBuffer): Array<int> {
+    var cfgs: Array<int> = [];
+    var i = 0;
+    while i < 7 {
+        cfgs.push(sloth_mmap_i32(b, i * 4));
+        i = i + 1;
+    }
+    return cfgs;
+}
+
+pub func view_as_f32(b: ByteBuffer, offset: int, len: int): Tensor<float, 1> {
+    return sloth_tensor_from_f32_ptr(b, offset, len);
+}

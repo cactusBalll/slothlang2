@@ -4261,6 +4261,35 @@ mod irgen_te_p3 {
             Err(e) => assert!(e.contains("float"), "unexpected: {}", e),
         }
     }
+
+    /// checkpoint IO through the `.slt` stdlib: mmap the fixture, read config,
+    /// widen f32 weights (design D7)
+    #[test]
+    fn fs_import_mmap() {
+        let path = "/tmp/opencode/te_p3_fs.bin";
+        let mut bytes: Vec<u8> = Vec::new();
+        for v in [4i32, 8, 1, 1, 1, 32, 16] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(path, &bytes).unwrap();
+        let src = format!(
+            r#"
+            import "sloth/fs.slt";
+            func main(): unit {{
+                var b = open_file("{p}");
+                let cfg = read_config(b);
+                print(cfg[5]);
+                var w: Tensor<float, 1> = view_as_f32(b, 28, 4);
+                print(tensor.sum(w));
+            }}
+        "#,
+            p = path
+        );
+        run_src_multimod(&src, std::path::Path::new(".")).unwrap();
+    }
 }
 
 /// TE-P2 R1 gate: the `sloth_tensor_basis` memref ABI. Validates that a

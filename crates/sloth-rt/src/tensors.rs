@@ -347,6 +347,57 @@ pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
     unsafe { basis_desc(t) }
 }
 
+/// panic unless `a` and `b` have identical rank and per-axis extents; used by
+/// the elementwise / in-place operators (shape errors are runtime panics,
+/// design §3.1)
+#[no_mangle]
+pub extern "C" fn sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
+    if !w_is_ref(a) || !w_is_ref(b) {
+        crate::panics::panic_msg("shape check on a nil tensor");
+    }
+    unsafe {
+        let da = w_unref(a) as *mut i64;
+        let db = w_unref(b) as *mut i64;
+        let na = ndim_of(da);
+        if na != ndim_of(db) {
+            crate::panics::panic_msg("tensor rank mismatch");
+        }
+        let sa = shape_of(da);
+        let sb = shape_of(db);
+        let mut i = 0usize;
+        while i < na {
+            if *sa.offset(i as isize) != *sb.offset(i as isize) {
+                crate::panics::panic_msg("tensor shape mismatch");
+            }
+            i += 1;
+        }
+    }
+    0
+}
+
+/// panic unless `dim(a, axa) == dim(b, axb)`; matvec/matmul inner dims
+#[no_mangle]
+pub extern "C" fn sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) -> i64 {
+    if !w_is_ref(a) || !w_is_ref(b) {
+        crate::panics::panic_msg("shape check on a nil tensor");
+    }
+    unsafe {
+        let da = w_unref(a) as *mut i64;
+        let db = w_unref(b) as *mut i64;
+        let axa = dec_i(axa_w);
+        let axb = dec_i(axb_w);
+        if axa < 0 || axa as usize >= ndim_of(da) || axb < 0 || axb as usize >= ndim_of(db) {
+            crate::panics::panic_msg("tensor axis out of range");
+        }
+        let va = *shape_of(da).offset(axa as isize);
+        let vb = *shape_of(db).offset(axb as isize);
+        if va != vb {
+            crate::panics::panic_oob("tensor mismatched dim", va, vb);
+        }
+    }
+    0
+}
+
 /// stride of `axis` (tagged int word); 0 for a nil tensor
 #[no_mangle]
 pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
@@ -394,4 +445,26 @@ pub extern "C" fn sloth_tensor_fill_zero(t: i64) -> i64 {
         }
     }
     0
+}
+
+/// widen `len` f32 values from a mapped region into a fresh rank-1 float
+/// tensor (design D7: the f32→f64 correction — explicitly *not* zero-copy)
+#[no_mangle]
+pub extern "C" fn sloth_tensor_from_f32_ptr(buf: i64, off: i64, n: i64) -> i64 {
+    unsafe {
+        let hd = &*(buf as *const crate::mmap::BufHdr);
+        if n < 0 || off < 0 || off + n * 4 > hd.len {
+            crate::panics::panic_oob("tensor f32 view", off + n * 4, hd.len);
+        }
+        let t = tensor_new_impl(&[n], FLAG_FLOAT);
+        let d = w_unref(t) as *mut i64;
+        let out = data_of(d) as *mut f64;
+        let src = hd.data.add(off as usize) as *const f32;
+        let mut i = 0i64;
+        while i < n {
+            *out.offset(i as isize) = *src.offset(i as isize) as f64;
+            i += 1;
+        }
+        t
+    }
 }

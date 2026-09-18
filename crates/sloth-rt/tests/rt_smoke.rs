@@ -1,5 +1,5 @@
 //! rt smoke suite (in-process; tagged-word header rc core).
-use sloth_rt::{arrays, maps, objects, rc, strings, tensors};
+use sloth_rt::{arrays, maps, mmap, objects, rc, strings, tensors};
 
 /// tagged len/index/field-count helpers (the word plane encodes ints)
 const fn wi(v: i64) -> i64 {
@@ -183,6 +183,37 @@ fn rt_smoke() {
         rc::sloth_rc_retain(0);
         rc::sloth_rc_release(0);
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "value words inert");
+
+        // ---- checkpoint IO (design D7): mmap + i32 header + f32 widening ----
+        let mb = rc::dec_i(rc::sloth_rc_live());
+        let mut bytes: Vec<u8> = Vec::new();
+        for v in [4i32, 8, 1, 1, 1, 32, 16] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let path = "/tmp/opencode/rt_smoke_cfg.bin";
+        std::fs::write(path, &bytes).expect("write fixture");
+        let pth = inter(path);
+        let h = mmap::sloth_mmap(pth);
+        assert_eq!(mmap::sloth_mmap_len(h), 44, "file length");
+        assert_eq!(mmap::sloth_mmap_i32(h, 0), 4, "dim");
+        assert_eq!(mmap::sloth_mmap_i32(h, 5 * 4), 32, "vocab");
+        assert_eq!(mmap::sloth_mmap_i32(h, 6 * 4), 16, "seq_len");
+        let ft = tensors::sloth_tensor_from_f32_ptr(h, 28, 4);
+        assert_eq!(rc::dec_i(tensors::sloth_tensor_dim(ft, wi(0))), 4, "len");
+        for (i, want) in [1.0f64, 2.0, 3.0, 4.0].iter().enumerate() {
+            assert_eq!(
+                rc::dec_f_bits(tensors::sloth_tensor_get1(ft, wi(i as i64))),
+                want.to_bits(),
+                "weight {}",
+                i
+            );
+        }
+        rc::sloth_rc_release(ft);
+        rc::sloth_rc_release(pth);
+        assert_eq!(rc::dec_i(rc::sloth_rc_live()), mb, "mmap tensors drained");
 
         println!("rt smoke OK");
     }
