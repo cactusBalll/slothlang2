@@ -1,0 +1,15 @@
+[book]
+title = "sloth-lang 2.0 语言指南"
+authors = ["slothlang2"]
+description = "基于 slothlang2 当前实现的 sloth-lang 2.0 语言指南（示例附对应 MLIR）"
+language = "zh-CN"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+
+[output.html.fold]
+enable = true
+level = 1
