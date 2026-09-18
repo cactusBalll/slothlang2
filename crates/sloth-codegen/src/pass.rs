@@ -4014,3 +4014,83 @@ mod irgen_te_p0 {
         }
     }
 }
+
+#[cfg(test)]
+mod irgen_te_p1 {
+    use super::*;
+
+    /// tensor construction, indexing/slicing views and view writes
+    #[test]
+    fn tensor_views_and_writes() {
+        let src = r#"
+            func main(): unit {
+                var t: Tensor<float, 2> = tensor.zeros([2, 3]);
+                t[0][1] = 5.0;
+                t[1][2] = 7.5;
+                var row: Tensor<float, 1> = t[1];
+                row[0] = 9.0;
+                var col: Tensor<float, 1> = t[0][0..2];
+                col[1] = 4.0;
+                var src: Tensor<float, 1> = tensor.from_array([1.0, 2.0, 3.0], [3]);
+                t[0] = src;
+                var cube: Tensor<float, 3> = tensor.zeros([2, 2, 2]);
+                cube[1][1][1] = 8.0;
+                print(cube[1][1][1]);
+                var it: Tensor<int, 1> = tensor.from_array([10, 20, 30], [3]);
+                print(it[1]);
+                it[2] = 99;
+                print(it[2]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// tensor field in a class: view write reaches the owning storage
+    #[test]
+    fn tensor_class_field() {
+        let src = r#"
+            class Holder {
+                var buf: Tensor<float, 2>;
+                func __init__(): unit {
+                    this.buf = tensor.zeros([2, 2]);
+                }
+            }
+            func main(): unit {
+                var h = Holder();
+                h.buf[1][1] = 3.5;
+                print(h.buf[1][1]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn tensor_zeros_needs_target() {
+        let src = r#"
+            func main(): unit {
+                var t = tensor.zeros([2, 2]);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected missing-target diag"),
+            Err(e) => assert!(
+                e.contains("requires a declared `Tensor<T, R>` target"),
+                "unexpected: {}",
+                e
+            ),
+        }
+    }
+
+    #[test]
+    fn tensor_rank_limit_diag() {
+        let src = r#"
+            func main(): unit {
+                var t: Tensor<float, 4> = tensor.zeros([2, 2, 2, 2]);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected rank diag"),
+            Err(e) => assert!(e.contains("rank 4 unsupported"), "unexpected: {}", e),
+        }
+    }
+}

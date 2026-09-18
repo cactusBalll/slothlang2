@@ -15,6 +15,9 @@ pub enum Ty {
     Range,
     Array(TyId),
     Map(TyId, TyId),
+    /// tensor extension TE-P1: element type + static rank. Rank is not a
+    /// substitution key (independent channel; never enters `tp_subst`).
+    Tensor(TyId, u32),
     Fn(FnTy),
     Named(String, Vec<TyId>), // user class w/ optional ty args
     Opt(TyId),
@@ -91,6 +94,10 @@ impl Reg {
                 let nv = self.subst(v, map);
                 self.mk(Ty::Map(nk, nv))
             }
+            Ty::Tensor(e, rank) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Tensor(ne, rank))
+            }
             Ty::Fn(f) => {
                 let params = FnTy {
                     params: f.params.clone(),
@@ -133,6 +140,7 @@ fn fmt_ty(t: &Ty) -> String {
         Ty::Range => "range".to_string(),
         Ty::Array(e) => format!("arr:{}", e.0),
         Ty::Map(k, v) => format!("map:{}:{}", k.0, v.0),
+        Ty::Tensor(e, rank) => format!("tensor:{}:{}", e.0, rank),
         Ty::Fn(f) => {
             let ps: Vec<String> = f.params.iter().map(|p| p.0.to_string()).collect();
             match &f.lam {
@@ -161,6 +169,7 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Range => "range".to_string(),
         Ty::Array(_e) => "arr".to_string(),
         Ty::Map(..) => "map".to_string(),
+        Ty::Tensor(_e, _r) => "tensor".to_string(),
         Ty::Fn(_f) => "fn".to_string(),
         Ty::Named(n, _a) => n.clone(),
         Ty::Opt(_e) => "opt".to_string(),

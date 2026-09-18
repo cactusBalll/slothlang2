@@ -241,6 +241,20 @@ pub fn rt_decls() -> String {
   func.func private @sloth_map_keys(i64) -> i64
   func.func private @sloth_map_values(i64) -> i64\n",
     );
+    // tensor extension TE-P1: descriptor + views + element access
+    s.push_str(
+        "  func.func private @sloth_tensor_new_1(i64, i64) -> i64
+  func.func private @sloth_tensor_new_2(i64, i64, i64) -> i64
+  func.func private @sloth_tensor_new_3(i64, i64, i64, i64) -> i64
+  func.func private @sloth_tensor_view(i64, i64, i64, i64) -> i64
+  func.func private @sloth_tensor_get1(i64, i64) -> i64
+  func.func private @sloth_tensor_set1(i64, i64, i64) -> i64
+  func.func private @sloth_tensor_copy_into(i64, i64) -> i64
+  func.func private @sloth_tensor_copy_from_array(i64, i64) -> i64
+  func.func private @sloth_tensor_rank(i64) -> i64
+  func.func private @sloth_tensor_dim(i64, i64) -> i64
+  func.func private @sloth_tensor_fill_zero(i64) -> i64\n",
+    );
     s
 }
 

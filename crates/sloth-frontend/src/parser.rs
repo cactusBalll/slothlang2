@@ -358,6 +358,28 @@ impl Parser {
                 self.expect(Tok::Gt, "'>'")?;
                 Type::Simple(SimpleType::Map(Box::new(k), Box::new(v)))
             }
+            // tensor extension TE-P1: `Tensor<T, R>` — the rank is read as a
+            // bare non-negative integer literal, never through `ty()`
+            "Tensor" => {
+                self.expect(Tok::Lt, "'<'")?;
+                let el = self.ty()?;
+                if !matches!(
+                    el,
+                    Type::Simple(SimpleType::Int) | Type::Simple(SimpleType::Float)
+                ) {
+                    return Err(self.err("Tensor element must be `float` or `int`"));
+                }
+                self.expect(Tok::Comma, "','")?;
+                let rank = match self.peek().cloned() {
+                    Some(Tok::Int(n)) if (0..=8).contains(&n) => {
+                        self.ptr += 1;
+                        n as u32
+                    }
+                    _ => return Err(self.err("expected a rank literal 0..=8 in `Tensor<T, R>`")),
+                };
+                self.expect(Tok::Gt, "'>'")?;
+                Type::Simple(SimpleType::Tensor(Box::new(el), rank))
+            }
             "dyn" => {
                 let tr = self.ident("trait name after dyn")?.0;
                 Type::Simple(SimpleType::Dyn(tr))

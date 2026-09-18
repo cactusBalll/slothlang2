@@ -43,6 +43,12 @@ impl ModEmitter {
                 let nv = self.ty_of(v);
                 self.r.mk(Ty::Map(nk, nv))
             }
+            // tensor extension TE-P1: element + static rank (validated by the
+            // parser: only `float`/`int` elements are accepted)
+            SimpleType::Tensor(el, rank) => {
+                let ne = self.ty_of(el);
+                self.r.mk(Ty::Tensor(ne, *rank))
+            }
             SimpleType::Fn(f) => {
                 let ps: Vec<TyId> = f.params.iter().map(|p| self.ty_of(p)).collect();
                 let nr = self.ty_of(&f.ret);
@@ -228,6 +234,7 @@ impl ModEmitter {
                 Ty::Str
                     | Ty::Array(_)
                     | Ty::Map(..)
+                    | Ty::Tensor(..)
                     | Ty::Fn(_)
                     | Ty::Named(_, _)
                     | Ty::Dyn(_)
@@ -482,6 +489,10 @@ impl ModEmitter {
                     && self.surface_compat(self.r.get(x.ret), self.r.get(y.ret))
             }
             (Ty::Array(x), Ty::Array(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
+            // tensor surfaces require element AND rank to match exactly
+            (Ty::Tensor(x, rx), Ty::Tensor(y, ry)) => {
+                rx == ry && self.surface_compat(self.r.get(*x), self.r.get(*y))
+            }
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
                 self.surface_compat(self.r.get(*k1), self.r.get(*k2))
                     && self.surface_compat(self.r.get(*v1), self.r.get(*v2))
@@ -560,6 +571,13 @@ impl ModEmitter {
         match t {
             Ty::Array(e) => {
                 format!("Array<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
+            }
+            Ty::Tensor(e, r) => {
+                format!(
+                    "Tensor<{}, {}>",
+                    sloth_frontend::ty::ty_name(self.r.get(*e)),
+                    r
+                )
             }
             Ty::Map(k, v) => {
                 format!(

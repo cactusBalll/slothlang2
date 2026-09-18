@@ -34,6 +34,7 @@ mod lambda;
 mod module;
 mod state;
 mod stmt;
+mod tensor;
 mod tybind;
 mod util;
 
@@ -59,6 +60,8 @@ pub(crate) use module::*;
 pub(crate) use state::*;
 #[allow(unused_imports)]
 pub(crate) use stmt::*;
+#[allow(unused_imports)]
+pub(crate) use tensor::*;
 #[allow(unused_imports)]
 pub(crate) use tybind::*;
 #[allow(unused_imports)]

@@ -273,6 +273,7 @@ fn plain_ty_name(t: &Type) -> String {
             SimpleType::Named(n, _) => n.clone(),
             SimpleType::Ident(n) => n.clone(),
             SimpleType::Dyn(d) => format!("dyn:{}", d),
+            SimpleType::Tensor(e, r) => format!("Tensor<{}, {}>", plain_ty_name(e), r),
             SimpleType::Fn(_) => "fn".into(),
         },
     }

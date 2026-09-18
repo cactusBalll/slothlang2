@@ -168,6 +168,9 @@ pub enum SimpleType {
     Range,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
+    /// tensor extension TE-P1: `Tensor<T, R>` — element type + static rank
+    /// (const-generic-lite; the rank is a non-negative integer literal)
+    Tensor(Box<Type>, u32),
     Fn(Box<FnType>),
     Named(String, Vec<Type>), // user type with optional generic args
     Ident(String),

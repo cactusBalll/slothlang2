@@ -1184,7 +1184,12 @@ impl ModEmitter {
                             ));
                             return (r, fty2);
                         }
-                        Ty::Named(_, _) | Ty::Dyn(_) | Ty::Array(_) | Ty::Map(..) | Ty::Bool => {
+                        Ty::Named(_, _)
+                        | Ty::Dyn(_)
+                        | Ty::Array(_)
+                        | Ty::Map(..)
+                        | Ty::Tensor(..)
+                        | Ty::Bool => {
                             let r = fw.v();
                             fw.op(&format!(
                                 "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
@@ -1625,6 +1630,11 @@ impl ModEmitter {
             }
             ExprNode::Index { obj, idx } => {
                 let (av, at) = self.emit_expr(fw, obj);
+                // tensor extension TE-P1: `t[i]` (rank>1) is a shared-storage
+                // view, rank-1 is the element; `t[a..b]` keeps the rank
+                if let Ty::Tensor(elem, rank) = self.r.get(at).clone() {
+                    return self.emit_tensor_index(fw, &av, elem, rank, idx, &e.pos);
+                }
                 let (iv, it) = self.emit_expr(fw, idx);
                 let _ = it;
                 let ats = self.r.get(at).clone();
@@ -1815,6 +1825,32 @@ impl ModEmitter {
                             args.iter().map(|a| self.emit_expr(fw, a)).collect();
                         return self.emit_ginst_call(fw, base, fd, &argv, pos, map);
                     }
+                }
+            }
+        }
+        // tensor extension TE-P1 stdlib face: `tensor.zeros` / `tensor.from_array`
+        // (the `tensor` module's builtins are recognized here; the .slt wrapper
+        // layer lands in TE-P3)
+        if let ExprNode::Field { obj, name } = &callee.node {
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "tensor") {
+                match name.as_str() {
+                    "zeros" if args.len() == 1 => {
+                        return self.emit_tensor_zeros(fw, &args[0], pos);
+                    }
+                    "from_array" if args.len() == 2 => {
+                        return self.emit_tensor_from_array(fw, &args[0], &args[1], pos);
+                    }
+                    "fill_zero" if args.len() == 1 => {
+                        let (v, _t) = self.emit_expr(fw, &args[0]);
+                        fw.op(&format!(
+                            "    call @sloth_tensor_fill_zero({}) : (i64) -> i64",
+                            v
+                        ));
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        return (z, self.r.mk(Ty::Unit));
+                    }
+                    _ => {}
                 }
             }
         }

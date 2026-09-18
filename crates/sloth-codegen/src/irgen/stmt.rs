@@ -403,6 +403,39 @@ impl ModEmitter {
                         }
                         if let Some((av, at)) = cont {
                             let ats = self.r.get(at).clone();
+                            // tensor extension TE-P1: `t[a..b] = src` assigns
+                            // through a keep-rank view (copy_into)
+                            let mut handled = false;
+                            if let Ty::Tensor(elem, rank) = ats.clone() {
+                                if matches!(ix.node, ExprNode::Range { .. }) {
+                                    let (view, _vt) =
+                                        self.emit_tensor_index(fw, &av, elem, rank, ix, &s.pos);
+                                    let ok = match self.r.get(vty).clone() {
+                                        Ty::Tensor(ve, vr) => {
+                                            vr == rank
+                                                && self.surface_compat(
+                                                    self.r.get(elem),
+                                                    self.r.get(ve),
+                                                )
+                                        }
+                                        _ => false,
+                                    };
+                                    if ok {
+                                        self.emit_tensor_copy_into(fw, &view, &v);
+                                    } else {
+                                        self.err(
+                                            &s.pos,
+                                            "tensor slice assignment expects a matching tensor"
+                                                .to_string(),
+                                        );
+                                    }
+                                    handled = true;
+                                }
+                            }
+                            if handled {
+                                fw.rc_flush();
+                                return;
+                            }
                             let (iv, _it) = self.emit_expr(fw, ix);
                             match ats {
                                 Ty::Array(el) => {
@@ -589,6 +622,65 @@ impl ModEmitter {
                                         }
                                     }
                                 }
+                                // tensor extension TE-P1: rank-1 target is a
+                                // scalar store; rank>1 target is a view that
+                                // receives an element-wise copy (D1/D2)
+                                Ty::Tensor(elem, rank) if rank == 1 => {
+                                    if self.is_float(elem) && !self.is_float(vty) {
+                                        v = iw_to_f64_word(fw, &v);
+                                    } else if !self.is_float(elem) && self.is_float(vty) {
+                                        self.err_diff(
+                                            &s.pos,
+                                            "tensor element assignment",
+                                            "non-float surface",
+                                            "float",
+                                        );
+                                    } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
+                                        let es = self.r.get(elem).clone();
+                                        let vs = self.r.get(vty).clone();
+                                        if !self.surface_compat(&es, &vs) {
+                                            let en = self.surface_name(&es);
+                                            let vn = self.surface_name(&vs);
+                                            self.err_diff(
+                                                &s.pos,
+                                                "tensor element assignment",
+                                                &en,
+                                                &vn,
+                                            );
+                                        }
+                                    }
+                                    self.emit_tensor_set1(fw, &av, &iv, &v);
+                                }
+                                Ty::Tensor(elem, rank) if rank > 1 => {
+                                    let vtyc = self.r.get(vty).clone();
+                                    let elem_ok = match &vtyc {
+                                        Ty::Tensor(ve, vr) => {
+                                            *vr == rank - 1
+                                                && self.surface_compat(
+                                                    self.r.get(elem),
+                                                    self.r.get(*ve),
+                                                )
+                                        }
+                                        _ => false,
+                                    };
+                                    if elem_ok {
+                                        let (view, _vt) = self.emit_tensor_view_drop(
+                                            fw, &av, elem, rank, &iv, &s.pos,
+                                        );
+                                        self.emit_tensor_copy_into(fw, &view, &v);
+                                    } else {
+                                        self.err_diff(
+                                            &s.pos,
+                                            "tensor view assignment",
+                                            &format!(
+                                                "Tensor<{},{}>",
+                                                sloth_frontend::ty::ty_name(self.r.get(elem)),
+                                                rank - 1
+                                            ),
+                                            &self.surface_name(&vtyc),
+                                        );
+                                    }
+                                }
                                 _ => {
                                     self.err(&s.pos, "index assignment on non-array".to_string());
                                     return;
@@ -688,13 +780,16 @@ impl ModEmitter {
                         })
                 }
             }
-            PathSeg::Index(_) => self
-                .assign_container_type(fw, &target[..target.len() - 1])
-                .and_then(|ct| match self.r.get(ct).clone() {
+            PathSeg::Index(_) => {
+                let ct = self.assign_container_type(fw, &target[..target.len() - 1])?;
+                match self.r.get(ct).clone() {
                     Ty::Array(el) => Some(el),
                     Ty::Map(_, v) => Some(v),
+                    Ty::Tensor(e, r) if r > 1 => Some(self.r.mk(Ty::Tensor(e, r - 1))),
+                    Ty::Tensor(e, _) => Some(e),
                     _ => None,
-                }),
+                }
+            }
         }
     }
 
@@ -798,6 +893,13 @@ impl ModEmitter {
                                 ));
                                 Some((inner, v))
                             }
+                            // tensor extension TE-P1: a mid-path index on a
+                            // rank>1 tensor is a shared-storage view
+                            Ty::Tensor(el, rank) if rank > 1 => {
+                                let (view, vt) =
+                                    self.emit_tensor_view_drop(fw, &pw, el, rank, &iv, pos);
+                                Some((view, vt))
+                            }
                             _ => {
                                 self.err(
                                     pos,
@@ -832,6 +934,7 @@ impl ModEmitter {
                 Some((_a, t)) => match self.r.get(t).clone() {
                     Ty::Array(el) => Some(el),
                     Ty::Map(_, v) => Some(v),
+                    Ty::Tensor(e, r) if r > 1 => Some(self.r.mk(Ty::Tensor(e, r - 1))),
                     _ => None,
                 },
                 None => None,

@@ -14,4 +14,5 @@ pub mod panics;
 pub mod ranges;
 pub mod rc;
 pub mod strings;
+pub mod tensors;
 pub mod vtable;
