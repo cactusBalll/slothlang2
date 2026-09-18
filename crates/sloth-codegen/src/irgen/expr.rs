@@ -2384,10 +2384,28 @@ impl ModEmitter {
                 }
             }
         }
+        // private function of the module currently being emitted: its
+        // unqualified name is not exported, but the module-qualified entry is
+        // always present (other modules hit `hidden` via guard_hidden)
+        let private_key = format!("{}.{}", self.cur_mod, name);
+        let cross_lookup = if self.cross_funcs.contains_key(&name) {
+            name.clone()
+        } else {
+            private_key
+        };
         // foreign-module function: symbol was pre-mangled at import time
-        if let Some(fs) = self.cross_funcs.get(&name).cloned() {
-            let r = fw.v();
+        if let Some(fs) = self.cross_funcs.get(&cross_lookup).cloned() {
             let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
+            if self.is_unit(fs.1) {
+                fw.op(&format!(
+                    "    call @{}({}) : ({}) -> ()",
+                    fs.0,
+                    vals.join(", "),
+                    sigargs.join(", ")
+                ));
+                return (String::new(), fs.1);
+            }
+            let r = fw.v();
             let rt = mlir_ret_ty(self, fs.1);
             fw.op(&format!(
                 "    {} = call @{}({}) : ({}) -> {}",

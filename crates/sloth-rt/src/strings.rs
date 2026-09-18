@@ -59,7 +59,7 @@ pub extern "C" fn sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
 }
 
 /// raw internal intern entry (returns the tagged handle word)
-fn intern_bytes(ptr: usize, len: i64) -> i64 {
+pub(crate) fn intern_bytes(ptr: usize, len: i64) -> i64 {
     unsafe {
         let p = rc_addr(std::mem::size_of::<StrT>() + len as usize + 1, None) as *mut libc::c_void;
         let td = p as *mut StrT;
@@ -301,4 +301,74 @@ pub extern "C" fn sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
             && libc::memcmp((*ta).data, (*tb).data, (*ta).len as libc::size_t) == 0;
         rc::enc_i(eq as i64)
     }
+}
+
+/// lexicographic byte comparison (TE-P4 tokenizer): raw C-ABI args, returns a
+/// raw negative/zero/positive i64 (the codegen re-encodes extern int returns)
+#[no_mangle]
+pub extern "C" fn sloth_str_cmp(a_w: i64, b_w: i64) -> i64 {
+    unsafe {
+        let ta = w_unref(a_w) as *const StrT;
+        let tb = w_unref(b_w) as *const StrT;
+        let n = (*ta).len.min((*tb).len);
+        let c = libc::memcmp((*ta).data, (*tb).data, n);
+        if c != 0 {
+            return c as i64;
+        }
+        if (*ta).len < (*tb).len {
+            -1
+        } else if (*ta).len > (*tb).len {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// i-th raw byte of a pooled string (raw C-ABI index in, raw byte out)
+#[no_mangle]
+pub extern "C" fn sloth_str_byte(s_w: i64, i: i64) -> i64 {
+    unsafe {
+        let td = w_unref(s_w) as *const StrT;
+        if i < 0 || i as usize >= (*td).len {
+            crate::panics::panic_oob("str byte", i, (*td).len as i64);
+        }
+        *((*td).data as *const u8).offset(i as isize) as i64
+    }
+}
+
+/// byte slice `[start, start+len)` as a fresh pooled string (raw C-ABI ints)
+#[no_mangle]
+pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
+    unsafe {
+        let td = w_unref(s_w) as *const StrT;
+        if start < 0 || len < 0 || start + len > (*td).len as i64 {
+            crate::panics::panic_oob("str slice", start + len, (*td).len as i64);
+        }
+        let data = ((*td).data as *const u8).offset(start as isize);
+        intern_bytes(data as usize, len)
+    }
+}
+
+/// one raw byte as a pooled string (raw C-ABI byte in); used by the tokenizer
+/// for `<0xNN>` raw-byte vocabulary entries
+#[no_mangle]
+pub extern "C" fn sloth_str_of_byte(v: i64) -> i64 {
+    let b = (v & 0xff) as u8;
+    intern_bytes((&b as *const u8) as usize, 1)
+}
+
+/// write a pooled string's bytes to stdout with no trailing newline (generation
+/// output must be printable piece-by-piece)
+#[no_mangle]
+pub extern "C" fn sloth_rt_write_str(p_w: i64) -> i64 {
+    use std::io::Write;
+    unsafe {
+        let td = w_unref(p_w) as *const StrT;
+        let sl = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
+        let mut so = std::io::stdout();
+        let _ = so.write_all(sl);
+        let _ = so.flush();
+    }
+    0
 }

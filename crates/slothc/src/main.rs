@@ -132,6 +132,7 @@ fn build_mode_r(_src: &str, ir: &str, out_path: &str) -> Result<String, String> 
             "-O3",
             "/tmp/opencode/app.ll",
             "/home/undatus63/slothlang2/target/debug/libsloth_rt.so",
+            "-lm",
             "-o",
             out_path,
         ])

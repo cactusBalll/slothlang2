@@ -447,6 +447,69 @@ pub extern "C" fn sloth_tensor_fill_zero(t: i64) -> i64 {
     0
 }
 
+/// reshape view (design §6): a shared-storage view over `t` starting at
+/// element `off`, with the given extent list (contiguous row-major strides).
+/// Used to turn the flat widened checkpoint into rank-2/3 weight slices.
+/// Bounds-checked against `t`'s flat element count.
+unsafe fn reshape_impl(t: i64, off: i64, dims: &[i64]) -> i64 {
+    if !w_is_ref(t) {
+        crate::panics::panic_msg("reshape of a nil tensor");
+    }
+    let base = w_unref(t) as *mut i64;
+    let kind = kind_of(base);
+    let total = total_of(base);
+    let n = dims.len();
+    let mut need: i64 = 1;
+    for d in dims {
+        if *d < 0 {
+            crate::panics::panic_msg("reshape with a negative extent");
+        }
+        need *= *d;
+    }
+    if off < 0 || off + need > total {
+        crate::panics::panic_oob("tensor reshape", off + need, total);
+    }
+    let shape = libc::malloc(n * 8) as *mut i64;
+    let stride = libc::malloc(n * 8) as *mut i64;
+    if shape.is_null() || stride.is_null() {
+        crate::panics::panic_msg("out of memory");
+    }
+    let mut acc: i64 = 1;
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        *shape.add(i) = dims[i];
+        *stride.add(i) = acc;
+        acc *= dims[i];
+    }
+    let ndata = data_of(base).offset((off * ELEM as i64) as isize);
+    let owner = sloth_rc_retain(t);
+    let p = rc_addr(HDR_WORDS * 8, Some(tensor_dtor)) as *mut i64;
+    *p = kind | FLAG_VIEW;
+    *p.offset(1) = n as i64;
+    *p.offset(2) = shape as i64;
+    *p.offset(3) = stride as i64;
+    *p.offset(4) = ndata as i64;
+    *p.offset(5) = owner;
+    *p.offset(6) = 0;
+    w_ref(p as usize)
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_tensor_reshape1(t: i64, off: i64, d0: i64) -> i64 {
+    unsafe { reshape_impl(t, off, &[d0]) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_tensor_reshape2(t: i64, off: i64, d0: i64, d1: i64) -> i64 {
+    unsafe { reshape_impl(t, off, &[d0, d1]) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_tensor_reshape3(t: i64, off: i64, d0: i64, d1: i64, d2: i64) -> i64 {
+    unsafe { reshape_impl(t, off, &[d0, d1, d2]) }
+}
+
 /// widen `len` f32 values from a mapped region into a fresh rank-1 float
 /// tensor (design D7: the f32→f64 correction — explicitly *not* zero-copy)
 #[no_mangle]

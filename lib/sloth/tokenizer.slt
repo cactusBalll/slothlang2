@@ -1,0 +1,209 @@
+// sloth2 stdlib: BPE tokenizer (TE-P4).
+//
+// A direct port of the llama2.c `run.c` tokenizer: the vocabulary is read out
+// of `tokenizer.bin` through the mmap helpers in `sloth/fs.slt`, sorted once
+// (byte-lexicographic) for binary-search lookup, and the byte-pair merge loop
+// follows the reference line for line. Pure sloth — no tensor code.
+
+import "sloth/fs.slt";
+
+pub class Tokenizer {
+    var vocab: Array<str>;
+    var scores: Array<float>;
+    var sorted: Array<int>;
+    var vocab_size: int;
+    var max_token_length: int;
+
+    func __init__(
+        v: Array<str>, sc: Array<float>, so: Array<int>, n: int, mlen: int
+    ) {
+        this.vocab = v;
+        this.scores = sc;
+        this.sorted = so;
+        this.vocab_size = n;
+        this.max_token_length = mlen;
+    }
+}
+
+// in-place quicksort of vocab ids by byte-lexicographic vocab string (the
+// middle pivot keeps already-sorted input at O(log n) depth)
+func qsort_ids(ids: Array<int>, vocab: Array<str>, lo: int, hi: int): unit {
+    if lo >= hi {
+        return;
+    }
+    let pivot = vocab[ids[(lo + hi) / 2]];
+    var i = lo;
+    var j = hi;
+    while i <= j {
+        while cmp_str(vocab[ids[i]], pivot) < 0 {
+            i = i + 1;
+        }
+        while cmp_str(vocab[ids[j]], pivot) > 0 {
+            j = j - 1;
+        }
+        if i <= j {
+            let tmp = ids[i];
+            ids[i] = ids[j];
+            ids[j] = tmp;
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    if lo < j {
+        qsort_ids(ids, vocab, lo, j);
+    }
+    if i < hi {
+        qsort_ids(ids, vocab, i, hi);
+    }
+}
+
+/// load `tokenizer.bin`: `[max_token_length: i32]` then per token
+/// `[score: f32][len: i32][bytes]`
+pub func load_tokenizer(path: str, vocab_size: int): Tokenizer {
+    let b = open_file(path);
+    let mlen = read_i32(b, 0);
+    var vocab: Array<str> = [];
+    var scores: Array<float> = [];
+    var off = 4;
+    var i = 0;
+    while i < vocab_size {
+        let sc = read_f32(b, off);
+        off = off + 4;
+        let ln = read_i32(b, off);
+        off = off + 4;
+        vocab.push(read_str(b, off, ln));
+        off = off + ln;
+        scores.push(sc);
+        i = i + 1;
+    }
+    var sorted: Array<int> = [];
+    i = 0;
+    while i < vocab_size {
+        sorted.push(i);
+        i = i + 1;
+    }
+    qsort_ids(sorted, vocab, 0, vocab_size - 1);
+    return Tokenizer(vocab, scores, sorted, vocab_size, mlen);
+}
+
+/// binary search for the exact byte string; returns the id or -1
+pub func str_lookup(t: Tokenizer, s: str): int {
+    var lo = 0;
+    var hi = t.vocab_size - 1;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let id = t.sorted[mid];
+        let c = cmp_str(t.vocab[id], s);
+        if c == 0 {
+            return id;
+        }
+        if c < 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return 0 - 1;
+}
+
+func hex_val(c: int): int {
+    if c >= 48 and c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 and c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 and c <= 70 {
+        return c - 55;
+    }
+    return 0 - 1;
+}
+
+/// decode token `token` (previous token `prev_token`): strips the leading
+/// space after BOS and expands `<0xNN>` raw-byte entries
+pub func decode(t: Tokenizer, prev_token: int, token: int): str {
+    var piece = t.vocab[token];
+    if prev_token == 1 and len(piece) > 0 and byte_at(piece, 0) == 32 {
+        piece = str_slice(piece, 1, len(piece) - 1);
+    }
+    if len(piece) == 6
+        and byte_at(piece, 0) == 60
+        and byte_at(piece, 1) == 48
+        and byte_at(piece, 2) == 120
+        and byte_at(piece, 5) == 62 {
+        let hv = hex_val(byte_at(piece, 3));
+        let lv = hex_val(byte_at(piece, 4));
+        if hv >= 0 and lv >= 0 {
+            return byte_str(hv * 16 + lv);
+        }
+    }
+    return piece;
+}
+
+/// print a piece unless it is a single non-printable / non-whitespace byte
+/// (run.c `safe_printf`)
+pub func safe_write(piece: str): unit {
+    let n = len(piece);
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        let b = byte_at(piece, 0);
+        let ok = (b >= 32 and b < 127) or b == 9 or b == 10 or b == 11 or b == 12 or b == 13;
+        if not ok {
+            return;
+        }
+    }
+    write(piece);
+}
+
+/// byte-pair encode `text` into a fresh token array (BOS prepended, dummy
+/// space prefix, byte fallback, greedy score-ordered merges)
+pub func encode(t: Tokenizer, text: str): Array<int> {
+    var tokens: Array<int> = [];
+    tokens.push(1);
+    if len(text) > 0 {
+        tokens.push(str_lookup(t, " "));
+    }
+    for c in text {
+        let id = str_lookup(t, c);
+        if id != 0 - 1 {
+            tokens.push(id);
+        } else {
+            var bi = 0;
+            let bl = len(c);
+            while bi < bl {
+                tokens.push(byte_at(c, bi) + 3);
+                bi = bi + 1;
+            }
+        }
+    }
+    while true {
+        var best_score = 0.0 - 10000000000.0;
+        var best_id = 0 - 1;
+        var best_idx = 0 - 1;
+        var i = 0;
+        let nt = tokens.len();
+        while i < nt - 1 {
+            let s = t.vocab[tokens[i]] + t.vocab[tokens[i + 1]];
+            let id = str_lookup(t, s);
+            if id != 0 - 1 and t.scores[id] > best_score {
+                best_score = t.scores[id];
+                best_id = id;
+                best_idx = i;
+            }
+            i = i + 1;
+        }
+        if best_idx == 0 - 1 {
+            break;
+        }
+        tokens[best_idx] = best_id;
+        var j = best_idx + 1;
+        while j < tokens.len() - 1 {
+            tokens[j] = tokens[j + 1];
+            j = j + 1;
+        }
+        let dropped = tokens.pop();
+    }
+    return tokens;
+}

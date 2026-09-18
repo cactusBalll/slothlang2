@@ -38,7 +38,9 @@ impl ModEmitter {
                     .map(|p| if self.is_float(p.1) { "f64" } else { "i64" })
                     .collect::<Vec<&str>>()
                     .join(", "),
-                if self.is_float(plan.ret) {
+                if self.is_unit(plan.ret) {
+                    "()"
+                } else if self.is_float(plan.ret) {
                     "f64"
                 } else {
                     "i64"

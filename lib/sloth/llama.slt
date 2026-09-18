@@ -1,0 +1,444 @@
+// sloth2 stdlib: llama2.c inference (TE-P4).
+//
+// A direct port of llama2.c `run.c` on top of the tensor extension: the
+// checkpoint is memory-mapped, its f32 weights widened once into one flat f64
+// tensor, and rank-2/3 weight slices are shared-storage reshape views over it
+// (`tensor.slt`). `forward` mirrors the reference layer for layer; the KV
+// cache is written in place through views.
+
+import "sloth/tensor.slt";
+import "sloth/fs.slt";
+import "sloth/random.slt";
+import "sloth/tokenizer.slt";
+
+pub class Config {
+    var dim: int;
+    var hidden_dim: int;
+    var n_layers: int;
+    var n_heads: int;
+    var n_kv_heads: int;
+    var vocab_size: int;
+    var seq_len: int;
+
+    func __init__(
+        dim: int,
+        hidden_dim: int,
+        n_layers: int,
+        n_heads: int,
+        n_kv_heads: int,
+        vocab_size: int,
+        seq_len: int
+    ) {
+        this.dim = dim;
+        this.hidden_dim = hidden_dim;
+        this.n_layers = n_layers;
+        this.n_heads = n_heads;
+        this.n_kv_heads = n_kv_heads;
+        this.vocab_size = vocab_size;
+        this.seq_len = seq_len;
+    }
+}
+
+/// read the 7 i32 header; a negative `vocab_size` signals unshared classifier
+/// weights (run.c convention)
+pub func load_config(path: str): Config {
+    let b = open_file(path);
+    var vs = read_i32(b, 20);
+    if vs < 0 {
+        vs = 0 - vs;
+    }
+    return Config(
+        read_i32(b, 0),
+        read_i32(b, 4),
+        read_i32(b, 8),
+        read_i32(b, 12),
+        read_i32(b, 16),
+        vs,
+        read_i32(b, 24)
+    );
+}
+
+/// true when the checkpoint header signalled shared embedding/classifier weights
+pub func config_shared(path: str): int {
+    let b = open_file(path);
+    let v = read_i32(b, 20);
+    if v > 0 {
+        return 1;
+    }
+    return 0;
+}
+
+pub class Weights {
+    var data: Tensor<float, 1>;
+    var vocab_size: int;
+    var dim: int;
+    var hidden_dim: int;
+    var n_layers: int;
+    var kv_dim: int;
+    var off_att: int;
+    var off_ffn: int;
+    var off_wq: int;
+    var off_wk: int;
+    var off_wv: int;
+    var off_wo: int;
+    var off_w1: int;
+    var off_w2: int;
+    var off_w3: int;
+    var off_final: int;
+    var off_wcls: int;
+
+    func __init__(data: Tensor<float, 1>, cfg: Config, shared: int) {
+        let dim = cfg.dim;
+        let hidden = cfg.hidden_dim;
+        let nl = cfg.n_layers;
+        let kv = dim * cfg.n_kv_heads / cfg.n_heads;
+        let hs = dim / cfg.n_heads;
+        var off = 0;
+        off = off + cfg.vocab_size * dim;
+        this.off_att = off;
+        off = off + nl * dim;
+        this.off_wq = off;
+        off = off + nl * dim * dim;
+        this.off_wk = off;
+        off = off + nl * dim * kv;
+        this.off_wv = off;
+        off = off + nl * dim * kv;
+        this.off_wo = off;
+        off = off + nl * dim * dim;
+        this.off_ffn = off;
+        off = off + nl * dim;
+        this.off_w1 = off;
+        off = off + nl * dim * hidden;
+        this.off_w2 = off;
+        off = off + nl * hidden * dim;
+        this.off_w3 = off;
+        off = off + nl * dim * hidden;
+        this.off_final = off;
+        off = off + dim;
+        off = off + cfg.seq_len * hs / 2;
+        off = off + cfg.seq_len * hs / 2;
+        if shared != 0 {
+            this.off_wcls = 0;
+        } else {
+            this.off_wcls = off;
+        }
+        this.data = data;
+        this.vocab_size = cfg.vocab_size;
+        this.dim = dim;
+        this.hidden_dim = hidden;
+        this.n_layers = nl;
+        this.kv_dim = kv;
+    }
+
+    func token_embedding_table(): Tensor<float, 2> {
+        return matrix_view(this.data, 0, this.vocab_size, this.dim);
+    }
+
+    func rms_att(l: int): Tensor<float, 1> {
+        return flatten_view(this.data, this.off_att + l * this.dim, this.dim);
+    }
+
+    func rms_ffn(l: int): Tensor<float, 1> {
+        return flatten_view(this.data, this.off_ffn + l * this.dim, this.dim);
+    }
+
+    func rms_final(): Tensor<float, 1> {
+        return flatten_view(this.data, this.off_final, this.dim);
+    }
+
+    func wq(l: int): Tensor<float, 2> {
+        return matrix_view(this.data, this.off_wq + l * this.dim * this.dim, this.dim, this.dim);
+    }
+
+    // run.c `matmul(xout, x, w, n, d)` reads w as d rows of n columns; for wk/wv
+    // that is (kv_dim, dim), for w1/w3 (hidden_dim, dim), for w2 (dim, hidden_dim)
+    func wk(l: int): Tensor<float, 2> {
+        return matrix_view(this.data, this.off_wk + l * this.dim * this.kv_dim, this.kv_dim, this.dim);
+    }
+
+    func wv(l: int): Tensor<float, 2> {
+        return matrix_view(this.data, this.off_wv + l * this.dim * this.kv_dim, this.kv_dim, this.dim);
+    }
+
+    func wo(l: int): Tensor<float, 2> {
+        return matrix_view(this.data, this.off_wo + l * this.dim * this.dim, this.dim, this.dim);
+    }
+
+    func w1(l: int): Tensor<float, 2> {
+        return matrix_view(
+            this.data, this.off_w1 + l * this.dim * this.hidden_dim, this.hidden_dim, this.dim
+        );
+    }
+
+    func w2(l: int): Tensor<float, 2> {
+        return matrix_view(
+            this.data, this.off_w2 + l * this.hidden_dim * this.dim, this.dim, this.hidden_dim
+        );
+    }
+
+    func w3(l: int): Tensor<float, 2> {
+        return matrix_view(
+            this.data, this.off_w3 + l * this.dim * this.hidden_dim, this.hidden_dim, this.dim
+        );
+    }
+
+    func wcls(): Tensor<float, 2> {
+        return matrix_view(this.data, this.off_wcls, this.vocab_size, this.dim);
+    }
+}
+
+/// widen the whole f32 weight region into one flat f64 tensor, then index it
+/// with reshape views (design D7)
+pub func load_weights(path: str, cfg: Config, shared: int): Weights {
+    let b = open_file(path);
+    let nfloats = (size(b) - 28) / 4;
+    let data = view_as_f32(b, 28, nfloats);
+    return Weights(data, cfg, shared);
+}
+
+pub class RunState {
+    var x: Tensor<float, 1>;
+    var att: Tensor<float, 2>;
+    var logits: Tensor<float, 1>;
+    var key_cache: Tensor<float, 3>;
+    var value_cache: Tensor<float, 3>;
+    var dim: int;
+    var kv_dim: int;
+    var n_heads: int;
+    var seq_len: int;
+
+    func __init__(cfg: Config) {
+        let kv = cfg.dim * cfg.n_kv_heads / cfg.n_heads;
+        this.dim = cfg.dim;
+        this.kv_dim = kv;
+        this.n_heads = cfg.n_heads;
+        this.seq_len = cfg.seq_len;
+        this.x = tensor.zeros([cfg.dim]);
+        this.att = tensor.zeros([cfg.n_heads, cfg.seq_len]);
+        this.logits = tensor.zeros([cfg.vocab_size]);
+        this.key_cache = tensor.zeros([cfg.n_layers, cfg.seq_len, kv]);
+        this.value_cache = tensor.zeros([cfg.n_layers, cfg.seq_len, kv]);
+    }
+}
+
+/// RoPE: complex-rotate q (all `dim`) and k (first `kv_dim`), one head at a
+/// time, exactly as run.c
+func rope(
+    q: Tensor<float, 1>, k: Tensor<float, 1>, pos: int, head_size: int, kv_dim: int, dim: int
+): unit {
+    var i = 0;
+    while i < dim {
+        let head_dim = i % head_size;
+        let freq = 1.0 / float_pow(10000.0, float(head_dim) / float(head_size));
+        let val = float(pos) * freq;
+        let fcr = float_cos(val);
+        let fci = float_sin(val);
+        let v0 = q[i];
+        let v1 = q[i + 1];
+        q[i] = v0 * fcr - v1 * fci;
+        q[i + 1] = v0 * fci + v1 * fcr;
+        if i < kv_dim {
+            let k0 = k[i];
+            let k1 = k[i + 1];
+            k[i] = k0 * fcr - k1 * fci;
+            k[i + 1] = k0 * fci + k1 * fcr;
+        }
+        i = i + 2;
+    }
+}
+
+/// single-token forward pass; logits land in `s.logits`
+pub func forward(cfg: Config, w: Weights, s: RunState, token: int, pos: int): unit {
+    let dim = cfg.dim;
+    let kv_dim = dim * cfg.n_kv_heads / cfg.n_heads;
+    let kv_mul = cfg.n_heads / cfg.n_kv_heads;
+    let head_size = dim / cfg.n_heads;
+
+    s.x[0..dim] = w.token_embedding_table()[token];
+
+    var l = 0;
+    while l < cfg.n_layers {
+        let xb = tensor.rmsnorm(s.x, w.rms_att(l));
+        let q = tensor.matvec(w.wq(l), xb);
+        let kt = tensor.matvec(w.wk(l), xb);
+        let vt = tensor.matvec(w.wv(l), xb);
+        rope(q, kt, pos, head_size, kv_dim, dim);
+        s.key_cache[l][pos] = kt;
+        s.value_cache[l][pos] = vt;
+
+        var h = 0;
+        while h < cfg.n_heads {
+            let kh = h / kv_mul;
+            let qh = q[h * head_size .. (h + 1) * head_size];
+            let att_h = s.att[h];
+            var t = 0;
+            while t <= pos {
+                let k_t = s.key_cache[l][t][kh * head_size .. (kh + 1) * head_size];
+                att_h[t] = tensor.dot(qh, k_t) / float_sqrt(float(head_size));
+                t = t + 1;
+            }
+            tensor.softmax_into(att_h[0..=pos]);
+            let xb_h = xb[h * head_size .. (h + 1) * head_size];
+            tensor.fill_zero(xb_h);
+            t = 0;
+            while t <= pos {
+                let v_t = s.value_cache[l][t][kh * head_size .. (kh + 1) * head_size];
+                tensor.add_scaled_into(xb_h, v_t, att_h[t]);
+                t = t + 1;
+            }
+            h = h + 1;
+        }
+
+        let xb2 = tensor.matvec(w.wo(l), xb);
+        tensor.add_into(s.x, xb2);
+
+        let xbf = tensor.rmsnorm(s.x, w.rms_ffn(l));
+        let hb = tensor.matvec(w.w1(l), xbf);
+        let hb2 = tensor.matvec(w.w3(l), xbf);
+        tensor.silu_mul_into(hb, hb2);
+        let xb3 = tensor.matvec(w.w2(l), hb);
+        tensor.add_into(s.x, xb3);
+
+        l = l + 1;
+    }
+
+    let xf = tensor.rmsnorm(s.x, w.rms_final());
+    s.logits = tensor.matvec(w.wcls(), xf);
+}
+
+func argmax(x: Tensor<float, 1>, n: int): int {
+    var max_i = 0;
+    var max_p = x[0];
+    var i = 1;
+    while i < n {
+        let p = x[i];
+        if p > max_p {
+            max_p = p;
+            max_i = i;
+        }
+        i = i + 1;
+    }
+    return max_i;
+}
+
+func sample_mult(x: Tensor<float, 1>, n: int, coin: float): int {
+    var cdf = 0.0;
+    var i = 0;
+    while i < n {
+        cdf = cdf + x[i];
+        if coin < cdf {
+            return i;
+        }
+        i = i + 1;
+    }
+    return n - 1;
+}
+
+/// top-p (nucleus) sampling: crop below `(1-topp)/(n-1)`, sort descending
+/// (insertion sort, stable-free but run.c-compatible tie handling), truncate
+/// at the cumulative mass, then sample by CDF
+func sample_topp(x: Tensor<float, 1>, n: int, topp: float, coin: float): int {
+    var idx: Array<int> = [];
+    var prb: Array<float> = [];
+    let cutoff = (1.0 - topp) / float(n - 1);
+    var n0 = 0;
+    var i = 0;
+    while i < n {
+        if x[i] >= cutoff {
+            idx.push(i);
+            prb.push(x[i]);
+            n0 = n0 + 1;
+        }
+        i = i + 1;
+    }
+    var a = 1;
+    while a < n0 {
+        let key = prb[a];
+        let ki = idx[a];
+        var b = a - 1;
+        while b >= 0 and prb[b] < key {
+            prb[b + 1] = prb[b];
+            idx[b + 1] = idx[b];
+            b = b - 1;
+        }
+        prb[b + 1] = key;
+        idx[b + 1] = ki;
+        a = a + 1;
+    }
+    var cumulative = 0.0;
+    var last = n0 - 1;
+    var j = 0;
+    while j < n0 {
+        cumulative = cumulative + prb[j];
+        if cumulative > topp {
+            last = j;
+            j = n0;
+        } else {
+            j = j + 1;
+        }
+    }
+    let r = coin * cumulative;
+    var cdf = 0.0;
+    var k = 0;
+    while k <= last {
+        cdf = cdf + prb[k];
+        if r < cdf {
+            return idx[k];
+        }
+        k = k + 1;
+    }
+    return idx[last];
+}
+
+/// the run.c sampler: temperature 0 = greedy argmax, otherwise softmax +
+/// (multinomial | top-p)
+pub func sample(
+    cfg: Config, logits: Tensor<float, 1>, temperature: float, topp: float, rng: XorShift
+): int {
+    if temperature == 0.0 {
+        return argmax(logits, cfg.vocab_size);
+    }
+    tensor.div_scalar_into(logits, temperature);
+    tensor.softmax_into(logits);
+    let coin = rng.next_f32();
+    if topp <= 0.0 or topp >= 1.0 {
+        return sample_mult(logits, cfg.vocab_size, coin);
+    }
+    return sample_topp(logits, cfg.vocab_size, topp, coin);
+}
+
+/// run.c generation loop: prompt tokens are fed in order, new tokens sampled;
+/// decoded pieces are written with no added separators
+pub func generate(
+    cfg: Config,
+    w: Weights,
+    s: RunState,
+    tok: Tokenizer,
+    rng: XorShift,
+    prompt: str,
+    steps: int,
+    temperature: float,
+    topp: float
+): unit {
+    let prompt_tokens = encode(tok, prompt);
+    let num_prompt = prompt_tokens.len();
+    var token = prompt_tokens[0];
+    var pos = 0;
+    while pos < steps {
+        forward(cfg, w, s, token, pos);
+        var next = 0;
+        if pos < num_prompt - 1 {
+            next = prompt_tokens[pos + 1];
+        } else {
+            next = sample(cfg, s.logits, temperature, topp, rng);
+        }
+        pos = pos + 1;
+        if next == 1 {
+            break;
+        }
+        let piece = decode(tok, token, next);
+        safe_write(piece);
+        token = next;
+    }
+    write("\n");
+}

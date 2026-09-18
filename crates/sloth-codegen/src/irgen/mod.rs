@@ -232,8 +232,10 @@ fn resolve_program(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "mod".to_string());
-        mods.push((stem, prog2_of(&_p2), imp.alias.clone()));
+        // dependencies first: a module's body may call the imports of its own
+        // imports, so `register_import` must see them registered already
         mods.append(&mut m2);
+        mods.push((stem, prog2_of(&_p2), imp.alias.clone()));
     }
     Ok((prog, mods))
 }

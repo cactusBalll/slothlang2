@@ -82,7 +82,52 @@ pub extern "C" fn sloth_mmap_i32(h: i64, off: i64) -> i64 {
         if off < 0 || off + 4 > hd.len {
             panics::panic_oob("mmap i32", off, hd.len);
         }
-        let p = hd.data.add(off as usize) as *const i32;
-        *p as i64
+        // tokenizer entries are variable-length, so offsets need not be aligned
+        (hd.data.add(off as usize) as *const i32).read_unaligned() as i64
+    }
+}
+
+/// byte at `off` (raw C-ABI args; bounds-checked) — tokenizer vocabulary
+#[no_mangle]
+pub extern "C" fn sloth_mmap_u8(h: i64, off: i64) -> i64 {
+    if h == 0 {
+        return 0;
+    }
+    unsafe {
+        let hd = &*(h as *const BufHdr);
+        if off < 0 || off + 1 > hd.len {
+            panics::panic_oob("mmap u8", off, hd.len);
+        }
+        *hd.data.add(off as usize) as i64
+    }
+}
+
+/// little-endian f32 at `off` as an f64 (raw C-ABI arg; bounds-checked)
+#[no_mangle]
+pub extern "C" fn sloth_mmap_f32(h: i64, off: i64) -> f64 {
+    if h == 0 {
+        return 0.0;
+    }
+    unsafe {
+        let hd = &*(h as *const BufHdr);
+        if off < 0 || off + 4 > hd.len {
+            panics::panic_oob("mmap f32", off, hd.len);
+        }
+        (hd.data.add(off as usize) as *const f32).read_unaligned() as f64
+    }
+}
+
+/// intern the `len` bytes at `off` as a pooled `str` handle — tokenizer pieces
+#[no_mangle]
+pub extern "C" fn sloth_mmap_str(h: i64, off: i64, len: i64) -> i64 {
+    if h == 0 {
+        return 0;
+    }
+    unsafe {
+        let hd = &*(h as *const BufHdr);
+        if off < 0 || len < 0 || off + len > hd.len {
+            panics::panic_oob("mmap str", off + len, hd.len);
+        }
+        crate::strings::intern_bytes(hd.data.add(off as usize) as usize, len)
     }
 }

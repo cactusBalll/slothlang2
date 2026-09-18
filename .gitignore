@@ -2,3 +2,4 @@
 /book/book/
 .commandcode/settings.json
 examples/fs/fixture.bin
+examples/res/*.bin

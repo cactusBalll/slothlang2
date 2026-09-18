@@ -215,6 +215,62 @@ fn rt_smoke() {
         rc::sloth_rc_release(pth);
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), mb, "mmap tensors drained");
 
+        // tokenizer reads: bytes / unaligned f32 / interned string
+        assert_eq!(mmap::sloth_mmap_u8(h, 0), 4, "u8");
+        // must not trap: tokenizer entries are variable-length (unaligned)
+        let _ = mmap::sloth_mmap_f32(h, 29);
+        let hs = mmap::sloth_mmap_str(h, 0, 4);
+        let s0 = String::from_utf8_lossy(&bytes[0..4]).to_string();
+        let want_s = inter(&s0);
+        assert_eq!(strings::sloth_str_eq(hs, want_s), rc::enc_i(1), "mmap str");
+        let hlen = mmap::sloth_mmap_str(h, 0, 0);
+        rc::sloth_rc_release(hs);
+        rc::sloth_rc_release(hlen);
+        rc::sloth_rc_release(want_s);
+
+        // ---- TE-P4 string faces (tokenizer) ----
+        let sb = rc::dec_i(rc::sloth_rc_live());
+        let a = inter("abc");
+        let b = inter("abd");
+        let c = inter("abc");
+        let bc = inter("bc");
+        let aa = inter("A");
+        assert!(strings::sloth_str_cmp(a, b) < 0, "cmp less");
+        assert_eq!(strings::sloth_str_cmp(a, c), 0, "cmp eq");
+        assert!(strings::sloth_str_cmp(b, a) > 0, "cmp greater");
+        assert_eq!(strings::sloth_str_byte(a, 1), b'b' as i64, "byte");
+        let sl = strings::sloth_str_slice(a, 1, 2);
+        assert_eq!(strings::sloth_str_eq(sl, bc), rc::enc_i(1), "slice");
+        let ob = strings::sloth_str_of_byte(65);
+        assert_eq!(strings::sloth_str_eq(ob, aa), rc::enc_i(1), "of_byte");
+        for h2 in [a, b, c, bc, aa, sl, ob] {
+            rc::sloth_rc_release(h2);
+        }
+        assert_eq!(rc::dec_i(rc::sloth_rc_live()), sb, "str faces drained");
+
+        // ---- TE-P4 reshape views (shared storage) ----
+        let rb = rc::dec_i(rc::sloth_rc_live());
+        let flat = tensors::sloth_tensor_new_1(wi(12), wi(1));
+        tensors::sloth_tensor_set1(flat, wi(0), rc::enc_f_bits(11.0f64.to_bits()));
+        let m = tensors::sloth_tensor_reshape2(flat, 0, 3, 4);
+        assert_eq!(rc::dec_i(tensors::sloth_tensor_dim(m, wi(0))), 3, "r2 d0");
+        assert_eq!(rc::dec_i(tensors::sloth_tensor_dim(m, wi(1))), 4, "r2 d1");
+        tensors::sloth_tensor_set1(m, wi(0), rc::enc_f_bits(99.0f64.to_bits()));
+        assert_eq!(
+            rc::dec_f_bits(tensors::sloth_tensor_get1(flat, wi(0))),
+            99.0f64.to_bits(),
+            "reshape shares storage"
+        );
+        let c3 = tensors::sloth_tensor_reshape3(flat, 0, 2, 2, 3);
+        assert_eq!(rc::dec_i(tensors::sloth_tensor_rank(c3)), 3, "r3 rank");
+        let f1 = tensors::sloth_tensor_reshape1(flat, 3, 3);
+        assert_eq!(rc::dec_i(tensors::sloth_tensor_dim(f1, wi(0))), 3, "r1 len");
+        rc::sloth_rc_release(f1);
+        rc::sloth_rc_release(c3);
+        rc::sloth_rc_release(m);
+        rc::sloth_rc_release(flat);
+        assert_eq!(rc::dec_i(rc::sloth_rc_live()), rb, "reshape views drained");
+
         println!("rt smoke OK");
     }
 }

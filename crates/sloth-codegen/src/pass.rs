@@ -4292,6 +4292,95 @@ mod irgen_te_p3 {
     }
 }
 
+/// TE-P4 llama path: shared-storage reshape views, nested imports that call
+/// private helpers, and unit-returning externs.
+#[cfg(test)]
+mod irgen_te_p4 {
+    use super::*;
+
+    /// flat tensor -> rank-2/3 views share storage (checkpoint weights)
+    #[test]
+    fn reshape_views() {
+        let src = r#"
+            import "sloth/tensor.slt";
+            func main(): unit {
+                var d: Tensor<float, 1> = tensor.from_array(
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [12]);
+                var m: Tensor<float, 2> = matrix_view(d, 0, 3, 4);
+                print(m[1][2]);            // 7
+                m[0][0] = 99.0;
+                print(d[0]);               // 99 (shared)
+                var c: Tensor<float, 3> = cube_view(d, 0, 2, 2, 3);
+                print(c[1][1][2]);         // 12
+                c[1][1][2] = 42.0;
+                print(d[11]);              // 42 (shared)
+                var f: Tensor<float, 1> = flatten_view(d, 3, 3);
+                print(f[0]);               // 4
+            }
+        "#;
+        run_src_multimod(src, std::path::Path::new(".")).unwrap();
+    }
+
+    /// a module's `pub` entry calls its own private functions (nested import
+    /// ordering + module-qualified private resolution + unit cross-call)
+    #[test]
+    fn nested_import_private_helpers() {
+        let dir = std::path::Path::new("/tmp/opencode/te_p4_mod");
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("helper.slt"),
+            r#"
+            pub func twice(a: int): int { return adder(a, a); }
+            func adder(a: int, b: int): int { return a + b; }
+            func shout(n: int): unit { print(n); }
+            pub func run_it(n: int): unit { shout(helper(n)); }
+            func helper(n: int): int { return n * 2; }
+            "#,
+        )
+        .unwrap();
+        let src = r#"
+            import "helper.slt";
+            func main(): unit {
+                print(twice(3));   // 6
+                run_it(5);         // 10
+            }
+        "#;
+        run_src_multimod(src, dir).unwrap();
+    }
+
+    /// unit-returning extern declaration matches its call site
+    #[test]
+    fn unit_extern_write() {
+        let src = r#"
+            import "sloth/fs.slt";
+            func main(): unit {
+                write("A");
+                write("B");
+                print("");
+            }
+        "#;
+        run_src_multimod(src, std::path::Path::new(".")).unwrap();
+    }
+
+    /// runtime shape checks on a reshaped view
+    #[test]
+    fn reshape_view_matvec() {
+        let src = r#"
+            import "sloth/tensor.slt";
+            func main(): unit {
+                var d: Tensor<float, 1> = tensor.from_array(
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6]);
+                var w: Tensor<float, 2> = matrix_view(d, 0, 2, 3);
+                var x: Tensor<float, 1> = tensor.from_array([1.0, 1.0, 1.0], [3]);
+                var y: Tensor<float, 1> = tensor.matvec(w, x);
+                print(y[0]);   // 6
+                print(y[1]);   // 15
+            }
+        "#;
+        run_src_multimod(src, std::path::Path::new(".")).unwrap();
+    }
+}
+
 /// TE-P2 R1 gate: the `sloth_tensor_basis` memref ABI. Validates that a
 /// runtime-built tensor's element buffer can cross into MLIR as a memref
 /// descriptor, be `memref.reinterpret_cast` to its runtime shape/strides,

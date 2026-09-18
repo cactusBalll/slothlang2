@@ -10,7 +10,17 @@ extern type ByteBuffer;
 extern func sloth_mmap(path: str): ByteBuffer;
 extern func sloth_mmap_len(b: ByteBuffer): int;
 extern func sloth_mmap_i32(b: ByteBuffer, off: int): int;
+extern func sloth_mmap_u8(b: ByteBuffer, off: int): int;
+extern func sloth_mmap_f32(b: ByteBuffer, off: int): float;
+extern func sloth_mmap_str(b: ByteBuffer, off: int, len: int): str;
 extern func sloth_tensor_from_f32_ptr(b: ByteBuffer, off: int, len: int): Tensor<float, 1>;
+
+// raw string / console helpers (TE-P4 tokenizer + generation)
+extern func sloth_str_byte(s: str, i: int): int;
+extern func sloth_str_cmp(a: str, b: str): int;
+extern func sloth_str_slice(s: str, start: int, len: int): str;
+extern func sloth_str_of_byte(v: int): str;
+extern func sloth_rt_write_str(s: str): unit;
 
 pub func open_file(path: str): ByteBuffer {
     return sloth_mmap(path);
@@ -34,4 +44,46 @@ pub func read_config(b: ByteBuffer): Array<int> {
 
 pub func view_as_f32(b: ByteBuffer, offset: int, len: int): Tensor<float, 1> {
     return sloth_tensor_from_f32_ptr(b, offset, len);
+}
+
+// little-endian typed reads at a byte offset (TE-P4 tokenizer/checkpoint)
+pub func read_i32(b: ByteBuffer, off: int): int {
+    return sloth_mmap_i32(b, off);
+}
+
+pub func read_u8(b: ByteBuffer, off: int): int {
+    return sloth_mmap_u8(b, off);
+}
+
+pub func read_f32(b: ByteBuffer, off: int): float {
+    return sloth_mmap_f32(b, off);
+}
+
+pub func read_str(b: ByteBuffer, off: int, len: int): str {
+    return sloth_mmap_str(b, off, len);
+}
+
+/// write text to stdout with no trailing newline (token generation)
+pub func write(s: str): unit {
+    sloth_rt_write_str(s);
+}
+
+/// i-th raw byte of `s`
+pub func byte_at(s: str, i: int): int {
+    return sloth_str_byte(s, i);
+}
+
+/// lexicographic byte compare: negative / zero / positive
+pub func cmp_str(a: str, b: str): int {
+    return sloth_str_cmp(a, b);
+}
+
+/// byte slice `[start, start+len)` as a fresh `str`
+pub func str_slice(s: str, start: int, len: int): str {
+    return sloth_str_slice(s, start, len);
+}
+
+/// one raw byte value as a `str`
+pub func byte_str(v: int): str {
+    return sloth_str_of_byte(v);
 }

@@ -5,6 +5,30 @@
 // `tensor.*` call sites (design D5). This file holds pure-sloth convenience
 // wrappers so user code can `import "sloth/tensor.slt"`.
 
+// shared-storage reshape views over a flat tensor (TE-P4 checkpoint weights):
+// `off` is an element offset from the flat base, extents are contiguous
+extern func sloth_tensor_reshape1(t: Tensor<float, 1>, off: int, d0: int): Tensor<float, 1>;
+extern func sloth_tensor_reshape2(
+    t: Tensor<float, 1>, off: int, d0: int, d1: int
+): Tensor<float, 2>;
+extern func sloth_tensor_reshape3(
+    t: Tensor<float, 1>, off: int, d0: int, d1: int, d2: int
+): Tensor<float, 3>;
+
+pub func flatten_view(t: Tensor<float, 1>, off: int, d0: int): Tensor<float, 1> {
+    return sloth_tensor_reshape1(t, off, d0);
+}
+
+pub func matrix_view(t: Tensor<float, 1>, off: int, d0: int, d1: int): Tensor<float, 2> {
+    return sloth_tensor_reshape2(t, off, d0, d1);
+}
+
+pub func cube_view(
+    t: Tensor<float, 1>, off: int, d0: int, d1: int, d2: int
+): Tensor<float, 3> {
+    return sloth_tensor_reshape3(t, off, d0, d1, d2);
+}
+
 pub func normalize(x: Tensor<float, 1>, w: Tensor<float, 1>): Tensor<float, 1> {
     return tensor.rmsnorm(x, w);
 }
