@@ -117,7 +117,7 @@ pub extern "C" fn sloth_mmap_f32(h: i64, off: i64) -> f64 {
     }
 }
 
-/// intern the `len` bytes at `off` as a pooled `str` handle — tokenizer pieces
+/// build a fresh `str` handle from the `len` bytes at `off` — tokenizer pieces
 #[no_mangle]
 pub extern "C" fn sloth_mmap_str(h: i64, off: i64, len: i64) -> i64 {
     if h == 0 {

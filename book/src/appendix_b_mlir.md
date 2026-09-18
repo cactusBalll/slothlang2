@@ -31,8 +31,8 @@
 - **值型 optional 盒**：`sloth_box_new` / `sloth_box_get`，以及 nil-aware 的
   `sloth_rt_print_opt` / `sloth_str_push_opt`；
 - **打印**：`sloth_rt_print_i64` / `_f64` / `_bool` / `_str`；
-- **字符串**：`sloth_str_intern` / `_push` / `_finish` / `_pushp` / `_push_i|_f|_b` /
-  `_len` / `_clen` / `_char` / `_concat` / `_eq`；
+- **字符串**：`sloth_str_intern`（历史命名，不驻留）/ `_push` / `_finish` /
+  `_pushp` / `_push_i|_f|_b` / `_len` / `_clen` / `_char` / `_concat` / `_eq`；
 - **range**：`sloth_range_pack` / `_lo` / `_hi`；
 - **数组**：`sloth_arr_new` / `_new_k` / `_len` / `_get` / `_set` / `_push` / `_pop`；
 - **Map**：`sloth_map_new` / `_len` / `_get` / `_set` / `_get_h` / `_set_h` /

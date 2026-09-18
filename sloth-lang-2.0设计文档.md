@@ -41,7 +41,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 2. **AOT 编译**：基于 MLIR 构建中端与后端，经 LLVM 生成原生机器码，性能目标为数量级提升（对标同类 MLIR/LLVM 语言）；
 3. **语义一致性**：基础类型与类实例遵守统一的类型规则，消除 1.0 中"基础类型不是类"等不一致；
 4. **语法延续**：保留 C-like 语法外壳与核心惯用法（管道运算符、字符串插值、迭代器 for 循环、运算符重载），降低迁移成本；
-5. **可实现的运行时**：运行时收敛为 ARC 引用计数（含 `Weak<T>`）、字符串池、容器、IO/FFI、张量/mmap 与有栈协程（fiber）栈切换六个组件。
+5. **可实现的运行时**：运行时收敛为 ARC 引用计数（含 `Weak<T>`）、字符串（堆分配，非驻留）、容器、IO/FFI、张量/mmap 与有栈协程（fiber）栈切换六个组件。
 
 ### 1.3 非目标
 
@@ -73,7 +73,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | 单元 | `unit` | 空类型，替代 1.0 中"无返回值函数隐式返回 nil" |
 | 布尔 | `bool` | `true` / `false`，**取消** 1.0 的"任意值隐式转 bool" |
 | 数值 | `int`（**63 bit**）、`float`（**f63**） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数；`float` 为降精度 f64（见 §2.6）。`【已过时·v1.0】` 原为 `int`=i64、`float`=f64 |
-| 字符串 | `str` | UTF-8 不可变字符串，保留 string interning |
+| 字符串 | `str` | UTF-8 不可变字符串；**无 string interning**，`==` 按内容比较 |
 | 范围 | `range` | 由 `..`、`..=` 构造，元素类型 `int` |
 | 数组 | `Array<T>` | 同构动态数组，替代 1.0 的异构数组 |
 | 字典 | `Map<K, V>` | 键类型 `K` 必须实现 `Hashable` trait（见 §2.5），值类型 `V` |
@@ -161,7 +161,7 @@ func announce(s: Speaker): unit { s.say(); }
 
 - `unit` 零大小；数值/布尔/引用在机器层都是词；
 - **引用类型**（`str`、`Array<T>`、`Map<K,V>`、类实例、闭包、`dyn`、`range`、`Tensor<T,R>`、`Weak<T>`、`Fiber<Y>`、值型 optional 盒）由 ARC 管理，变量持有句柄词：
-  - `str`：字符串池 Entry 指针词（interned，相等比较即指针比较）；
+  - `str`：堆上 `StrT { len, data }` 句柄词（**无驻留**；`==` 与 Map 键均按内容比较）；
   - `Array<T>` / `Map<K,V>`：稳定句柄对象，元素按单态化后的具体类型内联存储；数组增长只替换独立的数据缓冲，句柄不移动（`crates/sloth-rt/src/arrays.rs`）；
   - 类实例：ARC 对象，RC 计数**带内**藏在对象头 `Hdr` 中（见 §5.1），头部含 class-id/类型信息；
   - 闭包 `(A) -> R`：2 词 ARC 对象 `{ tagged fnptr, env }`（`lambda.rs`/`closure.rs`）；
@@ -495,7 +495,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 | v1.0 设想操作 | 现行实现 |
 | --- | --- |
 | `sloth.gc_alloc` | `call @sloth_obj_new` / `@sloth_arr_new` / ……（malloc 基确定性分配 + ARC，见 §5.1） |
-| `sloth.string_literal` | 8 字节打包 `i64` 常量 + `@sloth_str_push` / `@sloth_str_finish`（intern） |
+| `sloth.string_literal` | 8 字节打包 `i64` 常量 + `@sloth_str_push` / `@sloth_str_finish`（新分配，不做驻留） |
 | `sloth.string_concat` | `@sloth_str_concat` |
 | `sloth.string_interp` | 逐段 `str_push` / `str_pushp` / `str_push_i\|_f\|_b` + `str_finish` |
 | `sloth.array_new / push / get / set` | `@sloth_arr_new` / `_get` / `_set` / `_push` / `_pop`（越界/除零 → `@sloth_panic_*`） |
@@ -526,7 +526,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 ## 5. 运行时设计（libsloth_rt）
 
-运行时由 ARC 引用计数（含 `Weak<T>`）、字符串池、容器、IO/FFI、张量/mmap 与有栈协程（fiber，`crates/sloth-rt/src/fiber.rs`，含 `sloth_fiber_switch_asm` 汇编切换）等组件构成，以 Rust 实现并编译为静态/动态库随程序链接。
+运行时由 ARC 引用计数（含 `Weak<T>`）、字符串、容器、IO/FFI、张量/mmap 与有栈协程（fiber，`crates/sloth-rt/src/fiber.rs`，含 `sloth_fiber_switch_asm` 汇编切换）等组件构成，以 Rust 实现并编译为静态/动态库随程序链接。
 
 ### 5.1 内存管理：引用计数（ARC）
 
@@ -553,7 +553,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 **协议规则**（发射器必须逐条维持，构成安全性不变量）：
 
-1. **生产即 owned**：构造器、`Array`/`Map`/闭包/box 字面量、字符串 intern/拼接、`keys()`/`values()`、range/Entry 盒等产出对象的操作，交付一个 owned 句柄。
+1. **生产即 owned**：构造器、`Array`/`Map`/闭包/box 字面量、字符串构造/拼接、`keys()`/`values()`、range/Entry 盒等产出对象的操作，交付一个 owned 句柄。
 2. **持有即 owned**：局部槽、对象字段、容器元素、闭包捕获在写入时 `retain`（copy-in），覆盖旧值时 `release`（overwrite-out）；作用域退出释放本层声明的槽。
 3. **形参与接收者为 borrowed**：被调函数不得释放形参或 `this`。
 4. **返回值为 owned**：引用类型返回值一律向调用者交付 +1。返回面三态处理：**生产者**（dangling）直接转移其 +1；**调用结果**（已 owned）转移；**对槽/字段/参数等借用值**在返回前物化一次 `retain` 再交付。非引用返回释放未使用的生产者。
@@ -569,10 +569,16 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 > 历史缺陷（本协议修复）：owned 临时量此前仅在命名/全局赋值处被接管，方法接收者、`len`/索引、运算符、实参、容器迭代等消费者既不登记也不冲刷，导致每个临时量滞留 +1（见 PLAN §10）。
 
-### 5.2 字符串池
+### 5.2 字符串
 
-- 保留 1.0 的 string interning：相等比较即指针比较；
-- 改动：从"每 VM 实例一个 StringPool"变为**进程级单例**（无 VM 了）；首版单线程无需锁，结构沿用哈希表保证 Entry 唯一。
+- **不实现 string interning/池化**（与 1.0 的实现偏离）：`str` 是普通 ARC 对象
+  （`StrT { len, data }`），每个构造点——字面量（`sloth_str_push` /
+  `sloth_str_finish`）、拼接、切片、取字符——都**新分配**一个对象，内容相等的
+  两个字符串是不同句柄。
+- **相等与 Map 键按内容**：`==` 走 `sloth_str_eq`（len + memcmp）；`Map<str, …>`
+  键用内容哈希/比较（`maps.rs`：FNV-1a + 内容相等），不依赖句柄同一。
+- `sloth_str_intern` 为历史命名，保留符号但语义是"按字节构造"，不做去重；
+  多线程下因此**无共享池**，不存在并发 intern 数据竞争（见多线程扩展 §5.2）。
 
 ### 5.3 容器与内建类型方法
 
@@ -661,7 +667,7 @@ extern func floor(x: float): float;          // 链接期解析符号
 | **P0 语言定稿** | 类型系统与语法冻结；编写语言规范测试集（正/负类型用例） | 本文档评审通过；≥200 条规范测试用例 |
 | **P1 前端** | Lexer/Parser/AST、名称解析、类型检查（非泛型子集） | 非泛型程序的类型检查通过/报错符合规范 |
 | **P2 MLIR 端到端 MVP** | ~~sloth dialect~~ `【已过时·v1.0】` 标准 dialect（标量 + 函数 + 控制流）→ LLVM；~~Boehm GC~~ ARC；`hello world` 级程序原生运行 | 算术/分支/循环/函数程序编译运行，数值正确 |
-| **P3 对象与闭包** | class/继承/虚表、trait 与 `dyn`、闭包转换、字符串池 | 1.0 面向对象示例（Cat/Dog/Fish 改写版）运行正确 |
+| **P3 对象与闭包** | class/继承/虚表、trait 与 `dyn`、闭包转换、字符串 | 1.0 面向对象示例（Cat/Dog/Fish 改写版）运行正确 |
 | **P4 泛型与单态化** | 泛型函数/类型、trait 约束、容器泛型化、迭代协议 | `map`/`reduce` 泛型版管道示例运行正确 |
 | **P5 模块与标准库** | 编译期 `import`、`pub` 可见性、核心标准库 | 多模块程序编译；标准库自举 |
 | **P6 优化与内存** | 消虚/内联/融合调优；~~statepoint 精确 GC 替换 Boehm~~ `【已过时·v1.0】` **ARC 所有权协议 + 全词 tag 化已完成**（见 §5.1/§5.1.1）；张量 linalg 通道与融合算子 | ARC 压力测试（`examples/arc/`）计数回落基线无泄漏；张量 matvec/fusion 相对 gcc -O3 达标 |

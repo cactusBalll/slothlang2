@@ -1773,7 +1773,7 @@ impl ModEmitter {
         // continue lands on the increment, not the head test
         let cont = fw.newlabel("ic");
         // break must still settle the current element for string iteration
-        // (a pooled char is owned; array elements are borrows)
+        // (a fresh char str is owned; array elements are borrows)
         let brk = fw.newlabel("ix");
         fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((brk.clone(), cont.clone()));
@@ -1803,7 +1803,7 @@ impl ModEmitter {
         fw.loops.pop();
         fw.loop_bases.pop();
         fw.label_br(&cont);
-        // str iteration produces a fresh pooled char per element (§5.1.1
+        // str iteration produces a fresh char str per element (§5.1.1
         // rule 7): the loop var holds a borrow view, so the producer's +1 is
         // released at the end of each iteration (fallthrough + continue)
         if kind == IdxKind::StrChar {

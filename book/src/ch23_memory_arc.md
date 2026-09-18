@@ -13,7 +13,7 @@
 
 发射器必须维持的不变量：
 
-1. **生产即 owned**：构造器、`Array`/`Map`/闭包/盒字面量、字符串 intern/拼接、
+1. **生产即 owned**：构造器、`Array`/`Map`/闭包/盒字面量、字符串构造/拼接、
    `keys()`/`values()`、range/Entry 盒等产出 owned 句柄。
 2. **持有即 owned**：局部槽、字段、容器元素、闭包捕获写入时 `retain`（copy-in），
    覆盖旧值时 `release`（overwrite-out）；作用域退出释放本层声明的槽。

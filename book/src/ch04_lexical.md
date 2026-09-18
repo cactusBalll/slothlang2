@@ -36,7 +36,7 @@
   `Display`（`int` / `float` / `bool` / `str` / `range` 内置实现，用户类需
   `impl Display` 提供 `to_str()`，见 §19）。
 - 字面量在 MLIR 中按 **8 字节一组打包成 `i64` 常量**，经 `sloth_str_push` 写入
-  字符串构建器，最后由 `sloth_str_finish` 在池中 intern。
+  字符串构建器，最后由 `sloth_str_finish` 分配出最终 `str`（不做驻留）。
 
 ## 4.4 示例
 

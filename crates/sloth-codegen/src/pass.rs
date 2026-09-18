@@ -2924,7 +2924,7 @@ mod irgen_p35 {
 mod irgen_p36 {
     use super::*;
 
-    /// concatenated strs compare by content against interned literals
+    /// concatenated strs compare by content against str literals
     #[test]
     fn str_eq_value_semantics() {
         let src = r#"

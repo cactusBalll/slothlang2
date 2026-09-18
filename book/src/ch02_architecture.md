@@ -8,7 +8,7 @@
 | --- | --- |
 | `sloth-frontend` | 词法分析、递归下降 + Pratt 语法分析、AST、类型表示（`ty.rs`） |
 | `sloth-codegen` | 发射器（`irgen/`）把 AST 直接转成 MLIR；`pass.rs`/`jit.rs` 走 LLVM 管线并 JIT 执行；`module.rs`/`context.rs` 是 MLIR C API 封装 |
-| `sloth-rt` | 运行时 `libsloth_rt.so`：分配器、ARC、字符串池、容器、对象/虚表、panic、extern 示例 |
+| `sloth-rt` | 运行时 `libsloth_rt.so`：分配器、ARC、字符串、容器、对象/虚表、panic、extern 示例 |
 | `slothc` | 命令行前端（`check` / `ir` / `run` / `build`） |
 
 ## 2.2 实际流水线
@@ -69,5 +69,5 @@ MLIR 里直接看到（`arith.shli` / `arith.shrsi` / `llvm.bitcast`）。
 发射器会为每个模块补充一份**固定前导**：约 60 条 `func.func private @sloth_*`
 声明，覆盖 ARC（`rc_retain`/`rc_release`/`rc_live`/`rc_drops`）、弱引用
 （`weak_new`/`weak_upgrade`）、值型 optional 盒（`box_new`/`box_get`）、
-字符串池与构建器、数组、Map、对象与虚表、panic 通道。完整清单见
+字符串与构建器、数组、Map、对象与虚表、panic 通道。完整清单见
 [附录 B](appendix_b_mlir.md)。示例 MLIR 中这份前导已被剥离。

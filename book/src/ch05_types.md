@@ -7,7 +7,7 @@
 | 单元 | `unit` | 空返回类型 |
 | 布尔 | `bool` | 仅 `bool` 可作条件 |
 | 数值 | `int`（63-bit）、`float`（f63） | **无隐式互转**，用 `int()`/`float()` |
-| 字符串 | `str` | UTF-8，interned，内容相等即指针相等 |
+| 字符串 | `str` | UTF-8，不可变；无 interning，`==` 按内容比较 |
 | 范围 | `range` | `a..b` / `a..=b`，元素 `int` |
 | 数组 | `Array<T>` | 同构动态数组 |
 | 字典 | `Map<K,V>` | `K` 须为 `Hashable` |

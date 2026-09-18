@@ -1,5 +1,11 @@
-//! Interned strings (str32), string builders (StrB), and str printing.
-//! Handles cross the boundary as tagged words; the StrT payload internals
+//! Heap strings (`str`), string builders (`StrB`), and str printing.
+//!
+//! There is **no interning pool / deduplication**: every construction
+//! (literal, concat, slice, char, byte, …) allocates a fresh `StrT`, so two
+//! equal-content strings are distinct objects. Equality is therefore by
+//! content (`sloth_str_eq`), never by handle identity.
+//!
+//! Handles cross the boundary as tagged words; the `StrT` payload internals
 //! (len/data) are raw. String builders stay untracked libc chunks (they
 //! exist only inside a single expression and are finalized by finish).
 
@@ -16,7 +22,8 @@ pub(crate) struct StrB {
     pub data: *mut libc::c_void,
 }
 
-/// builder lifecycle: push chunks in,收回 handle; finalize interns the pool.
+/// builder lifecycle: push chunks in, take back the builder handle;
+/// `sloth_str_finish` materializes a fresh `str` from it.
 #[no_mangle]
 pub extern "C" fn sloth_str_push(b_w: i64, w: i64, n_w: i64) -> i64 {
     unsafe {
@@ -43,7 +50,7 @@ pub extern "C" fn sloth_str_push(b_w: i64, w: i64, n_w: i64) -> i64 {
     }
 }
 
-// ---------------- string pool interning ----------------
+// ---------------- str payload construction ----------------
 
 #[repr(C)]
 pub struct StrT {
@@ -51,14 +58,16 @@ pub struct StrT {
     pub data: *mut libc::c_void,
 }
 
-/// interned string handle word from raw bytes; word-plane route (the
-/// source pointer arrives tagged)
+/// build a `str` handle from raw bytes; word-plane route (the source pointer
+/// arrives tagged). The name is historical: this does **not** dedup, every
+/// call allocates a fresh `StrT`.
 #[no_mangle]
 pub extern "C" fn sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
     intern_bytes(w_unref(ptr_w), rc::dec_i(len_w))
 }
 
-/// raw internal intern entry (returns the tagged handle word)
+/// raw internal constructor: allocate a `StrT` chunk, copy `len` bytes and
+/// NUL-terminate (returns the tagged handle word; no interning/dedup)
 pub(crate) fn intern_bytes(ptr: usize, len: i64) -> i64 {
     unsafe {
         let p = rc_addr(std::mem::size_of::<StrT>() + len as usize + 1, None) as *mut libc::c_void;
@@ -99,7 +108,7 @@ pub extern "C" fn sloth_str_len(p_w: i64) -> i64 {
     unsafe { rc::enc_i((*(w_unref(p_w) as *const StrT)).len as i64) }
 }
 
-/// number of Unicode scalar values in a pooled string (str iteration bound).
+/// number of Unicode scalar values in a `str` (str iteration bound).
 /// Falls back to the byte length for non-UTF-8 content.
 #[no_mangle]
 pub extern "C" fn sloth_str_clen(p_w: i64) -> i64 {
@@ -113,7 +122,7 @@ pub extern "C" fn sloth_str_clen(p_w: i64) -> i64 {
     }
 }
 
-/// i-th character (Unicode scalar) as a one-char pooled string; the index is
+/// i-th character (Unicode scalar) as a one-char fresh `str`; the index is
 /// a CHAR index, matching `sloth_str_clen` (design §3.5: str iterates by
 /// character). Non-UTF-8 content falls back to byte slicing.
 #[no_mangle]
@@ -174,7 +183,7 @@ pub(crate) unsafe fn strb_or_new(b_w: i64) -> *mut StrB {
     }
 }
 
-/// push an interned (pooled) string's bytes onto a builder
+/// push a `str`'s bytes onto a builder
 #[no_mangle]
 pub extern "C" fn sloth_str_pushp(b_w: i64, h_w: i64) -> i64 {
     unsafe {
@@ -253,7 +262,7 @@ pub extern "C" fn sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
     }
 }
 
-/// finalize: return the pooled interned string for a built byte buffer
+/// finalize: materialize a fresh `str` from the built byte buffer (no dedup)
 #[no_mangle]
 pub extern "C" fn sloth_str_finish(b_w: i64) -> i64 {
     unsafe {
@@ -267,8 +276,8 @@ pub extern "C" fn sloth_str_finish(b_w: i64) -> i64 {
     }
 }
 
-/// concatenate two pooled strings; the result is interned by content so
-/// equal-content handles are identical (patch #36 intern-unification)
+/// concatenate two `str`s; the result is a fresh allocation (no content
+/// dedup — equal results are distinct objects, compare with `sloth_str_eq`)
 #[no_mangle]
 pub extern "C" fn sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
     unsafe {
@@ -291,7 +300,7 @@ pub extern "C" fn sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
     }
 }
 
-/// content equality of two pooled str words (patch #36): len + memcmp
+/// content equality of two `str` words: len + memcmp (never handle identity)
 #[no_mangle]
 pub extern "C" fn sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
     unsafe {
@@ -325,7 +334,7 @@ pub extern "C" fn sloth_str_cmp(a_w: i64, b_w: i64) -> i64 {
     }
 }
 
-/// i-th raw byte of a pooled string (raw C-ABI index in, raw byte out)
+/// i-th raw byte of a `str` (raw C-ABI index in, raw byte out)
 #[no_mangle]
 pub extern "C" fn sloth_str_byte(s_w: i64, i: i64) -> i64 {
     unsafe {
@@ -337,7 +346,7 @@ pub extern "C" fn sloth_str_byte(s_w: i64, i: i64) -> i64 {
     }
 }
 
-/// byte slice `[start, start+len)` as a fresh pooled string (raw C-ABI ints)
+/// byte slice `[start, start+len)` as a fresh `str` (raw C-ABI ints)
 #[no_mangle]
 pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
     unsafe {
@@ -350,7 +359,7 @@ pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
     }
 }
 
-/// one raw byte as a pooled string (raw C-ABI byte in); used by the tokenizer
+/// one raw byte as a fresh `str` (raw C-ABI byte in); used by the tokenizer
 /// for `<0xNN>` raw-byte vocabulary entries
 #[no_mangle]
 pub extern "C" fn sloth_str_of_byte(v: i64) -> i64 {
@@ -358,7 +367,7 @@ pub extern "C" fn sloth_str_of_byte(v: i64) -> i64 {
     intern_bytes((&b as *const u8) as usize, 1)
 }
 
-/// write a pooled string's bytes to stdout with no trailing newline (generation
+/// write a `str`'s bytes to stdout with no trailing newline (generation
 /// output must be printable piece-by-piece)
 #[no_mangle]
 pub extern "C" fn sloth_rt_write_str(p_w: i64) -> i64 {

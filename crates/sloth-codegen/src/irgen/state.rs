@@ -26,7 +26,9 @@ pub struct ModEmitter {
     pub diags: Vec<Diag>,
     /// module text to parse (html-safe)
     pub out: String,
-    /// string literals emitted as llvm.mlir.global; interned by runtime
+    /// compile-time string-literal pool for `llvm.mlir.global` output (kept
+    /// for the globals emitter; the current lowerer builds literals through
+    /// `sloth_str_push`/`sloth_str_finish`, so this is normally empty)
     pub strpool: Vec<String>,
     /// classes emitted: name -> id (assigned in collect order)
     pub class_ids: HashMap<String, i64>,
@@ -114,7 +116,7 @@ pub struct ClassInfo {
 pub(crate) enum IdxKind {
     /// array word backed by sloth_arr_len + sloth_arr_get(_f64)
     Arr,
-    /// interned string: sloth_str_len + sloth_str_char returns Str words
+    /// string: sloth_str_len + sloth_str_char returns Str words
     StrChar,
 }
 

@@ -43,8 +43,8 @@ fn map_hash_i(k: i64) -> u64 {
     mix64(k as u64)
 }
 
-/// FNV-1a over an interned string's bytes (the key arrives as a tagged
-/// handle word; the payload internals are raw)
+/// FNV-1a over a `str`'s bytes (the key arrives as a tagged handle word; the
+/// payload internals are raw; hashing is by content, not handle identity)
 fn map_hash_s(h: i64) -> u64 {
     unsafe {
         let td = w_unref(h) as *const StrT;
