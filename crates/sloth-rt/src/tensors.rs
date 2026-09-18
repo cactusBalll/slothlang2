@@ -304,6 +304,66 @@ pub extern "C" fn sloth_tensor_rank(t: i64) -> i64 {
     enc_i(unsafe { ndim_of(w_unref(t) as *mut i64) } as i64)
 }
 
+/// channel-B bridge (TE-P2 R1): a flat rank-1 memref descriptor over the
+/// tensor's contiguous element buffer. Matches MLIR's lowering of
+/// `memref<?xf64, strided<[?], offset: ?>>`: the descriptor struct
+/// `(ptr, ptr, i64, [1 x i64], [1 x i64])` returned by value.
+#[repr(C)]
+pub struct MemRefDesc {
+    allocated: *mut libc::c_void,
+    aligned: *mut libc::c_void,
+    offset: i64,
+    size: [i64; 1],
+    stride: [i64; 1],
+}
+
+/// fill a flat rank-1 memref descriptor over element buffer `t`
+/// (`allocated == aligned == data_ptr`, offset 0, stride 1)
+unsafe fn basis_desc(t: i64) -> MemRefDesc {
+    let d = w_unref(t) as *mut i64;
+    let data = data_of(d) as *mut libc::c_void;
+    MemRefDesc {
+        allocated: data,
+        aligned: data,
+        offset: 0,
+        size: [total_of(d)],
+        stride: [1],
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
+    if !w_is_ref(t) {
+        crate::panics::panic_msg("basis of a nil tensor");
+    }
+    unsafe { basis_desc(t) }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
+    if !w_is_ref(t) {
+        crate::panics::panic_msg("basis of a nil tensor");
+    }
+    unsafe { basis_desc(t) }
+}
+
+/// stride of `axis` (tagged int word); 0 for a nil tensor
+#[no_mangle]
+pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
+    if !w_is_ref(t) {
+        return 0;
+    }
+    unsafe {
+        let d = w_unref(t) as *mut i64;
+        let n = ndim_of(d);
+        let a = dec_i(axis_w);
+        if a < 0 || a as usize >= n {
+            crate::panics::panic_oob("tensor axis", a, n as i64);
+        }
+        enc_i(*stride_of(d).offset(a as isize))
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
     if !w_is_ref(t) {

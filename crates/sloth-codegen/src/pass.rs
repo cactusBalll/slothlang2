@@ -4094,3 +4094,162 @@ mod irgen_te_p1 {
         }
     }
 }
+
+/// TE-P2 R1 gate: the `sloth_tensor_basis` memref ABI. Validates that a
+/// runtime-built tensor's element buffer can cross into MLIR as a memref
+/// descriptor, be `memref.reinterpret_cast` to its runtime shape/strides,
+/// and be read/written there — with writes visible through the ordinary
+/// `sloth_tensor_get1` route (shared storage).
+#[cfg(test)]
+mod irgen_te_p2_r1 {
+    use super::*;
+
+    const ENC_I: fn(i64) -> i64 = |v| v << 1;
+    fn enc_f(v: f64) -> i64 {
+        ((v.to_bits() & !1) as i64) >> 1
+    }
+
+    #[test]
+    fn basis_memref_abi() {
+        // [[1,2,3],[4,5,6]] built through the rt, addressed as a rank-2
+        // memref via basis + reinterpret_cast using runtime dim/stride.
+        let mut ir = String::from("module @r1probe {\n");
+        ir.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_new_2(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_copy_from_array(i64, i64) -> i64\n");
+        ir.push_str(
+            "  func.func private @sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
+        );
+        ir.push_str("  func.func private @sloth_tensor_dim(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_stride(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_view(i64, i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_get1(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
+        ir.push_str("  func.func @sloth_main() -> () attributes {llvm.emit_c_interface} {\n");
+        // array of 6 float words, values 1.0 .. 6.0
+        ir.push_str(&format!("    %len6 = arith.constant {} : i64\n", ENC_I(6)));
+        ir.push_str("    %arr = call @sloth_arr_new(%len6) : (i64) -> i64\n");
+        for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0].iter().enumerate() {
+            ir.push_str(&format!(
+                "    %ai{i} = arith.constant {} : i64\n    %av{i} = arith.constant {} : i64\n",
+                ENC_I(i as i64),
+                enc_f(*v)
+            ));
+            ir.push_str(&format!(
+                "    call @sloth_arr_set(%arr, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
+            ));
+        }
+        // 2x3 float tensor + copy
+        ir.push_str(&format!(
+            "    %d2 = arith.constant {} : i64\n    %d3 = arith.constant {} : i64\n    %kind = arith.constant {} : i64\n",
+            ENC_I(2),
+            ENC_I(3),
+            ENC_I(1)
+        ));
+        ir.push_str(
+            "    %t = call @sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
+        );
+        ir.push_str("    call @sloth_tensor_copy_from_array(%t, %arr) : (i64, i64) -> i64\n");
+        // flat basis memref
+        ir.push_str(
+            "    %flat = call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
+        );
+        // runtime dims/strides from the descriptor (tagged words -> index)
+        ir.push_str("    %one64 = arith.constant 1 : i64\n");
+        for (name, axis) in [("0", 0i64), ("1", 1i64)] {
+            ir.push_str(&format!(
+                "    %ax{name} = arith.constant {} : i64\n",
+                ENC_I(axis)
+            ));
+            ir.push_str(&format!(
+                "    %dw{name} = call @sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
+            ));
+            ir.push_str(&format!(
+                "    %di{name} = arith.shrsi %dw{name}, %one64 : i64\n    %d{name} = arith.index_cast %di{name} : i64 to index\n"
+            ));
+            ir.push_str(&format!(
+                "    %sw{name} = call @sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
+            ));
+            ir.push_str(&format!(
+                "    %si{name} = arith.shrsi %sw{name}, %one64 : i64\n    %s{name} = arith.index_cast %si{name} : i64 to index\n"
+            ));
+        }
+        ir.push_str("    %o0 = arith.constant 0 : index\n");
+        ir.push_str(
+            "    %r2 = memref.reinterpret_cast %flat to offset: [%o0], sizes: [%d0, %d1], strides: [%s0, %s1] : memref<?xf64, strided<[?], offset: ?>> to memref<?x?xf64, strided<[?, ?], offset: ?>>\n",
+        );
+        // load [1][2] -> expect 6
+        ir.push_str("    %i1 = arith.constant 1 : index\n    %i2 = arith.constant 2 : index\n");
+        ir.push_str(
+            "    %v = memref.load %r2[%i1, %i2] : memref<?x?xf64, strided<[?, ?], offset: ?>>\n",
+        );
+        ir.push_str("    %p = call @sloth_rt_print_f64(%v) : (f64) -> i64\n");
+        // write 7 through the memref; read back through the tensor route
+        ir.push_str("    %seven = arith.constant 7.0 : f64\n");
+        ir.push_str(
+            "    memref.store %seven, %r2[%i1, %i2] : memref<?x?xf64, strided<[?, ?], offset: ?>>\n",
+        );
+        ir.push_str(&format!(
+            "    %off1 = arith.constant {} : i64\n    %drop1 = arith.constant {} : i64\n    %zero = arith.constant {} : i64\n",
+            ENC_I(1),
+            ENC_I(1),
+            ENC_I(0)
+        ));
+        ir.push_str(
+            "    %t1 = call @sloth_tensor_view(%t, %off1, %drop1, %zero) : (i64, i64, i64, i64) -> i64\n",
+        );
+        ir.push_str(&format!(
+            "    %g = call @sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
+        ));
+        ir.push_str("    %g1 = arith.shli %g, %one64 : i64\n");
+        ir.push_str("    %gv = arith.bitcast %g1 : i64 to f64\n");
+        ir.push_str("    %p2 = call @sloth_rt_print_f64(%gv) : (f64) -> i64\n");
+        ir.push_str("    return\n  }\n}\n");
+
+        let ctx = Context::new();
+        let op = Op::parse(ctx.raw, &ir, "r1probe.mlir").expect("parse");
+        crate::jit::run_llvm_pipeline(ctx.raw, op.raw).expect("pipeline");
+        let engine = crate::jit::Engine::new(&op, 2, &[lib_path()]);
+        engine.invoke("sloth_main", &mut []).expect("invoke");
+    }
+
+    unsafe extern "C" fn swallow(_s: crate::sys::MlirStringRef, _u: *mut std::ffi::c_void) {}
+
+    /// the JIT can register all MLIR passes and parse the TE-P2 pipeline
+    /// string (linalg fusion + one-shot-bufferize + math), which is the
+    /// precondition for the channel-A linalg route in the JIT.
+    #[test]
+    fn target_pass_pipeline_parses() {
+        use crate::sys;
+        unsafe {
+            sys::mlirRegisterAllPasses();
+            let ctx = sys::mlirContextCreate();
+            let pm = sys::mlirPassManagerCreate(ctx);
+            let opm = sys::mlirPassManagerGetAsOpPassManager(pm);
+            let pipe = std::ffi::CString::new(
+                "canonicalize,cse,linalg-fuse-elementwise-ops,one-shot-bufferize,\
+                 convert-linalg-to-loops,convert-scf-to-cf,convert-math-to-llvm",
+            )
+            .unwrap();
+            let r = sys::mlirOpPassManagerAddPipeline(
+                opm,
+                sys::mlirStringRefCreateFromCString(pipe.as_ptr()),
+                Some(swallow),
+                std::ptr::null_mut(),
+            );
+            // a bogus pass must be rejected: proves the success above is real
+            let bogus = std::ffi::CString::new("no-such-sloth-pass").unwrap();
+            let rb = sys::mlirOpPassManagerAddPipeline(
+                opm,
+                sys::mlirStringRefCreateFromCString(bogus.as_ptr()),
+                Some(swallow),
+                std::ptr::null_mut(),
+            );
+            sys::mlirPassManagerDestroy(pm);
+            sys::mlirContextDestroy(ctx);
+            assert_eq!(r.value, 1, "TE-P2 pass pipeline failed to parse");
+            assert_eq!(rb.value, 0, "bogus pass should be rejected");
+        }
+    }
+}
