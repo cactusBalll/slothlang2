@@ -51,6 +51,41 @@ impl ModEmitter {
         }
     }
 
+    /// runtime same-shape assertion (panics on mismatch, design §3.1)
+    fn emit_shape_eq(&mut self, fw: &mut FnWalk, a: &str, b: &str) {
+        fw.op(&format!(
+            "    call @sloth_tensor_shape_eq({}, {}) : (i64, i64) -> i64",
+            a, b
+        ));
+    }
+
+    /// runtime `dim(a, axa) == dim(b, axb)` assertion
+    fn emit_dim_eq(&mut self, fw: &mut FnWalk, a: &str, axa: i64, b: &str, axb: i64) {
+        let aa = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            aa,
+            enc_i_lit(axa)
+        ));
+        let bb = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            bb,
+            enc_i_lit(axb)
+        ));
+        fw.op(&format!(
+            "    call @sloth_tensor_dim_eq({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            a, aa, b, bb
+        ));
+    }
+
+    /// error-path zero word for an operator that could not be emitted
+    fn tensor_bail(&mut self, fw: &mut FnWalk) -> (String, TyId) {
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::F64))
+    }
+
     /// allocate a zeroed tensor whose dims are read from a shape `Array<int>`
     /// word; `rank` comes from the declared target surface
     pub(crate) fn emit_tensor_new_from_shape(
@@ -280,5 +315,606 @@ impl ModEmitter {
             "    call @sloth_tensor_copy_into({}, {}) : (i64, i64) -> i64",
             dst, src
         ));
+    }
+
+    // ---- TE-P2 channel B: memref-domain linalg operators -------------------
+    //
+    // The tagged tensor word is bridged into a `memref` via the runtime basis
+    // descriptor + `memref.reinterpret_cast` using the *runtime* shape/stride
+    // (R1). Operators then run `linalg.*` directly on memrefs, so they bypass
+    // one-shot-bufferization entirely (design D2) and views keep working.
+
+    /// MLIR element type of a tensor element surface
+    fn tensor_elem_mlir(&self, elem: TyId) -> &'static str {
+        if self.is_float(elem) {
+            "f64"
+        } else {
+            "i64"
+        }
+    }
+
+    fn tensor_basis_fn(&self, elem: TyId) -> &'static str {
+        if self.is_float(elem) {
+            "sloth_tensor_basis_f64"
+        } else {
+            "sloth_tensor_basis_i64"
+        }
+    }
+
+    /// flat rank-1 strided memref over the tensor's element buffer
+    pub(crate) fn emit_tensor_basis(&mut self, fw: &mut FnWalk, tv: &str, elem: TyId) -> String {
+        let et = self.tensor_elem_mlir(elem);
+        let f = self.tensor_basis_fn(elem);
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @{}({}) : (i64) -> memref<?x{}, strided<[?], offset: ?>>",
+            r, f, tv, et
+        ));
+        r
+    }
+
+    /// tagged dim word of `tv` along `axis`
+    fn emit_tensor_dim_word(&mut self, fw: &mut FnWalk, tv: &str, axis: i64) -> String {
+        let ax = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            ax,
+            enc_i_lit(axis)
+        ));
+        let dw = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
+            dw, tv, ax
+        ));
+        dw
+    }
+
+    /// allocate a contiguous tensor from tagged dim words (rank 1..=3)
+    fn emit_tensor_alloc_dims(
+        &mut self,
+        fw: &mut FnWalk,
+        dims: &[String],
+        elem: TyId,
+    ) -> (String, TyId) {
+        let rank = dims.len() as u32;
+        let kindw = self.tensor_kind_word(fw, elem);
+        let mut vals = dims.to_vec();
+        vals.push(kindw);
+        let ty = self.r.mk(Ty::Tensor(elem, rank));
+        let r = fw.v();
+        let sig: Vec<&str> = (0..vals.len()).map(|_| "i64").collect();
+        fw.op(&format!(
+            "    {} = call @sloth_tensor_new_{}({}) : ({}) -> i64",
+            r,
+            rank,
+            vals.join(", "),
+            sig.join(", ")
+        ));
+        self.dangling_producer(fw, &r, ty);
+        (r, ty)
+    }
+
+    /// rank-1/2 strided memref view of `tv` with runtime sizes/strides
+    pub(crate) fn emit_tensor_memref(
+        &mut self,
+        fw: &mut FnWalk,
+        tv: &str,
+        elem: TyId,
+        rank: u32,
+    ) -> (String, String) {
+        let et = self.tensor_elem_mlir(elem).to_string();
+        let flat = self.emit_tensor_basis(fw, tv, elem);
+        let flat_ty = format!("memref<?x{}, strided<[?], offset: ?>>", et);
+        let one = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+        let mut dims: Vec<String> = Vec::new();
+        let mut strides: Vec<String> = Vec::new();
+        for k in 0..rank {
+            let ax = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                ax,
+                enc_i_lit(k as i64)
+            ));
+            let dw = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
+                dw, tv, ax
+            ));
+            let di = fw.v();
+            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
+            let d = fw.v();
+            fw.op(&format!(
+                "    {} = arith.index_cast {} : i64 to index",
+                d, di
+            ));
+            dims.push(d);
+            let sw = fw.v();
+            fw.op(&format!(
+                "    {} = call @sloth_tensor_stride({}, {}) : (i64, i64) -> i64",
+                sw, tv, ax
+            ));
+            let si = fw.v();
+            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", si, sw, one));
+            let s = fw.v();
+            fw.op(&format!(
+                "    {} = arith.index_cast {} : i64 to index",
+                s, si
+            ));
+            strides.push(s);
+        }
+        let o = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", o));
+        let target_ty = match rank {
+            2 => format!("memref<?x?x{}, strided<[?, ?], offset: ?>>", et),
+            _ => format!("memref<?x{}, strided<[?], offset: ?>>", et),
+        };
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = memref.reinterpret_cast {} to offset: [{}], sizes: [{}], strides: [{}] : {} to {}",
+            r,
+            flat,
+            o,
+            dims.join(", "),
+            strides.join(", "),
+            flat_ty,
+            target_ty
+        ));
+        (r, target_ty)
+    }
+
+    /// `tensor.matvec(w: Tensor<T,2>, x: Tensor<T,1>): Tensor<T,1>` (channel B)
+    pub(crate) fn emit_tensor_matvec(
+        &mut self,
+        fw: &mut FnWalk,
+        we: &Expr,
+        xe: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (wv, wt) = self.emit_expr(fw, we);
+        let (xv, xt) = self.emit_expr(fw, xe);
+        let wi = self.tensor_info(wt);
+        let xi = self.tensor_info(xt);
+        let (welem, wrank) = match wi {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.matvec` first operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        let (xelem, xrank) = match xi {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.matvec` second operand must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        if wrank != 2 || xrank != 1 {
+            self.err(
+                pos,
+                "`tensor.matvec` requires `Tensor<T,2>` and `Tensor<T,1>`".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        if welem != xelem {
+            self.err(pos, "`tensor.matvec` element kind mismatch".into());
+            return self.tensor_bail(fw);
+        }
+        if !self.is_float(welem) {
+            self.err(
+                pos,
+                "`tensor.matvec` supports `float` elements only (TE-P2)".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_dim_eq(fw, &wv, 1, &xv, 0);
+        let d0 = self.emit_tensor_dim_word(fw, &wv, 0);
+        let (yv, yt) = self.emit_tensor_alloc_dims(fw, &[d0], welem);
+        let (wm, wty) = self.emit_tensor_memref(fw, &wv, welem, 2);
+        let (xm, xty) = self.emit_tensor_memref(fw, &xv, xelem, 1);
+        let (ym, yty) = self.emit_tensor_memref(fw, &yv, welem, 1);
+        fw.op(&format!(
+            "    linalg.matvec ins({}, {} : {}, {}) outs({} : {})",
+            wm, xm, wty, xty, ym, yty
+        ));
+        (yv, yt)
+    }
+
+    /// tagged encoding of a scalar MLIR value (f64/i64) into one word
+    fn emit_encode_scalar(&mut self, fw: &mut FnWalk, val: &str, elem: TyId) -> String {
+        let one = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+        if self.is_float(elem) {
+            let bv = fw.v();
+            fw.op(&format!("    {} = arith.bitcast {} : f64 to i64", bv, val));
+            let mask = fw.v();
+            fw.op(&format!("    {} = arith.constant -2 : i64", mask));
+            let mw = fw.v();
+            fw.op(&format!("    {} = arith.andi {}, {} : i64", mw, bv, mask));
+            let e = fw.v();
+            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", e, mw, one));
+            e
+        } else {
+            let e = fw.v();
+            fw.op(&format!("    {} = arith.shli {}, {} : i64", e, val, one));
+            e
+        }
+    }
+
+    /// arithmetic op mnemonic for element type + operation stem
+    fn arith_binop(&self, elem: TyId, stem: &str) -> String {
+        if self.is_float(elem) {
+            format!("{}f", stem)
+        } else {
+            match stem {
+                "sub" => "subi",
+                "mul" => "muli",
+                "div" => "divsi",
+                _ => "addi",
+            }
+            .to_string()
+        }
+    }
+
+    fn parallel_maps(rank: u32) -> (String, String) {
+        match rank {
+            2 => (
+                "affine_map<(d0, d1) -> (d0, d1)>".to_string(),
+                "\"parallel\", \"parallel\"".to_string(),
+            ),
+            _ => (
+                "affine_map<(d0) -> (d0)>".to_string(),
+                "\"parallel\"".to_string(),
+            ),
+        }
+    }
+
+    /// elementwise `out = a OP b` over same-shape tensors (rank 1/2)
+    pub(crate) fn emit_tensor_binop(
+        &mut self,
+        fw: &mut FnWalk,
+        a: &Expr,
+        b: &Expr,
+        opname: &str,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let stem = opname;
+        let (av, at) = self.emit_expr(fw, a);
+        let (bv, bt) = self.emit_expr(fw, b);
+        let ai = self.tensor_info(at);
+        let bi = self.tensor_info(bt);
+        let (aelem, arank) = match ai {
+            Some(x) => x,
+            None => {
+                self.err(pos, format!("`tensor.{}` operands must be tensors", opname));
+                return self.tensor_bail(fw);
+            }
+        };
+        let (belem, brank) = match bi {
+            Some(x) => x,
+            None => {
+                self.err(pos, format!("`tensor.{}` operands must be tensors", opname));
+                return self.tensor_bail(fw);
+            }
+        };
+        if arank != brank || aelem != belem {
+            self.err(
+                pos,
+                format!(
+                    "`tensor.{}` operands must share element kind and rank",
+                    opname
+                ),
+            );
+            return self.tensor_bail(fw);
+        }
+        if !(1..=2).contains(&arank) {
+            self.err(
+                pos,
+                format!("`tensor.{}` supports rank 1/2 (TE-P2)", opname),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_shape_eq(fw, &av, &bv);
+        let mut dims = Vec::new();
+        for k in 0..arank {
+            dims.push(self.emit_tensor_dim_word(fw, &av, k as i64));
+        }
+        let (ov, ot) = self.emit_tensor_alloc_dims(fw, &dims, aelem);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, aelem, arank);
+        let (bm, bty) = self.emit_tensor_memref(fw, &bv, belem, arank);
+        let (om, oty) = self.emit_tensor_memref(fw, &ov, aelem, arank);
+        let et = self.tensor_elem_mlir(aelem).to_string();
+        let arith = self.arith_binop(aelem, stem);
+        let (map, iters) = Self::parallel_maps(arank);
+        let x = fw.v();
+        let y = fw.v();
+        let o = fw.v();
+        let s = fw.v();
+        fw.op(&format!(
+            "    linalg.generic {{indexing_maps = [{}, {}, {}], iterator_types = [{}]}} ins({}, {} : {}, {}) outs({} : {}) {{",
+            map, map, map, iters, am, bm, aty, bty, om, oty
+        ));
+        fw.op(&format!(
+            "    ^bb0({}: {}, {}: {}, {}: {}):",
+            x, et, y, et, o, et
+        ));
+        fw.op(&format!(
+            "      {} = arith.{} {}, {} : {}",
+            s, arith, x, y, et
+        ));
+        fw.op(&format!("      linalg.yield {} : {}", s, et));
+        fw.op("    }");
+        (ov, ot)
+    }
+
+    /// `tensor.matmul(a: Tensor<T,2>, b: Tensor<T,2>): Tensor<T,2>`
+    pub(crate) fn emit_tensor_matmul(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        be: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (bv, bt) = self.emit_expr(fw, be);
+        let (aelem, arank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.matmul` first operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        let (belem, brank) = match self.tensor_info(bt) {
+            Some(x) => x,
+            None => {
+                self.err(
+                    pos,
+                    "`tensor.matmul` second operand must be a tensor".into(),
+                );
+                return self.tensor_bail(fw);
+            }
+        };
+        if arank != 2 || brank != 2 {
+            self.err(
+                pos,
+                "`tensor.matmul` requires two `Tensor<T,2>` operands".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        if aelem != belem || !self.is_float(aelem) {
+            self.err(
+                pos,
+                "`tensor.matmul` requires matching `float` elements (TE-P2)".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_dim_eq(fw, &av, 1, &bv, 0);
+        let d0 = self.emit_tensor_dim_word(fw, &av, 0);
+        let d1 = self.emit_tensor_dim_word(fw, &bv, 1);
+        let (ov, ot) = self.emit_tensor_alloc_dims(fw, &[d0, d1], aelem);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, aelem, 2);
+        let (bm, bty) = self.emit_tensor_memref(fw, &bv, belem, 2);
+        let (om, oty) = self.emit_tensor_memref(fw, &ov, aelem, 2);
+        fw.op(&format!(
+            "    linalg.matmul ins({}, {} : {}, {}) outs({} : {})",
+            am, bm, aty, bty, om, oty
+        ));
+        (ov, ot)
+    }
+
+    /// `tensor.dot(a: Tensor<T,1>, b: Tensor<T,1>): T` (rank-1 reduction)
+    pub(crate) fn emit_tensor_dot(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        be: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (bv, bt) = self.emit_expr(fw, be);
+        let (aelem, arank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.dot` first operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        let (belem, brank) = match self.tensor_info(bt) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.dot` second operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        if arank != 1 || brank != 1 {
+            self.err(
+                pos,
+                "`tensor.dot` requires two `Tensor<T,1>` operands".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        if aelem != belem {
+            self.err(pos, "`tensor.dot` element kind mismatch".into());
+            return self.tensor_bail(fw);
+        }
+        self.emit_dim_eq(fw, &av, 0, &bv, 0);
+        let (am, aty) = self.emit_tensor_memref(fw, &av, aelem, 1);
+        let (bm, bty) = self.emit_tensor_memref(fw, &bv, belem, 1);
+        let n = self.emit_tensor_dim_index(fw, &av, 0);
+        let zero = self.emit_zero_scalar(fw, aelem);
+        let res = self.emit_reduce_loop(fw, &[(am, aty), (bm, bty)], &n, &zero, aelem, true);
+        let enc = self.emit_encode_scalar(fw, &res, aelem);
+        (enc, aelem)
+    }
+
+    /// tagged dim word (`axis`) decoded to an `index`
+    fn emit_tensor_dim_index(&mut self, fw: &mut FnWalk, tv: &str, axis: i64) -> String {
+        let dw = self.emit_tensor_dim_word(fw, tv, axis);
+        let one = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : i64", one));
+        let di = fw.v();
+        fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
+        let d = fw.v();
+        fw.op(&format!(
+            "    {} = arith.index_cast {} : i64 to index",
+            d, di
+        ));
+        d
+    }
+
+    fn emit_zero_scalar(&mut self, fw: &mut FnWalk, elem: TyId) -> String {
+        let zero = fw.v();
+        if self.is_float(elem) {
+            fw.op(&format!("    {} = arith.constant 0.0 : f64", zero));
+        } else {
+            fw.op(&format!("    {} = arith.constant 0 : i64", zero));
+        }
+        zero
+    }
+
+    /// `scf.for` reduction with a register accumulator (no `memref.alloca`,
+    /// so repeated calls inside a loop do not grow the stack). `loads` are the
+    /// rank-1 memrefs to read at index `i`; when `mul` is set the loaded
+    /// elements are multiplied then added (dot), else simply added (sum).
+    fn emit_reduce_loop(
+        &mut self,
+        fw: &mut FnWalk,
+        loads: &[(String, String)],
+        n: &str,
+        zero: &str,
+        elem: TyId,
+        mul: bool,
+    ) -> String {
+        let et = self.tensor_elem_mlir(elem).to_string();
+        let add = self.arith_binop(elem, "add");
+        let mulf = self.arith_binop(elem, "mul");
+        let c0 = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", c0));
+        let c1 = fw.v();
+        fw.op(&format!("    {} = arith.constant 1 : index", c1));
+        let res = fw.v();
+        let i = fw.v();
+        let acc = fw.v();
+        fw.op(&format!(
+            "    {} = scf.for {} = {} to {} step {} iter_args({} = {}) -> ({}) {{",
+            res, i, c0, n, c1, acc, zero, et
+        ));
+        let mut loaded: Vec<String> = Vec::new();
+        for (m, mty) in loads {
+            let lv = fw.v();
+            fw.op(&format!(
+                "      {} = memref.load {}[{}] : {}",
+                lv, m, i, mty
+            ));
+            loaded.push(lv);
+        }
+        let term = if mul && loaded.len() >= 2 {
+            let p = fw.v();
+            fw.op(&format!(
+                "      {} = arith.{} {}, {} : {}",
+                p, mulf, loaded[0], loaded[1], et
+            ));
+            p
+        } else {
+            loaded[0].clone()
+        };
+        let s = fw.v();
+        fw.op(&format!(
+            "      {} = arith.{} {}, {} : {}",
+            s, add, acc, term, et
+        ));
+        fw.op(&format!("      scf.yield {} : {}", s, et));
+        fw.op("    }");
+        res
+    }
+
+    /// `tensor.sum(a: Tensor<T,1>): T` (rank-1 add-reduction)
+    pub(crate) fn emit_tensor_sum(
+        &mut self,
+        fw: &mut FnWalk,
+        ae: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (av, at) = self.emit_expr(fw, ae);
+        let (aelem, arank) = match self.tensor_info(at) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.sum` operand must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        if arank != 1 {
+            self.err(pos, "`tensor.sum` requires a `Tensor<T,1>` (TE-P2)".into());
+            return self.tensor_bail(fw);
+        }
+        let (am, aty) = self.emit_tensor_memref(fw, &av, aelem, 1);
+        let n = self.emit_tensor_dim_index(fw, &av, 0);
+        let zero = self.emit_zero_scalar(fw, aelem);
+        let res = self.emit_reduce_loop(fw, &[(am, aty)], &n, &zero, aelem, false);
+        let enc = self.emit_encode_scalar(fw, &res, aelem);
+        (enc, aelem)
+    }
+
+    /// `tensor.add_into(dst, src)`: in-place `dst += src` (no allocation)
+    pub(crate) fn emit_tensor_add_into(
+        &mut self,
+        fw: &mut FnWalk,
+        de: &Expr,
+        se: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (dv, dt) = self.emit_expr(fw, de);
+        let (sv, st) = self.emit_expr(fw, se);
+        let (delem, drank) = match self.tensor_info(dt) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.add_into` destination must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        let (selem, srank) = match self.tensor_info(st) {
+            Some(x) => x,
+            None => {
+                self.err(pos, "`tensor.add_into` source must be a tensor".into());
+                return self.tensor_bail(fw);
+            }
+        };
+        if drank != srank || delem != selem {
+            self.err(
+                pos,
+                "`tensor.add_into` operands must share element kind and rank".into(),
+            );
+            return self.tensor_bail(fw);
+        }
+        self.emit_shape_eq(fw, &dv, &sv);
+        let (dm, dty) = self.emit_tensor_memref(fw, &dv, delem, drank);
+        let (sm, sty) = self.emit_tensor_memref(fw, &sv, selem, srank);
+        let et = self.tensor_elem_mlir(delem).to_string();
+        let arith = self.arith_binop(delem, "add");
+        let (map, iters) = Self::parallel_maps(drank);
+        let x = fw.v();
+        let y = fw.v();
+        let o = fw.v();
+        let s = fw.v();
+        fw.op(&format!(
+            "    linalg.generic {{indexing_maps = [{}, {}, {}], iterator_types = [{}]}} ins({}, {} : {}, {}) outs({} : {}) {{",
+            map, map, map, iters, dm, sm, dty, sty, dm, dty
+        ));
+        fw.op(&format!(
+            "    ^bb0({}: {}, {}: {}, {}: {}):",
+            x, et, y, et, o, et
+        ));
+        fw.op(&format!(
+            "      {} = arith.{} {}, {} : {}",
+            s, arith, o, y, et
+        ));
+        fw.op(&format!("      linalg.yield {} : {}", s, et));
+        fw.op("    }");
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        (z, self.r.mk(Ty::Unit))
     }
 }

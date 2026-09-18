@@ -4095,6 +4095,103 @@ mod irgen_te_p1 {
     }
 }
 
+/// TE-P2 formal: channel-B `linalg` operators. The source-level kernels emit
+/// `linalg.matvec/matmul/dot/generic` over memrefs bridged from the tensor
+/// descriptor, through the shared pipeline.
+#[cfg(test)]
+mod irgen_te_p2 {
+    use super::*;
+
+    fn p2_ops_body() -> &'static str {
+        r#"
+            func main(): unit {
+                var w: Tensor<float, 2> = tensor.from_array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+                var x: Tensor<float, 1> = tensor.from_array([1.0, 2.0, 3.0], [3]);
+                var y: Tensor<float, 1> = tensor.matvec(w, x);
+                print(y[0]);
+                print(y[1]);
+                var a: Tensor<float, 1> = tensor.from_array([1.0, 2.0, 3.0], [3]);
+                var b: Tensor<float, 1> = tensor.from_array([10.0, 20.0, 30.0], [3]);
+                var c: Tensor<float, 1> = tensor.add(a, b);
+                print(c[2]);
+                var m: Tensor<float, 2> = tensor.from_array([1.0, 2.0, 3.0, 4.0], [2, 2]);
+                var mm: Tensor<float, 2> = tensor.matmul(m, m);
+                print(mm[1][1]);
+                print(tensor.dot(a, b));
+                print(tensor.sum(a));
+                tensor.add_into(a, b);
+                print(a[0]);
+            }
+        "#
+    }
+
+    #[test]
+    fn linalg_operators_run() {
+        run_src(p2_ops_body(), "main").unwrap();
+    }
+
+    /// matvec on a rank-3 layer view exercises runtime-stride memrefs
+    #[test]
+    fn matvec_layer_view() {
+        let src = r#"
+            func main(): unit {
+                var w3: Tensor<float, 3> = tensor.from_array(
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 2, 3]);
+                var layer: Tensor<float, 2> = w3[1];
+                var ones: Tensor<float, 1> = tensor.from_array([1.0, 1.0, 1.0], [3]);
+                var y: Tensor<float, 1> = tensor.matvec(layer, ones);
+                print(y[0]);
+                print(y[1]);
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    #[test]
+    fn matvec_rank_diag() {
+        let src = r#"
+            func main(): unit {
+                var w: Tensor<float, 1> = tensor.from_array([1.0, 2.0], [2]);
+                var y: Tensor<float, 1> = tensor.matvec(w, w);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected matvec rank diag"),
+            Err(e) => assert!(e.contains("requires `Tensor<T,2>`"), "unexpected: {}", e),
+        }
+    }
+
+    #[test]
+    fn matvec_int_diag() {
+        let src = r#"
+            func main(): unit {
+                var w: Tensor<int, 2> = tensor.from_array([1, 2, 3, 4], [2, 2]);
+                var x: Tensor<int, 1> = tensor.from_array([1, 1], [2]);
+                var y: Tensor<int, 1> = tensor.matvec(w, x);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected matvec int diag"),
+            Err(e) => assert!(e.contains("float"), "unexpected: {}", e),
+        }
+    }
+
+    #[test]
+    fn elementwise_rank_diag() {
+        let src = r#"
+            func main(): unit {
+                var a: Tensor<float, 1> = tensor.from_array([1.0, 2.0], [2]);
+                var b: Tensor<float, 2> = tensor.from_array([1.0, 2.0, 3.0, 4.0], [2, 2]);
+                var c: Tensor<float, 1> = tensor.add(a, b);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected elementwise rank diag"),
+            Err(e) => assert!(e.contains("rank"), "unexpected: {}", e),
+        }
+    }
+}
+
 /// TE-P2 R1 gate: the `sloth_tensor_basis` memref ABI. Validates that a
 /// runtime-built tensor's element buffer can cross into MLIR as a memref
 /// descriptor, be `memref.reinterpret_cast` to its runtime shape/strides,

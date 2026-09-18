@@ -99,20 +99,17 @@ fn build_mode_r(_src: &str, ir: &str, out_path: &str) -> Result<String, String> 
     let closed = ir.strip_suffix("}\n").unwrap_or(&ir);
     let full = format!("{}\n{}\n}}\n", closed, wrapper);
     std::fs::write("/tmp/opencode/app.mlir", &full).map_err(|e| e.to_string())?;
+    // single source of truth shared with the JIT (crate::pipeline)
+    let mut opt_args: Vec<String> = vec![
+        "/tmp/opencode/app.mlir".to_string(),
+        "-o".to_string(),
+        "/tmp/opencode/app-llvm.mlir".to_string(),
+    ];
+    for p in sloth_codegen::pipeline::pass_names() {
+        opt_args.push(format!("--{}", p));
+    }
     let st = std::process::Command::new("/usr/lib/llvm-21/bin/mlir-opt")
-        .args([
-            "/tmp/opencode/app.mlir",
-            "-o",
-            "/tmp/opencode/app-llvm.mlir",
-            "--canonicalize",
-            "--cse",
-            "--convert-func-to-llvm",
-            "--convert-arith-to-llvm",
-            "--convert-index-to-llvm",
-            "--convert-cf-to-llvm",
-            "--finalize-memref-to-llvm",
-            "--reconcile-unrealized-casts",
-        ])
+        .args(&opt_args)
         .status()
         .map_err(|e| e.to_string())?;
     if !st.success() {
@@ -132,6 +129,7 @@ fn build_mode_r(_src: &str, ir: &str, out_path: &str) -> Result<String, String> 
     }
     let st3 = std::process::Command::new("clang")
         .args([
+            "-O3",
             "/tmp/opencode/app.ll",
             "/home/undatus63/slothlang2/target/debug/libsloth_rt.so",
             "-o",

@@ -57,27 +57,29 @@ impl Engine {
     }
 }
 
-/// run canonicalize/cse then the func-to-llvm conversion pipeline
+/// swallow pass-parser diagnostics so a failed parse is reported through the
+/// return code rather than a fatal MLIR error
+unsafe extern "C" fn discard_diag(_s: sys::MlirStringRef, _u: *mut std::ffi::c_void) {}
+
+/// run the shared lowering pipeline (see `crate::pipeline::pass_names`).
+/// `one-shot-bufferize` has no individual C-API creator, so the whole list is
+/// driven as a textual pipeline after registering all passes.
 pub fn run_llvm_pipeline(ctx: sys::MlirContext, op: sys::MlirOperation) -> Result<(), String> {
     unsafe {
+        sys::mlirRegisterAllPasses();
         let pm = sys::mlirPassManagerCreate(ctx);
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateTransformsCanonicalizer());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateTransformsCSE());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertFuncToLLVMPass());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionArithToLLVMConversionPass());
-        sys::mlirPassManagerAddOwnedPass(pm, sys::mlirCreateConversionConvertIndexToLLVMPass());
-        sys::mlirPassManagerAddOwnedPass(
-            pm,
-            sys::mlirCreateConversionConvertControlFlowToLLVMPass(),
+        let opm = sys::mlirPassManagerGetAsOpPassManager(pm);
+        let pipe = CString::new(crate::pipeline::pass_pipeline_string()).unwrap();
+        let added = sys::mlirOpPassManagerAddPipeline(
+            opm,
+            sys::mlirStringRefCreateFromCString(pipe.as_ptr()),
+            Some(discard_diag),
+            std::ptr::null_mut(),
         );
-        sys::mlirPassManagerAddOwnedPass(
-            pm,
-            sys::mlirCreateConversionFinalizeMemRefToLLVMConversionPass(),
-        );
-        sys::mlirPassManagerAddOwnedPass(
-            pm,
-            sys::mlirCreateConversionReconcileUnrealizedCastsPass(),
-        );
+        if added.value != 1 {
+            sys::mlirPassManagerDestroy(pm);
+            return Err("pass pipeline failed to parse".to_string());
+        }
         let r = sys::mlirPassManagerRunOnOp(pm, op);
         let ok = r.value == 1;
         sys::mlirPassManagerDestroy(pm);

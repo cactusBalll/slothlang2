@@ -7,6 +7,7 @@ pub mod irgen;
 mod jit;
 mod module;
 pub mod pass;
+pub mod pipeline;
 
 pub fn selftest() -> Result<(), String> {
     pass::smoke_all()

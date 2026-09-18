@@ -1840,6 +1840,25 @@ impl ModEmitter {
                     "from_array" if args.len() == 2 => {
                         return self.emit_tensor_from_array(fw, &args[0], &args[1], pos);
                     }
+                    // TE-P2 channel-B linalg operators (expr.rs / tensor.rs)
+                    "matvec" if args.len() == 2 => {
+                        return self.emit_tensor_matvec(fw, &args[0], &args[1], pos);
+                    }
+                    "matmul" if args.len() == 2 => {
+                        return self.emit_tensor_matmul(fw, &args[0], &args[1], pos);
+                    }
+                    "dot" if args.len() == 2 => {
+                        return self.emit_tensor_dot(fw, &args[0], &args[1], pos);
+                    }
+                    "add" | "sub" | "mul" | "div" if args.len() == 2 => {
+                        return self.emit_tensor_binop(fw, &args[0], &args[1], name.as_str(), pos);
+                    }
+                    "sum" if args.len() == 1 => {
+                        return self.emit_tensor_sum(fw, &args[0], pos);
+                    }
+                    "add_into" if args.len() == 2 => {
+                        return self.emit_tensor_add_into(fw, &args[0], &args[1], pos);
+                    }
                     "fill_zero" if args.len() == 1 => {
                         let (v, _t) = self.emit_expr(fw, &args[0]);
                         fw.op(&format!(

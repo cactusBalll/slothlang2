@@ -253,7 +253,12 @@ pub fn rt_decls() -> String {
   func.func private @sloth_tensor_copy_from_array(i64, i64) -> i64
   func.func private @sloth_tensor_rank(i64) -> i64
   func.func private @sloth_tensor_dim(i64, i64) -> i64
-  func.func private @sloth_tensor_fill_zero(i64) -> i64\n",
+  func.func private @sloth_tensor_stride(i64, i64) -> i64
+  func.func private @sloth_tensor_fill_zero(i64) -> i64
+  func.func private @sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>
+  func.func private @sloth_tensor_basis_i64(i64) -> memref<?xi64, strided<[?], offset: ?>>
+  func.func private @sloth_tensor_shape_eq(i64, i64) -> i64
+  func.func private @sloth_tensor_dim_eq(i64, i64, i64, i64) -> i64\n",
     );
     s
 }
