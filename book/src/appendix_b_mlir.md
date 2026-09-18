@@ -55,11 +55,17 @@
 
 ## B.4 Lowering 管线
 
-`slothc run`（JIT）与 `slothc build`（AOT）都先跑同一组 pass：
+`slothc run`（JIT）与 `slothc build`（AOT）都跑同一组 pass（单一真源为
+`crates/sloth-codegen/src/pipeline.rs::pass_names`）：
 
 ```text
 canonicalize
 cse
+one-shot-bufferize
+linalg-fuse-elementwise-ops
+convert-linalg-to-loops
+convert-scf-to-cf
+convert-math-to-llvm
 convert-func-to-llvm
 convert-arith-to-llvm
 convert-index-to-llvm
@@ -67,6 +73,10 @@ convert-cf-to-llvm
 finalize-memref-to-llvm
 reconcile-unrealized-casts
 ```
+
+张量段（`one-shot-bufferize` … `convert-math-to-llvm`）位于 func/arith 转换之前，
+使 `linalg`/`scf`/`math` 在同一次运行内降到 `llvm`；通道 B 算子保持在 `memref`
+域、绕开 bufferization（见设计 §5.6）。AOT 的最终优化由链接期 `clang -O3` 完成。
 
 - `run`：把结果模块交给 MLIR ExecutionEngine，`invokePacked("sloth_main")`。
 - `build`：把结果写成 `.mlir`，依次调 `mlir-opt`（同上管线）→ `mlir-translate

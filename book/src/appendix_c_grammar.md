@@ -38,6 +38,9 @@ type            ::= type_base '?'?                      (* T?? 报错 *)
 type_base       ::= 'unit' | 'int' | 'float' | 'bool' | 'str' | 'range'
                   | 'Array' '<' type '>'
                   | 'Map' '<' type ',' type '>'
+                  | 'Weak' '<' type '>'
+                  | 'Tensor' '<' ( 'int' | 'float' ) ',' INT '>'
+                    (* 秩字面量语法 0..=8，语义限 1..=3 *)
                   | 'dyn' IDENT
                   | '(' ( type ( ',' type )* )? ')' '->' type
                   | IDENT type_args?
@@ -54,7 +57,7 @@ stmt            ::= block
 if_stmt         ::= 'if' ( '(' expr ')' | expr ) stmt ( 'else' stmt )?
 while_stmt      ::= 'while' ( '(' expr ')' | expr ) stmt
 for_stmt        ::= 'for' ( '(' 'var' IDENT ':' expr ')' | IDENT 'in' expr ) stmt
-assign_stmt     ::= assignable '=' expr ';'
+assign_stmt     ::= assignable ( '=' | '+=' | '-=' ) expr ';'
 assignable      ::= IDENT ( '.' IDENT | '[' expr ']' )*
 expr_stmt       ::= expr ';'
 
@@ -64,12 +67,16 @@ pipe            ::= elvis ( '|>' elvis )*                 (* 左结合 *)
 elvis           ::= or ( '?:' elvis )?                    (* 右结合 *)
 or              ::= and ( ( 'or' | '||' ) and )*
 and             ::= cmp ( ( 'and' | '&&' ) cmp )*
-cmp             ::= range ( ( '==' | '!=' | '<' | '>' | '<=' | '>='
-                            | 'is' | 'is' 'not' ) range )?
+cmp             ::= bor ( ( '==' | '!=' | '<' | '>' | '<=' | '>='
+                          | 'is' | 'is' 'not' ) bor )?
+bor             ::= bxor ( '|' bxor )*
+bxor            ::= band ( '^' band )*
+band            ::= shift ( '&' shift )*
+shift           ::= range ( ( '<<' | '>>' ) range )*
 range           ::= add ( ( '..' | '..=' ) add )?
 add             ::= mul ( ( '+' | '-' ) mul )*
 mul             ::= unary ( ( '*' | '/' | '%' ) unary )*
-unary           ::= ( 'not' | '-' ) unary | postfix
+unary           ::= ( 'not' | '-' | '~' ) unary | postfix
 postfix         ::= primary ( '(' args? ')'
                           | '[' expr ']'
                           | '.' IDENT
@@ -97,8 +104,12 @@ comment ::= '//' ... '\n' | '/*' ... '*/'
 **保留字**：`and or not true false for var let if else while func nil return class
 super this break continue is pub trait impl dyn as`。
 
-**上下文关键字**（仅在类型位置有特殊含义，可作标识符）：`int float bool str unit
-range Array Map dyn`。
+**上下文关键字**（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit
+range Array Map Weak Tensor dyn extern`。
 
 `&&` / `||` 是 `and` / `or` 的同义 token。范围运算符 `..` / `..=`，管道 `|>`，
-Elvis `?:` 是独立 token（注意 `|>` 与 `||`、`..` 与 `.` 的区分）。
+Elvis `?:`，可选链 `?.`（词法识别为 `QuestionDot`，但 parser 明确拒绝，见设计 §3.6）
+是独立 token（注意 `|>` 与 `||`、`..` 与 `.` 的区分）。
+
+`& | ^ << >> ~` 为 int-only 位运算；其中 `<<`/`>>` 在解析期由相邻的两个 `Lt`/`Gt`
+合并，因此 `Map<int, Array<int>>` 的泛型闭合不受影响。复合赋值仅 `+=` / `-=`。
