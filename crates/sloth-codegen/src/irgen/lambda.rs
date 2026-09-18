@@ -204,6 +204,10 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
                 | "range"
                 | "fiber"
                 | "tensor"
+                | "thread"
+                | "channel"
+                | "mutex"
+                | "atomic"
                 | "true"
                 | "false"
         ) || me.funcs.contains_key(&u)
@@ -260,6 +264,25 @@ fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
                 vec![Type::Simple(ea)],
             )))
         }
+        Ty::JoinHandle(e) => {
+            let et = syn_ty_of(me, e)?;
+            Some(Type::Simple(SimpleType::Named("JoinHandle".into(), vec![et])))
+        }
+        Ty::Channel(e) => {
+            let et = syn_ty_of(me, e)?;
+            Some(Type::Simple(SimpleType::Named("Channel".into(), vec![et])))
+        }
+        Ty::Mutex => Some(Type::Simple(SimpleType::Ident("Mutex".into()))),
+        Ty::AtomicInt => Some(Type::Simple(SimpleType::Ident("AtomicInt".into()))),
+        Ty::Tensor(e, rank) => {
+            let el = match me.r.get(e) {
+                Ty::F64 => Type::prim(Prim::Float),
+                Ty::I64 => Type::prim(Prim::Int),
+                _ => return None,
+            };
+            Some(Type::Simple(SimpleType::Tensor(Box::new(el), rank)))
+        }
+        Ty::Dyn(n) => Some(Type::Simple(SimpleType::Dyn(n))),
         Ty::Array(e) => syn_ty_of(me, e).map(|x| Type::Simple(SimpleType::Array(Box::new(x)))),
         Ty::Map(k, v) => {
             let kt = syn_ty_of(me, k)?;

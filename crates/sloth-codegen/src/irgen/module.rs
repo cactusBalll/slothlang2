@@ -300,6 +300,29 @@ pub fn rt_decls() -> String {
   func.func private @sloth_fiber_track(i64) -> i64
   func.func private @sloth_fiber_untrack(i64) -> i64\n",
     );
+    // multithreading extension TH-P1/P2: threads, channels, mutexes, atomics
+    s.push_str(
+        "  func.func private @sloth_thread_spawn(i64, i64) -> i64
+  func.func private @sloth_thread_join(i64) -> i64
+  func.func private @sloth_thread_detach(i64) -> i64
+  func.func private @sloth_thread_current_id() -> i64
+  func.func private @sloth_thread_yield_now() -> i64
+  func.func private @sloth_chan_new(i64) -> i64
+  func.func private @sloth_chan_send(i64, i64) -> i64
+  func.func private @sloth_chan_recv(i64, i64) -> i64
+  func.func private @sloth_chan_close(i64) -> i64
+  func.func private @sloth_mutex_new() -> i64
+  func.func private @sloth_mutex_lock(i64) -> i64
+  func.func private @sloth_mutex_unlock(i64) -> i64
+  func.func private @sloth_mutex_try_lock(i64) -> i64
+  func.func private @sloth_mutex_with(i64, i64) -> i64
+  func.func private @sloth_atomic_new(i64) -> i64
+  func.func private @sloth_atomic_load(i64) -> i64
+  func.func private @sloth_atomic_store(i64, i64) -> i64
+  func.func private @sloth_atomic_add(i64, i64) -> i64
+  func.func private @sloth_atomic_sub(i64, i64) -> i64
+  func.func private @sloth_atomic_cas(i64, i64, i64) -> i64\n",
+    );
     s
 }
 

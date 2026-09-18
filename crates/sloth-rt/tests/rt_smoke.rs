@@ -48,7 +48,7 @@ fn rt_smoke() {
 
         // ---- strings ----
         let s = inter("ab");
-        assert_eq!(rc::dec_i(strings::sloth_str_len(s)), 2, "interned len");
+        assert_eq!(rc::dec_i(strings::sloth_str_len(s)), 2, "str len");
         let c = strings::sloth_str_char(s, wi(1));
         let td = rc::w_unref(c) as *const strings::StrT;
         assert_eq!(*((*td).data as *const u8), b'b', "char content");
@@ -164,10 +164,15 @@ fn rt_smoke() {
         let o = objects::sloth_obj_new(0, wi(4));
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 1, "obj tracked");
         let w = rc::sloth_weak_new(o);
-        assert_eq!(rc::sloth_weak_upgrade(w), o, "weak on live target");
+        // TH: upgrade returns an owned +1 (CAS retain) — release each result
+        let u0 = rc::sloth_weak_upgrade(w);
+        assert_eq!(u0, o, "weak on live target");
+        rc::sloth_rc_release(u0);
         rc::sloth_rc_retain(o);
         rc::sloth_rc_release(o);
-        assert_eq!(rc::sloth_weak_upgrade(w), o, "shared count alive");
+        let u1 = rc::sloth_weak_upgrade(w);
+        assert_eq!(u1, o, "shared count alive");
+        rc::sloth_rc_release(u1);
         rc::sloth_rc_release(o);
         assert_eq!(rc::sloth_weak_upgrade(w), 0, "dead target weak");
         rc::sloth_weak_release(w);
@@ -175,6 +180,23 @@ fn rt_smoke() {
             rc::dec_i(rc::sloth_rc_live()),
             before,
             "table fully drained"
+        );
+
+        // TH: a weak box follows its target across a relocating growth
+        let mut ga = arrays::sloth_arr_new(wi(2));
+        let gwa = rc::sloth_weak_new(ga);
+        for i in 0..64 {
+            ga = arrays::sloth_arr_push(ga, wi(i));
+        }
+        let gu = rc::sloth_weak_upgrade(gwa);
+        assert_eq!(gu, ga, "weak resolves after relocation");
+        rc::sloth_rc_release(gu);
+        rc::sloth_rc_release(gwa);
+        rc::sloth_rc_release(ga);
+        assert_eq!(
+            rc::dec_i(rc::sloth_rc_live()),
+            before,
+            "relocated weak drained"
         );
 
         // value words are inert no-ops (tag0 short-circuits)
@@ -215,7 +237,7 @@ fn rt_smoke() {
         rc::sloth_rc_release(pth);
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), mb, "mmap tensors drained");
 
-        // tokenizer reads: bytes / unaligned f32 / interned string
+        // tokenizer reads: bytes / unaligned f32 / str
         assert_eq!(mmap::sloth_mmap_u8(h, 0), 4, "u8");
         // must not trap: tokenizer entries are variable-length (unaligned)
         let _ = mmap::sloth_mmap_f32(h, 29);

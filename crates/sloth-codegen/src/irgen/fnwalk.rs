@@ -387,6 +387,30 @@ pub(crate) fn walk_ids_expr(
                 walk_ids_expr(a, push_use, decls);
             }
         }
+        ExprNode::GenCall { callee, args, .. } => {
+            walk_ids_expr(callee, push_use, decls);
+            for a in args {
+                walk_ids_expr(a, push_use, decls);
+            }
+        }
+        ExprNode::Map(pairs) => {
+            for (k, v) in pairs {
+                walk_ids_expr(k, push_use, decls);
+                walk_ids_expr(v, push_use, decls);
+            }
+        }
+        ExprNode::Range { low, high, .. } => {
+            walk_ids_expr(low, push_use, decls);
+            walk_ids_expr(high, push_use, decls);
+        }
+        ExprNode::Pipe { lhs, rhs } | ExprNode::Elvis { lhs, rhs } => {
+            walk_ids_expr(lhs, push_use, decls);
+            walk_ids_expr(rhs, push_use, decls);
+        }
+        ExprNode::Is { lhs, rhs, .. } => {
+            walk_ids_expr(lhs, push_use, decls);
+            walk_ids_expr(rhs, push_use, decls);
+        }
         ExprNode::Field { obj, .. } => walk_ids_expr(obj, push_use, decls),
         ExprNode::Index { obj, idx } => {
             walk_ids_expr(obj, push_use, decls);
@@ -402,6 +426,25 @@ pub(crate) fn walk_ids_expr(
                 walk_ids_expr(x, push_use, decls);
             }
         }
+        // a nested lambda is transparent to capture analysis: identifiers it
+        // uses that are not bound by it (or an enclosing local) are free in
+        // the enclosing lambda too, so they must be captured transitively
+        ExprNode::Lambda(l) => {
+            let mut nested = decls.clone();
+            for p in &l.params {
+                nested.insert(p.name.clone());
+            }
+            let mut all: Vec<String> = Vec::new();
+            {
+                let mut collect = |n: &String| all.push(n.clone());
+                walk_ids_stmt(&l.body, &mut collect, &mut nested);
+            }
+            for n in all {
+                if !nested.contains(&n) {
+                    push_use(&n);
+                }
+            }
+        }
         ExprNode::Int(_)
         | ExprNode::Float(_)
         | ExprNode::Bool(_)
@@ -409,7 +452,6 @@ pub(crate) fn walk_ids_expr(
         | ExprNode::Nil
         | ExprNode::This
         | ExprNode::Super => {}
-        _ => {}
     }
 }
 

@@ -7,15 +7,23 @@
 //!
 //! Every rc-managed handle (object, array, map, string, lambda frame,
 //! payload box, weak box) carries a hidden header 48 bytes BELOW its
-//! payload pointer: `[cnt, size, dtor, aux, weak_head, pad]`. `retain`/
-//! `release` bump the header count; reaching zero runs the entry's death
-//! destructor (cascading field/element releases — mask-free, tag-driven),
-//! invalidates every weak box chained into the header's weak list, then
-//! frees the header+payload chunk. No collector exists, so a missed
-//! release leaks memory rather than crashing; a release of a value word
-//! is an inert no-op by the tag bit alone.
+//! payload pointer: `[cnt, size, dtor, aux, weak_head, weak_cnt]`.
+//! `retain`/`release` bump the header count; reaching zero runs the entry's
+//! death destructor (cascading field/element releases — mask-free,
+//! tag-driven), invalidates every weak box chained into the header's weak
+//! list, then frees the header+payload chunk. No collector exists, so a
+//! missed release leaks memory rather than crashing; a release of a value
+//! word is an inert no-op by the tag bit alone.
+//!
+//! Multithreading (TH): counts are atomic (`fetch_add` Relaxed /
+//! `fetch_sub` Release + Acquire fence). The strong count and a separate
+//! weak count form a split control block: when the last strong reference
+//! drops, the payload dies and all weak targets are invalidated, but the
+//! header chunk stays alive until the last weak box is released. That lets
+//! `upgrade()` CAS-retain the target without racing the free (C++
+//! `weak_ptr::lock` protocol).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// tag bit of a word (LSB): 1 = refcounted handle, 0 = value word
 pub const W_TAG: i64 = 1;
@@ -66,7 +74,8 @@ pub const fn enc_f_bits(bits: u64) -> i64 {
 /// hidden header for a tracked payload (6 words, 48 bytes, payload-aligned)
 #[repr(C)]
 pub(crate) struct Hdr {
-    cnt: u64,
+    /// strong reference count (atomic: shared-memory threads)
+    cnt: AtomicU64,
     /// payload size in bytes (drives the relocating realloc copy)
     size: usize,
     /// death hook executed when the count reaches zero (cascade releases
@@ -76,20 +85,59 @@ pub(crate) struct Hdr {
     aux: u64,
     /// intrusive chain of weak boxes targeting this payload
     weak_head: *mut WeakBox,
-    pad: u64,
+    /// number of live weak boxes targeting this payload; the header chunk is
+    /// not freed at strong-zero until this reaches zero too
+    weak_cnt: AtomicU64,
 }
 
 const HDR_WORDS: usize = 6;
 const HDR_BYTES: usize = HDR_WORDS * 8;
 
-/// weak box payload: `{target, next}` intrusive into the target header;
-/// the box itself is rc-tracked (copy = retain, last release detaches+frees)
+/// weak box payload: `{target, hdr, next}` intrusive into the target header;
+/// the box itself is rc-tracked (copy = retain, last release detaches+frees).
+/// `hdr` keeps the (possibly dead) target header reachable while the box
+/// lives so `upgrade` can CAS the target's strong count safely.
 #[repr(C)]
 pub(crate) struct WeakBox {
     /// raw target payload pointer; 0 = dead
-    target: usize,
+    target: AtomicUsize,
+    /// owning target header (kept alive by `weak_cnt`)
+    hdr: *mut Hdr,
     next: *mut WeakBox,
 }
+
+// ---------------- weak-list spinlock ----------------
+
+/// Guards mutation of any header's intrusive weak chain (link / unlink /
+/// invalidate / relocate repoint). Held for very short critical sections and
+/// never across a destructor call, so it cannot participate in a cycle.
+static WEAK_LOCK: AtomicBool = AtomicBool::new(false);
+
+struct WeakGuard;
+
+impl WeakGuard {
+    #[inline]
+    fn lock() -> WeakGuard {
+        while WEAK_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while WEAK_LOCK.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        }
+        WeakGuard
+    }
+}
+
+impl Drop for WeakGuard {
+    #[inline]
+    fn drop(&mut self) {
+        WEAK_LOCK.store(false, Ordering::Release);
+    }
+}
+
+// ---------------- weak API ----------------
 
 #[no_mangle]
 pub extern "C" fn sloth_weak_new(h: i64) -> i64 {
@@ -99,45 +147,82 @@ pub extern "C" fn sloth_weak_new(h: i64) -> i64 {
     unsafe {
         let b = rc_addr(std::mem::size_of::<WeakBox>(), Some(weak_dtor)) as *mut WeakBox;
         let thdr = hdr_of(w_unref(h)) as *mut Hdr;
+        (*b).target = AtomicUsize::new(w_unref(h));
+        (*b).hdr = thdr;
+        let _g = WeakGuard::lock();
         (*b).next = (*thdr).weak_head;
         (*thdr).weak_head = b;
-        (*b).target = w_unref(h);
+        (*thdr).weak_cnt.fetch_add(1, Ordering::Relaxed);
         w_ref(b as usize)
     }
 }
 
 /// weak box death: detach from the (maybe already dead) target; the rc core
-/// frees the box chunk itself
+/// frees the box chunk itself. Drops this box's weak reference and frees the
+/// target header if the target had already died and no weak boxes remain.
 fn weak_dtor(b: usize, _aux: u64) {
     unsafe {
         let bb = b as *mut WeakBox;
-        let t = (*bb).target;
-        if t == 0 {
+        let hdr = (*bb).hdr as *mut Hdr;
+        if hdr.is_null() {
             return;
         }
-        let thdr = (t - HDR_BYTES) as *mut Hdr;
-        // walk the target's weak chain and unlink this box
-        let mut prev: *mut *mut WeakBox = &mut (*thdr).weak_head;
-        while !(*prev).is_null() {
-            if *prev == bb {
-                *prev = (*bb).next;
-                return;
+        {
+            let _g = WeakGuard::lock();
+            let mut prev: *mut *mut WeakBox = &mut (*hdr).weak_head;
+            while !(*prev).is_null() {
+                if *prev == bb {
+                    *prev = (*bb).next;
+                    break;
+                }
+                prev = &mut (*(*prev)).next;
             }
-            prev = &mut (*(*prev)).next;
+        }
+        let wc = (*hdr).weak_cnt.fetch_sub(1, Ordering::AcqRel);
+        if wc == 1 && (*hdr).cnt.load(Ordering::Acquire) == 0 {
+            libc::free(hdr as *mut libc::c_void);
         }
     }
 }
 
-/// upgrade a weak box word to the target handle word (0 = dead)
+/// upgrade a weak box word to the target handle word (0 = dead). The returned
+/// handle carries an owned +1 (codegen must not retain it again): the CAS
+/// either wins the race with the last strong release or fails on a dead
+/// target — it never resurrects a destroyed object, and the header stays
+/// mapped while this box lives.
 #[no_mangle]
 pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
     if !w_is_ref(w) {
         return 0;
     }
-    let t = unsafe { (*(w_unref(w) as *mut WeakBox)).target };
-    if t == 0 {
-        0
-    } else {
+    unsafe {
+        let bb = w_unref(w) as *mut WeakBox;
+        let hdr = (*bb).hdr as *mut Hdr;
+        if hdr.is_null() {
+            return 0;
+        }
+        // hold the weak lock so a concurrent relocate cannot free the old
+        // payload between the target read and the retain
+        let _g = WeakGuard::lock();
+        let t = (*bb).target.load(Ordering::Acquire);
+        if t == 0 {
+            return 0;
+        }
+        loop {
+            let c = (*hdr).cnt.load(Ordering::Acquire);
+            if c == 0 {
+                return 0;
+            }
+            match (*hdr).cnt.compare_exchange_weak(
+                c,
+                c + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue,
+            }
+        }
         w_ref(t)
     }
 }
@@ -150,6 +235,8 @@ pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
     }
     0
 }
+
+// ---------------- diagnostics ----------------
 
 /// number of live tracked handles (diagnostics; tagged int word)
 #[no_mangle]
@@ -167,18 +254,20 @@ pub extern "C" fn sloth_rc_drops() -> i64 {
 
 static DROPS: AtomicU64 = AtomicU64::new(0);
 
+// ---------------- core ----------------
+
 /// allocate a tracked chunk: header + zeroed payload; returns the tagged
 /// handle word. Payload zeroing keeps the rt contract (fresh slots are nil).
 pub(crate) unsafe fn rc_addr(n: usize, dtor: Option<fn(usize, u64)>) -> usize {
     let raw = libc::malloc(n + HDR_BYTES) as *mut u8;
     let hdr = raw as *mut Hdr;
     *hdr = Hdr {
-        cnt: 1,
+        cnt: AtomicU64::new(1),
         size: n,
         dtor,
         aux: 0,
         weak_head: std::ptr::null_mut(),
-        pad: 0,
+        weak_cnt: AtomicU64::new(0),
     };
     let payload = raw.add(HDR_BYTES);
     std::ptr::write_bytes(payload, 0, n);
@@ -205,15 +294,15 @@ pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {
     if w_is_ref(w) {
         unsafe {
             let h = hdr_of(w_unref(w)) as *mut Hdr;
-            (*h).cnt += 1;
+            (*h).cnt.fetch_add(1, Ordering::Relaxed);
         }
     }
     w
 }
 
 /// release: drop the count of a tracked handle; zero runs the death
-/// destructor (cascading tagged-word releases), drains the weak chain and
-/// frees header+payload (no-op for value words)
+/// destructor (cascading tagged-word releases), invalidates the weak chain
+/// and frees header+payload once no weak box remains (no-op for value words)
 #[no_mangle]
 pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
     DROPS.fetch_add(1, Ordering::Relaxed);
@@ -223,32 +312,36 @@ pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
     unsafe {
         let p = w_unref(w);
         let hdr = hdr_of(p);
-        if (*hdr).cnt > 1 {
-            (*hdr).cnt -= 1;
+        if (*hdr).cnt.fetch_sub(1, Ordering::Release) != 1 {
             return w;
         }
+        // last strong reference: acquire the dtor's reads/writes
+        fence(Ordering::Acquire);
         let dtor = (*hdr).dtor.take();
         let aux = (*hdr).aux;
-        let weaks = (*hdr).weak_head;
-        // drains the weak chain first: boxes must see no live target
-        let mut wb = weaks;
-        while !wb.is_null() {
-            let next = (*wb).next;
-            (*wb).target = 0;
-            (*wb).next = std::ptr::null_mut();
-            wb = next;
+        // invalidate every weak box (their own rc keeps the boxes alive).
+        // The header chunk itself is retained while weak boxes exist.
+        {
+            let _g = WeakGuard::lock();
+            let mut wb = (*hdr).weak_head;
+            while !wb.is_null() {
+                (*wb).target.store(0, Ordering::Release);
+                wb = (*wb).next;
+            }
         }
         RC_LIVE.fetch_sub(1, Ordering::Relaxed);
         if let Some(dtor) = dtor {
             dtor(p, aux);
         }
-        libc::free(hdr_of(p) as *mut libc::c_void);
+        if (*hdr).weak_cnt.load(Ordering::Acquire) == 0 {
+            libc::free(hdr as *mut libc::c_void);
+        }
     }
     w
 }
 
 /// relocate a tracked chunk (realloc path): header followed by payload into
-/// fresh memory; the weak chain's {target, next} nodes follow the contents
+/// fresh memory; the weak chain's {target, hdr} nodes follow the contents
 /// so upgrade() keeps resolving to the new payload. min(old.n, n) bytes are
 /// copied from the old payload.
 pub(crate) unsafe fn relocate(old_w: i64, n: usize) -> i64 {
@@ -260,18 +353,29 @@ pub(crate) unsafe fn relocate(old_w: i64, n: usize) -> i64 {
     // carry the identity (cnt/dtor/aux/weaks) to the new header field-wise
     // (UB-check friendly: copy_nonoverlapping::<Hdr> trips the alignment
     // guard on some toolchains even for legitimately aligned malloc blocks)
-    (*new_hdr).cnt = (*old_hdr).cnt;
+    (*new_hdr).cnt.store(
+        (*old_hdr).cnt.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
     (*new_hdr).size = n;
     (*new_hdr).dtor = (*old_hdr).dtor;
     (*new_hdr).aux = (*old_hdr).aux;
     (*new_hdr).weak_head = (*old_hdr).weak_head;
-    (*new_hdr).pad = 0;
+    (*new_hdr).weak_cnt.store(
+        (*old_hdr).weak_cnt.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
     std::ptr::copy_nonoverlapping(old_p as *const u8, new_p as *mut u8, copy);
-    // weak chain nodes hold the old raw target: repoint them
-    let mut wb = (*new_hdr).weak_head;
-    while !wb.is_null() {
-        (*wb).target = new_p;
-        wb = (*wb).next;
+    // weak chain nodes hold the old raw target: repoint them (under the weak
+    // lock so a concurrent upgrade sees a consistent {target, hdr})
+    {
+        let _g = WeakGuard::lock();
+        let mut wb = (*new_hdr).weak_head;
+        while !wb.is_null() {
+            (*wb).target.store(new_p, Ordering::Release);
+            (*wb).hdr = new_hdr;
+            wb = (*wb).next;
+        }
     }
     libc::free(old_hdr as *mut libc::c_void);
     RC_LIVE.fetch_sub(1, Ordering::Relaxed);

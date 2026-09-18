@@ -81,7 +81,14 @@ impl ModEmitter {
         if kind == BR_LAMBDA {
             for j in 0..ncap {
                 let jw = fresh(&mut vc);
-                body.push_str(&format!("    {} = arith.constant {} : i64\n", jw, j));
+                // the frame stores capture `j` at the *tagged* index word
+                // (`enc_i_lit(j)`); sloth_obj_field decodes it, so the bridge
+                // must hand over the same encoding (multi-capture fix)
+                body.push_str(&format!(
+                    "    {} = arith.constant {} : i64\n",
+                    jw,
+                    enc_i_lit(j as i64)
+                ));
                 let c = fresh(&mut vc);
                 body.push_str(&format!(
                     "    {} = func.call @sloth_obj_field(%p0, {}) : (i64, i64) -> i64\n",

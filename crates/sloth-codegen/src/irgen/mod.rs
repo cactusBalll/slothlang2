@@ -36,6 +36,7 @@ mod module;
 mod state;
 mod stmt;
 mod tensor;
+mod thread;
 mod tybind;
 mod util;
 
@@ -65,6 +66,8 @@ pub(crate) use state::*;
 pub(crate) use stmt::*;
 #[allow(unused_imports)]
 pub(crate) use tensor::*;
+#[allow(unused_imports)]
+pub(crate) use thread::*;
 #[allow(unused_imports)]
 pub(crate) use tybind::*;
 #[allow(unused_imports)]

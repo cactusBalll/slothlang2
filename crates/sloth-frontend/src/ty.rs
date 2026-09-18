@@ -27,6 +27,14 @@ pub enum Ty {
     /// stackful coroutine handle (CE): single payload type Y shared by the
     /// resume/yield channel
     Fiber(TyId),
+    /// OS-thread join handle (TH): result type R returned by join()
+    JoinHandle(TyId),
+    /// mpmc channel (TH): element type T
+    Channel(TyId),
+    /// opaque pthread mutex handle (TH)
+    Mutex,
+    /// opaque atomic-int cell (TH; 63-bit word semantics)
+    AtomicInt,
     Dyn(String),
     /// type param placeholder (during monomorphization substitution)
     Tp(String),
@@ -131,6 +139,14 @@ impl Reg {
                 let ne = self.subst(e, map);
                 self.mk(Ty::Fiber(ne))
             }
+            Ty::JoinHandle(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::JoinHandle(ne))
+            }
+            Ty::Channel(e) => {
+                let ne = self.subst(e, map);
+                self.mk(Ty::Channel(ne))
+            }
             other => self.mk(other.clone()),
         }
     }
@@ -162,6 +178,10 @@ fn fmt_ty(t: &Ty) -> String {
         Ty::Opt(e) => format!("opt:{}", e.0),
         Ty::Weak(e) => format!("weak:{}", e.0),
         Ty::Fiber(e) => format!("fiber:{}", e.0),
+        Ty::JoinHandle(e) => format!("joinhandle:{}", e.0),
+        Ty::Channel(e) => format!("channel:{}", e.0),
+        Ty::Mutex => "mutex".to_string(),
+        Ty::AtomicInt => "atomicint".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("tp:{}", n),
     }
@@ -183,6 +203,10 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Opt(_e) => "opt".to_string(),
         Ty::Weak(_e) => "weak".to_string(),
         Ty::Fiber(_e) => "fiber".to_string(),
+        Ty::JoinHandle(_e) => "JoinHandle".to_string(),
+        Ty::Channel(_e) => "Channel".to_string(),
+        Ty::Mutex => "Mutex".to_string(),
+        Ty::AtomicInt => "AtomicInt".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("?tp:{}", n),
     }

@@ -119,6 +119,28 @@ impl ModEmitter {
                     let u0 = self.r.mk(Ty::Unit);
                     return self.r.mk(Ty::Fiber(u0));
                 }
+                // TH builtin surfaces: JoinHandle<R> / Channel<T> / Mutex /
+                // AtomicInt (no source declaration required)
+                if n == "JoinHandle" {
+                    if let Some(e0) = a.into_iter().next() {
+                        return self.r.mk(Ty::JoinHandle(e0));
+                    }
+                    let u0 = self.r.mk(Ty::Unit);
+                    return self.r.mk(Ty::JoinHandle(u0));
+                }
+                if n == "Channel" {
+                    if let Some(e0) = a.into_iter().next() {
+                        return self.r.mk(Ty::Channel(e0));
+                    }
+                    let u0 = self.r.mk(Ty::Unit);
+                    return self.r.mk(Ty::Channel(u0));
+                }
+                if n == "Mutex" && a.is_empty() {
+                    return self.r.mk(Ty::Mutex);
+                }
+                if n == "AtomicInt" && a.is_empty() {
+                    return self.r.mk(Ty::AtomicInt);
+                }
                 // generic class instance: C<A1,A2> -> monomorphic C_<A>_...
                 if !a.is_empty() {
                     if let Some((_, cdef)) = self.class_defs.get(n).cloned() {
@@ -232,6 +254,26 @@ impl ModEmitter {
     pub(crate) fn is_opt_val(&self, t: TyId) -> bool {
         self.opt_inner(t).is_some()
     }
+    /// Send marker (design §4.2, first cut): a value is shareable across a
+    /// thread boundary unless it contains a thread-confined `Fiber<Y>`.
+    /// Shallow structural walk (class internals are not traversed — see
+    /// design risk #1).
+    pub(crate) fn send_ok(&self, t: TyId, depth: usize) -> bool {
+        if depth > 8 {
+            return true;
+        }
+        match self.r.get(t).clone() {
+            Ty::Fiber(_) => false,
+            Ty::Array(e)
+            | Ty::Opt(e)
+            | Ty::Weak(e)
+            | Ty::JoinHandle(e)
+            | Ty::Channel(e) => self.send_ok(e, depth + 1),
+            Ty::Map(k, v) => self.send_ok(k, depth + 1) && self.send_ok(v, depth + 1),
+            _ => true,
+        }
+    }
+
     pub fn is_ref(&self, t: TyId) -> bool {
         match self.r.get(t) {
             // optionals are ref-shaped when their payload is (value optionals
@@ -248,6 +290,10 @@ impl ModEmitter {
                     | Ty::Dyn(_)
                     | Ty::Weak(_)
                     | Ty::Fiber(_)
+                    | Ty::JoinHandle(_)
+                    | Ty::Channel(_)
+                    | Ty::Mutex
+                    | Ty::AtomicInt
                     | Ty::Range
             ),
         }
@@ -500,6 +546,12 @@ impl ModEmitter {
             }
             (Ty::Array(x), Ty::Array(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
             (Ty::Fiber(x), Ty::Fiber(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
+            (Ty::JoinHandle(x), Ty::JoinHandle(y)) => {
+                self.surface_compat(self.r.get(*x), self.r.get(*y))
+            }
+            (Ty::Channel(x), Ty::Channel(y)) => {
+                self.surface_compat(self.r.get(*x), self.r.get(*y))
+            }
             // tensor surfaces require element AND rank to match exactly
             (Ty::Tensor(x, rx), Ty::Tensor(y, ry)) => {
                 rx == ry && self.surface_compat(self.r.get(*x), self.r.get(*y))
@@ -599,6 +651,12 @@ impl ModEmitter {
             }
             Ty::Fiber(e) => {
                 format!("Fiber<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
+            }
+            Ty::JoinHandle(e) => {
+                format!("JoinHandle<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
+            }
+            Ty::Channel(e) => {
+                format!("Channel<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
             }
             other => sloth_frontend::ty::ty_name(other),
         }

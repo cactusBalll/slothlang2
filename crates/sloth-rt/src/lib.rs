@@ -6,6 +6,7 @@
 pub mod alloc;
 pub mod arrays;
 pub mod boxopt;
+pub mod channel;
 pub mod console;
 pub mod externs;
 pub mod fiber;
@@ -17,5 +18,7 @@ pub mod panics;
 pub mod ranges;
 pub mod rc;
 pub mod strings;
+pub mod sync;
 pub mod tensors;
+pub mod thread;
 pub mod vtable;

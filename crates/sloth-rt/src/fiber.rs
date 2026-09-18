@@ -18,6 +18,7 @@
 use crate::panics;
 use crate::rc::{self, w_is_ref, w_unref};
 use crate::strings::StrT;
+use std::cell::{Cell, UnsafeCell};
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -58,6 +59,9 @@ pub(crate) struct FiberObj {
     /// setjmp landing pad used by cooperative cancellation
     jb: [u64; 32],
     cancel: i64,
+    /// OS thread that owns this fiber (thread confinement, TH-P2): fiber
+    /// primitives panic when invoked from another thread
+    owner_tid: u64,
     /// addresses of live owned-local slots on this fiber's stack; unwinding
     /// (error/cancel/abandon) releases each slot's current word so skipped
     /// frames cannot leak references
@@ -147,31 +151,58 @@ core::arch::global_asm!(
     ".size sloth_fiber_trampoline, .-sloth_fiber_trampoline",
 );
 
-// ---------------- current fiber ----------------
+// ---------------- current fiber (per OS thread) ----------------
 
-static mut CUR: *mut FiberObj = std::ptr::null_mut();
+// per-thread running fiber and its process-stack sentinel (TH-P2: fiber
+// state is thread-confined; each OS thread owns an independent fiber set)
+thread_local! {
+    static CUR: Cell<*mut FiberObj> = const { Cell::new(std::ptr::null_mut()) };
+    static MAIN: Cell<*mut FiberObj> = const { Cell::new(std::ptr::null_mut()) };
+}
 
-/// process-stack sentinel fiber: the resumer context of top-level code
-static mut MAIN: FiberObj = FiberObj {
-    state: STATE_RUNNING,
-    prev: std::ptr::null_mut(),
-    inbox: 0,
-    stack_base: std::ptr::null_mut(),
-    stack_size: 0,
-    ctx: Ctx::zero(),
-    entry: 0,
-    init: 0,
-    jb: [0; 32],
-    cancel: 0,
-    slots: Vec::new(),
-};
+/// build the process-stack sentinel fiber for the current thread
+fn fresh_main() -> FiberObj {
+    FiberObj {
+        state: STATE_RUNNING,
+        prev: std::ptr::null_mut(),
+        inbox: 0,
+        stack_base: std::ptr::null_mut(),
+        stack_size: 0,
+        ctx: Ctx::zero(),
+        entry: 0,
+        init: 0,
+        jb: [0; 32],
+        cancel: 0,
+        owner_tid: cur_tid(),
+        slots: Vec::new(),
+    }
+}
+
+/// current thread identity used for fiber ownership checks
+#[inline]
+fn cur_tid() -> u64 {
+    unsafe { libc::pthread_self() as u64 }
+}
 
 #[inline]
 unsafe fn cur() -> *mut FiberObj {
-    if CUR.is_null() {
-        CUR = core::ptr::addr_of_mut!(MAIN);
-    }
-    CUR
+    CUR.with(|c| {
+        let p = c.get();
+        if !p.is_null() {
+            return p;
+        }
+        // lazily install this thread's process-stack sentinel (leaked: it is
+        // the root context for the thread's whole lifetime)
+        let m = Box::into_raw(Box::new(fresh_main()));
+        MAIN.with(|mm| mm.set(m));
+        c.set(m);
+        m
+    })
+}
+
+#[inline]
+unsafe fn main_ptr() -> *mut FiberObj {
+    MAIN.with(|m| m.get())
 }
 
 /// once any fiber exists the emitter's slot-tracking calls become live
@@ -179,7 +210,14 @@ static FIBER_ON: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 unsafe fn trackable() -> bool {
-    FIBER_ON.load(Ordering::Relaxed) != 0 && !CUR.is_null() && CUR != core::ptr::addr_of_mut!(MAIN)
+    if FIBER_ON.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    let c = CUR.with(|x| x.get());
+    if c.is_null() {
+        return false;
+    }
+    c != main_ptr()
 }
 
 /// register an owned-local slot on the running fiber (no-op on the main stack
@@ -188,7 +226,7 @@ unsafe fn trackable() -> bool {
 pub extern "C" fn sloth_fiber_track(addr_w: i64) -> i64 {
     unsafe {
         if trackable() {
-            (*CUR).slots.push(addr_w as usize);
+            (*cur()).slots.push(addr_w as usize);
         }
     }
     0
@@ -200,8 +238,8 @@ pub extern "C" fn sloth_fiber_untrack(addr_w: i64) -> i64 {
     unsafe {
         if trackable() {
             let a = addr_w as usize;
-            if let Some(p) = (*CUR).slots.iter().rposition(|x| *x == a) {
-                (*CUR).slots.remove(p);
+            if let Some(p) = (*cur()).slots.iter().rposition(|x| *x == a) {
+                (*cur()).slots.remove(p);
             }
         }
     }
@@ -210,24 +248,30 @@ pub extern "C" fn sloth_fiber_untrack(addr_w: i64) -> i64 {
 
 // ---------------- guard page diagnostics ----------------
 
-const MAX_GUARDS: usize = 128;
-static mut GUARDS: [(usize, usize); MAX_GUARDS] = [(0, 0); MAX_GUARDS];
-static GUARD_N: AtomicUsize = AtomicUsize::new(0);
+/// fixed lock-free registry of guard ranges (multithreaded fibers): a slot is
+/// claimed by CAS on its low word; the handler scans without locking (a
+/// half-inserted slot simply never matches)
+const MAX_GUARDS: usize = 256;
+static GUARD_LO: [AtomicUsize; MAX_GUARDS] = [const { AtomicUsize::new(0) }; MAX_GUARDS];
+static GUARD_HI: [AtomicUsize; MAX_GUARDS] = [const { AtomicUsize::new(0) }; MAX_GUARDS];
 
 unsafe fn register_guard(lo: usize, hi: usize) {
-    let n = GUARD_N.load(Ordering::Relaxed);
-    if n < MAX_GUARDS {
-        GUARDS[n] = (lo, hi);
-        GUARD_N.store(n + 1, Ordering::Relaxed);
+    for i in 0..MAX_GUARDS {
+        if GUARD_LO[i]
+            .compare_exchange(0, lo, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            GUARD_HI[i].store(hi, Ordering::Release);
+            return;
+        }
     }
 }
 
 unsafe fn unregister_guard(lo: usize) {
-    let n = GUARD_N.load(Ordering::Relaxed);
-    for i in 0..n {
-        if GUARDS[i].0 == lo {
-            GUARDS[i] = GUARDS[n - 1];
-            GUARD_N.store(n - 1, Ordering::Relaxed);
+    for i in 0..MAX_GUARDS {
+        if GUARD_LO[i].load(Ordering::Acquire) == lo {
+            // clear the low word first so a stale high word never matches
+            GUARD_LO[i].store(0, Ordering::Release);
             return;
         }
     }
@@ -239,36 +283,49 @@ extern "C" fn segv_handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: 
     } else {
         unsafe { (*info).si_addr() as usize }
     };
-    unsafe {
-        let n = GUARD_N.load(Ordering::Relaxed);
-        for i in 0..n {
-            let (lo, hi) = GUARDS[i];
-            if addr >= lo && addr < hi {
-                let msg = b"sloth panic: fiber stack overflow\n";
+    for i in 0..MAX_GUARDS {
+        let lo = GUARD_LO[i].load(Ordering::Acquire);
+        if lo == 0 {
+            continue;
+        }
+        let hi = GUARD_HI[i].load(Ordering::Acquire);
+        if addr >= lo && addr < hi {
+            let msg = b"sloth panic: fiber stack overflow\n";
+            unsafe {
                 libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
                 libc::_exit(1);
             }
         }
-        // not a fiber stack: restore default disposition and let it re-fault
+    }
+    // not a fiber stack: restore default disposition and let it re-fault
+    unsafe {
         libc::signal(libc::SIGSEGV, libc::SIG_DFL);
     }
 }
 
 static INSTALL_SIG: AtomicUsize = AtomicUsize::new(0);
 const ALT_SIZE: usize = 64 * 1024;
-static mut ALT_STACK: [u8; ALT_SIZE] = [0; ALT_SIZE];
+
+thread_local! {
+    /// per-thread alternate signal stack (a faulted fiber stack cannot host
+    /// its own handler)
+    static ALT_STACK: UnsafeCell<[u8; ALT_SIZE]> = const { UnsafeCell::new([0u8; ALT_SIZE]) };
+}
 
 unsafe fn install_sigsegv() {
+    // every OS thread using fibers needs its own alt stack
+    ALT_STACK.with(|a| {
+        let ss = libc::stack_t {
+            ss_sp: a.get() as *mut libc::c_void,
+            ss_flags: 0,
+            ss_size: ALT_SIZE,
+        };
+        libc::sigaltstack(&ss, std::ptr::null_mut());
+    });
+    // install the handler once per process
     if INSTALL_SIG.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    // overflow faults cannot run a handler on the exhausted fiber stack
-    let ss = libc::stack_t {
-        ss_sp: core::ptr::addr_of_mut!(ALT_STACK) as *mut libc::c_void,
-        ss_flags: 0,
-        ss_size: ALT_SIZE,
-    };
-    libc::sigaltstack(&ss, std::ptr::null_mut());
     let mut sa: libc::sigaction = std::mem::zeroed();
     sa.sa_sigaction = segv_handler as *const () as usize;
     sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
@@ -351,8 +408,10 @@ unsafe fn fiber_setup(entry_w: i64, init_w: i64, stack_w: i64) -> i64 {
         rc::sloth_rc_retain(init_w)
     };
     f.cancel = 0;
+    f.owner_tid = cur_tid();
     f.slots = Vec::new();
     FIBER_ON.store(1, Ordering::Relaxed);
+    LIVE_FIBERS.with(|c| c.set(c.get() + 1));
     prime_ctx(p);
     rc::w_ref(p as usize)
 }
@@ -434,6 +493,8 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
     if ff.state != STATE_ERROR {
         ff.state = STATE_DONE;
     }
+    // this fiber has ended: it no longer counts against thread-exit discipline
+    LIVE_FIBERS.with(|c| c.set(c.get().saturating_sub(1)));
     // release the fiber's own +1 on the entry argument (the closure borrowed
     // it) and any unconsumed resume payload
     if ff.init != 0 {
@@ -456,7 +517,7 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
     }
     let to = ff.prev;
     (*to).inbox = 0;
-    CUR = to;
+    CUR.with(|c| c.set(to));
     sloth_fiber_switch_asm(&mut ff.ctx, &(*to).ctx);
     core::hint::unreachable_unchecked()
 }
@@ -470,6 +531,9 @@ pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
     }
     unsafe {
         let f = w_unref(f_w) as *mut FiberObj;
+        if (*f).owner_tid != cur_tid() {
+            panics::panic_msg("fiber resumed from a different thread");
+        }
         if (*f).state != STATE_NEW && (*f).state != STATE_SUSPENDED {
             return 0;
         }
@@ -480,9 +544,9 @@ pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
         };
         let from = cur();
         (*f).prev = from;
-        CUR = f;
+        CUR.with(|c| c.set(f));
         sloth_fiber_switch_asm(&mut (*from).ctx, &(*f).ctx);
-        CUR = from;
+        CUR.with(|c| c.set(from));
         let got = (*from).inbox;
         (*from).inbox = 0;
         if (*f).state == STATE_SUSPENDED {
@@ -503,6 +567,9 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
     }
     unsafe {
         let f = w_unref(f_w) as *mut FiberObj;
+        if (*f).owner_tid != cur_tid() {
+            panics::panic_msg("fiber transferred to from a different thread");
+        }
         if (*f).state != STATE_NEW && (*f).state != STATE_SUSPENDED {
             return 0;
         }
@@ -516,9 +583,9 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
             // bootstrap a never-started fiber so its first yield has a target
             (*f).prev = from;
         }
-        CUR = f;
+        CUR.with(|c| c.set(f));
         sloth_fiber_switch_asm(&mut (*from).ctx, &(*f).ctx);
-        CUR = from;
+        CUR.with(|c| c.set(from));
         let got = (*from).inbox;
         (*from).inbox = 0;
         if (*f).state == STATE_SUSPENDED {
@@ -536,6 +603,9 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
 pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
     unsafe {
         let f = cur();
+        if (*f).owner_tid != cur_tid() {
+            panics::panic_msg("fiber.yield from a different thread");
+        }
         if (*f).prev.is_null() {
             panics::panic_msg("fiber.yield outside a fiber");
         }
@@ -550,9 +620,9 @@ pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
         } else {
             rc::sloth_rc_retain(v_w)
         };
-        CUR = to;
+        CUR.with(|c| c.set(to));
         sloth_fiber_switch_asm(&mut (*f).ctx, &(*to).ctx);
-        CUR = f;
+        CUR.with(|c| c.set(f));
         (*f).state = STATE_RUNNING;
         incoming
     }
@@ -640,6 +710,9 @@ pub extern "C" fn sloth_fiber_cancel(f_w: i64) -> i64 {
     }
     unsafe {
         let f = w_unref(f_w) as *mut FiberObj;
+        if (*f).owner_tid != cur_tid() {
+            panics::panic_msg("fiber cancelled from a different thread");
+        }
         if (*f).state != STATE_SUSPENDED {
             return 0;
         }
@@ -647,10 +720,29 @@ pub extern "C" fn sloth_fiber_cancel(f_w: i64) -> i64 {
         (*f).inbox = 0;
         let from = cur();
         (*f).prev = from;
-        CUR = f;
+        CUR.with(|c| c.set(f));
         sloth_fiber_switch_asm(&mut (*from).ctx, &(*f).ctx);
-        CUR = from;
+        CUR.with(|c| c.set(from));
     }
+    0
+}
+
+// per-thread count of live (non-ended) fibers; the OS-thread trampoline
+// asserts it is clean before the thread exits (design §5.4)
+thread_local! {
+    static LIVE_FIBERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// called at OS-thread exit by the thread trampoline (TH-P2 discipline)
+#[no_mangle]
+pub extern "C" fn sloth_fiber_thread_exit() -> i64 {
+    LIVE_FIBERS.with(|c| {
+        #[cfg(debug_assertions)]
+        if c.get() != 0 {
+            panics::panic_msg("abandoned fibers on thread exit");
+        }
+        c.set(0);
+    });
     0
 }
 

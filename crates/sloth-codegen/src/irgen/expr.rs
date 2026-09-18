@@ -278,7 +278,7 @@ impl ModEmitter {
                         fin, curw
                     ));
                     let t = self.r.mk(Ty::Str);
-                    // rc patch B: pooled str producer
+                    // rc patch B: fresh `str` producer (owned +1)
                     self.dangling_producer(fw, &fin, t);
                     return (fin, t);
                 }
@@ -321,7 +321,7 @@ impl ModEmitter {
                     fin, curw
                 ));
                 let t = self.r.mk(Ty::Str);
-                // rc patch B: pooled str producer
+                // rc patch B: fresh `str` producer (owned +1)
                 self.dangling_producer(fw, &fin, t);
                 (fin, t)
             }
@@ -671,7 +671,7 @@ impl ModEmitter {
                         r, a, b
                     ));
                     let st = self.r.mk(Ty::Str);
-                    // rc patch B: pooled str producer
+                    // rc patch B: fresh `str` producer (owned +1)
                     self.dangling_producer(fw, &r, st);
                     return (r, st);
                 }
@@ -1935,6 +1935,53 @@ impl ModEmitter {
                 }
             }
         }
+        // multithreading extension TH-P1/P2 builtin modules: `thread.*`,
+        // `channel.*`, `mutex.*`, `atomic.*` (recognized before any receiver
+        // evaluation; ownership is handled by the runtime entry points)
+        if let ExprNode::Field { obj, name } = &callee.node {
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "thread") {
+                match name.as_str() {
+                    "spawn" if args.len() == 2 => {
+                        return self.emit_thread_spawn(fw, &args[0], &args[1], pos);
+                    }
+                    "current_id" if args.is_empty() => {
+                        return self.emit_thread_current_id(fw);
+                    }
+                    "yield_now" if args.is_empty() => {
+                        return self.emit_thread_yield(fw);
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "channel") && name == "new" {
+                let targ = match targs_in.and_then(|v| v.first()) {
+                    Some(t) => self.ty_of(t),
+                    None => {
+                        return self.th_bail(
+                            fw,
+                            pos,
+                            "channel.new requires an explicit element type: `channel.new<T>(capacity)`",
+                        )
+                    }
+                };
+                if args.len() == 1 {
+                    return self.emit_channel_new(fw, targ, &args[0], pos);
+                }
+                return self.th_bail(fw, pos, "channel.new requires a capacity argument");
+            }
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "mutex")
+                && name == "new"
+                && args.is_empty()
+            {
+                return self.emit_mutex_new(fw);
+            }
+            if matches!(&obj.node, ExprNode::Ident(m) if m == "atomic")
+                && name == "new"
+                && args.len() == 1
+            {
+                return self.emit_atomic_new(fw, &args[0], pos);
+            }
+        }
         // TE-P3 scalar math faces (design D6): `float_sqrt/exp/sin/cos/tan/pow`
         if let ExprNode::Ident(fname) = &callee.node {
             let sym = match fname.as_str() {
@@ -2157,6 +2204,12 @@ impl ModEmitter {
                 }
             }
         }
+        // TH builtin receiver faces: JoinHandle/Channel/Mutex/AtomicInt
+        if let Some((recvv, rt)) = recv.clone() {
+            if let Some(out) = self.emit_thread_recv_method(fw, &recvv, rt, &name, &argv, pos) {
+                return out;
+            }
+        }
         // Weak<T>.upgrade() receiver face (patch 43): returns the target
         // T? (ref targets keep the handle word; boxed value targets ride
         // their box), retained as a producer-owned strong borrow
@@ -2170,10 +2223,9 @@ impl ModEmitter {
                     ));
                     let ot = self.r.mk(Ty::Opt(inner));
                     if self.is_ref(ot) {
-                        // strong borrow over the live target (nil = dead, no-op)
-                        let rv2 = self.emit_retain(fw, &r);
-                        self.dangling_producer(fw, &rv2, ot);
-                        return (rv2, ot);
+                        // TH: upgrade CAS-retains the target and returns an
+                        // owned +1 (nil = dead); trailing as a producer temp
+                        self.dangling_producer(fw, &r, ot);
                     }
                     return (r, ot);
                 }
