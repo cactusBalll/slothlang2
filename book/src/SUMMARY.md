@@ -41,6 +41,10 @@
 - [23. 内存管理：ARC 所有权协议](ch23_memory_arc.md)
 - [24. 内建函数](ch24_builtins.md)
 
+# 张量扩展
+
+- [25. 张量扩展与 llama2.c 推理](ch25_llama.md)
+
 # 附录
 
 - [A. 与设计文档的偏差清单](appendix_a_deviations.md)

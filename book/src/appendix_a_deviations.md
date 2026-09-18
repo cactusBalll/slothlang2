@@ -72,3 +72,20 @@ print(a + 0.0);    // 1        运行时编码路径 -> 多丢 1 位
 
 - 一次编译尽量报多个错误（batch diagnostics），不做 fail-fast，与设计 §4.2 一致。
 - 错误消息为英文，携带源码位置（行:列）。
+
+## A.7 张量扩展（TE-P0–TE-P4）
+
+《张量扩展设计文档》以自定义 dialect + GC 为假设；实现改为标准 dialect + ARC
+（见第 25 章）。主要偏差：
+
+| 设计 | 实现 | 性质 |
+| --- | --- | --- |
+| §5.1 自定义 `!sloth.tensor` / `sloth.tensor_*` | 标准 `tensor`/`linalg`/`memref`/`scf`/`math` 组合 + `sloth_tensor_*` C-ABI 助手 | 定案 |
+| §5.1 数据区免 GC 扫描 + mmap 外部根 | 无 GC；`Tensor` = ARC 描述符（7 词）+ 非追踪 `calloc` 数据缓冲，视图用 `owner` 保活（无扫描器，数据区天然不参与） | 定案（架构改向） |
+| §4.4 `view_as_f32` 零拷贝 f32 视图 | 元素是 f64，checkpoint 是 f32 → **一次性加宽拷贝**（`sloth_tensor_from_f32_ptr`），内存 ×2；真零拷贝需后续 `Tensor<f32,R>` | 定案 |
+| rank 作为泛型整型常量参数 | `Ty::Tensor(TyId, u32)`，仅整数字面量、限 rank 1..=3，**独立通道**不进泛型单态化帧 | 定案（受控扩展） |
+| 广播逐元素运算 | 要求 rank 与各轴完全同形，否则运行期 panic（`sloth_tensor_shape_eq`） | 受限 |
+| `sort_desc_index`/`cumsum`/`sample_topp` 作内置 | 排序/前缀扫描/采样在手写 `.slt` 中实现（`tokenizer.slt`/`llama.slt`） | 等价实现 |
+| top-p/multinomial 依赖 stdlib 排序 | `sample_topp` 手写插入排序 + CDF；`argmax` 手写扫描 | 等价实现 |
+| run.c 权重指针算术 | 整块加宽为扁平张量 + `reshape` 共享视图按层切 `(dim,dim)` | 定案 |
+| 同 seed 采样逐位对齐 | RNG 为 31-bit `XorShift`，与 run.c 的 64-bit `xorshift64*` **未**逐位对齐；greedy（temp=0）路径不用 RNG，token 序列与 run.c 完全一致 | 未实现（后续项） |
