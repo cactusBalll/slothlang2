@@ -209,7 +209,176 @@ pub func sample(cfg, logits, temperature, topp, rng): int {
 | RNG | 64-bit `xorshift64*` | 31-bit `XorShift` | greedy 无 RNG，逐 token 对齐；temperature 采样暂未逐位对齐 |
 | 显存/内存 | 权重 mmap | 权重加宽后常驻 | 42M ≈ 500MB（167MB 映射 + 334MB f64） |
 
-## 25.9 运行与验收
+## 25.9 关键代码与对应 MLIR
+
+下面的片段由 `slothc ir <file>.sl` 实际发射（做了删减）。阅读前先记住三点：
+
+- **整数常量是 tagged 的**：IR 里 `arith.constant 2 : i64` 表示值 `1`
+  （`v << 1` 让出 tag 位），运行时助手内部 `dec_i` 还原；`float` 同理。
+- **引用赋值点会插 ARC**：`sloth_rc_retain`/`sloth_rc_release` 在片段中省略。
+- **`memref<1xi64>` 是一词槽位**（张量句柄），不是张量数据。
+
+### 25.9.1 构造 / 索引 / 切片视图（通道 B）
+
+```sloth
+var t: Tensor<float, 2> = tensor.from_array([1.0, 2.0, 3.0, 4.0], [2, 2]);
+t[1][0] = 9.0;                       // t[1] 降 rank 视图 + 标量写
+var row: Tensor<float, 1> = t[0];    // 视图，共享存储
+row[1] = 5.0;                        // 写视图 = 写 t
+
+var s: Tensor<float, 1> = tensor.from_array([7.0, 8.0, 9.0], [3]);
+t[1][0..3] = s;                      // 保 rank 切片 -> copy_into
+```
+
+```mlir
+// tensor.from_array([...], [2, 2])：新 rank-2 张量 + 从数组拷贝
+%t = call @sloth_tensor_new_2(%d0, %d1, %kind) : (i64, i64, i64) -> i64
+call @sloth_tensor_copy_from_array(%t, %arr) : (i64, i64) -> i64
+
+// t[1]：off=1，drop=1（降 rank），新长度无意义
+%r1 = call @sloth_tensor_view(%t, %off1, %c1, %c0) : (i64, i64, i64, i64) -> i64
+call @sloth_tensor_set1(%r1, %c0, %f9) : (i64, i64, i64) -> i64
+
+// row = t[0]：off=0，drop=1
+%r0 = call @sloth_tensor_view(%t, %c0, %c1, %c0) : (i64, i64, i64, i64) -> i64
+// row[1] = 5.0
+call @sloth_tensor_set1(%r0, %c1, %f5) : (i64, i64, i64) -> i64
+
+// t[1][0..3]：先降 rank 到 rank-1 视图，再取保 rank 切片（drop=0, len=3）
+%r1b = call @sloth_tensor_view(%t, %off1, %c1, %c0) : (i64, i64, i64, i64) -> i64
+%sl  = call @sloth_tensor_view(%r1b, %c0, %c0, %c3) : (i64, i64, i64, i64) -> i64
+call @sloth_tensor_copy_into(%sl, %s) : (i64, i64) -> i64
+```
+
+`sloth_tensor_view(t, off, drop, len0)` 是唯一的视图构造器：`drop!=0` 丢弃
+dim0（`t[i]`），否则保留 dim0 并把长度改为 `len0`（`t[a..b]`）。视图只改
+`shape/stride/data_ptr` 并 `retain(owner)`，**不拷贝数据**。
+
+### 25.9.2 matvec：`linalg.matvec` + 运行期 dim/stride
+
+```sloth
+var w: Tensor<float, 2> = tensor.zeros([2, 3]);
+var x: Tensor<float, 1> = tensor.zeros([3]);
+var y: Tensor<float, 1> = tensor.matvec(w, x);
+```
+
+```mlir
+// 运行期形状断言：dim(w,1) == dim(x,0)
+call @sloth_tensor_dim_eq(%w, %c1, %x, %c0) : (i64, i64, i64, i64) -> i64
+
+// 描述符词 -> rank-1 基 memref
+%wb = call @sloth_tensor_basis_f64(%w)
+        : (i64) -> memref<?xf64, strided<[?], offset: ?>>
+// dim/stride 是 tagged 整数：shrsi 1 解码后 index_cast
+%wm = memref.reinterpret_cast %wb to offset: [%c0],
+        sizes: [%dw0, %dw1], strides: [%sw0, %sw1]
+      : memref<?xf64, strided<[?], offset: ?>>
+        to memref<?x?xf64, strided<[?, ?], offset: ?>>
+
+%xb = call @sloth_tensor_basis_f64(%x)
+        : (i64) -> memref<?xf64, strided<[?], offset: ?>>
+%xm = memref.reinterpret_cast %xb to offset: [%c0],
+        sizes: [%dx0], strides: [%sx0]
+      : memref<?xf64, strided<[?], offset: ?>>
+        to memref<?xf64, strided<[?], offset: ?>>
+
+%yb = call @sloth_tensor_basis_f64(%y)
+        : (i64) -> memref<?xf64, strided<[?], offset: ?>>
+%ym = memref.reinterpret_cast %yb to offset: [%c0],
+        sizes: [%dy0], strides: [%sy0]
+      : memref<?xf64, strided<[?], offset: ?>>
+        to memref<?xf64, strided<[?], offset: ?>>
+
+linalg.matvec ins(%wm, %xm : memref<?x?xf64, strided<[?, ?], offset: ?>>,
+                              memref<?xf64, strided<[?], offset: ?>>)
+             outs(%ym : memref<?xf64, strided<[?], offset: ?>>)
+```
+
+形状在运行期由 `sloth_tensor_dim`/`_stride` 取出（权重是 mmap/reshape 视图，
+编译期不知道层偏移），`reinterpret_cast` 把它变成带运行期 size/stride 的
+memref 交给 `linalg`。
+
+### 25.9.3 融合算子：`scf.for` + `linalg.generic`（rmsnorm / add_into）
+
+```sloth
+tensor.add_into(a, b);                       // a += b
+var c: Tensor<float, 1> = tensor.rmsnorm(a, w);
+```
+
+`add_into` 是一个原地 `linalg.generic`：
+
+```mlir
+linalg.generic {
+    indexing_maps = [affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>],
+    iterator_types = ["parallel"]
+  } ins(%a_m, %b_m : ...) outs(%a_m : ...) {
+  ^bb0(%x: f64, %y: f64, %o: f64):
+    %r = arith.addf %x, %y : f64
+    linalg.yield %r : f64
+}
+```
+
+`rmsnorm` 先做平方和 `scf.for`（寄存器累加器，**不用循环内 `memref.alloca`**），
+再用一个融合 `linalg.generic` 完成 `out = x*inv*w`：
+
+```mlir
+// 维度是 tagged：sloth_tensor_dim -> shrsi 1 解码 -> index_cast
+%nd = call @sloth_tensor_dim(%a, %c0) : (i64, i64) -> i64
+%n  = arith.shrsi %nd, %c1 : i64
+%ni = arith.index_cast %n : i64 to index
+// 1) sum(x^2)
+%ss = scf.for %i = %c0 to %ni step %c1 iter_args(%acc = %zero) -> (f64) {
+  %xi = memref.load %a_m[%i] : memref<?xf64, strided<[?], offset: ?>>
+  %sq = arith.mulf %xi, %xi : f64
+  %s  = arith.addf %acc, %sq : f64
+  scf.yield %s : f64
+}
+// 2) inv = 1 / sqrt(mean + 1e-5)
+%nf   = arith.sitofp %n : i64 to f64
+%mean = arith.divf %ss, %nf : f64
+%eps  = arith.constant 1.0e-5 : f64
+%m2   = arith.addf %mean, %eps : f64
+%r    = math.sqrt %m2 : f64
+%inv  = arith.divf %one, %r : f64
+// 3) 融合 epilogue：out = x * inv * w
+linalg.generic {
+    indexing_maps = [affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>],
+    iterator_types = ["parallel"]
+  } ins(%a_m, %w_m : ...) outs(%out_m : ...) {
+  ^bb0(%x: f64, %wt: f64, %o: f64):
+    %t0 = arith.mulf %x, %inv : f64
+    %t1 = arith.mulf %t0, %wt : f64
+    linalg.yield %t1 : f64
+}
+```
+
+`softmax_into`/`silu_mul_into`/`add_scaled_into` 同属这种「`scf.for` 归约 +
+融合 `linalg.generic`」模式；`math.sqrt`/`math.exp` 等经 `convert-math-to-llvm`
+落 LLVM intrinsic。
+
+### 25.9.4 reshape 权重视图（extern + `sloth_tensor_reshape*`）
+
+```sloth
+import "sloth/tensor.slt";
+
+var d: Tensor<float, 1> = tensor.zeros([6]);
+var w: Tensor<float, 2> = matrix_view(d, 0, 2, 3);   // 共享存储
+w[0][1] = 7.0;
+```
+
+```mlir
+func.func private @sloth_tensor_reshape2(i64, i64, i64, i64) -> i64
+// matrix_view(d, 0, 2, 3): off, d0, d1（tagged）
+%w = call @sloth_tensor_reshape2(%d, %c0, %c2, %c3) : (i64, i64, i64, i64) -> i64
+// w[0][1] = 7.0：降 rank 视图 + 标量写（写进 d 的缓冲）
+%r0 = call @sloth_tensor_view(%w, %c0, %c1, %c0) : (i64, i64, i64, i64) -> i64
+call @sloth_tensor_set1(%r0, %c1, %f7) : (i64, i64, i64) -> i64
+```
+
+`load_weights` 里整块加宽的权重平面，正是被 `matrix_view`/`cube_view` 这样切成
+每层的 `(dim, dim)` 矩阵喂给 `linalg.matvec`。
+
+## 25.10 运行与验收
 
 ```bash
 cargo build
