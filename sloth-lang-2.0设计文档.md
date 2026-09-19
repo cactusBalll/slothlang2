@@ -58,7 +58,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | 单态化（Monomorphization） | 编译期为每个泛型实例生成具体类型副本 |
 | `dyn Trait` | 动态分派的对象类型（trait object） |
 | ARC | 引用计数所有权；`retain`/`release` 插入点在发射期静态确定，配合 `Weak<T>` 破环（见 §5.1） |
-| 词面（word plane） | 一切 SSA 词/槽/字段/容器元素的统一表示：带 tag 的单 i64（见 §2.6） |
+| 词面（word plane） | 一切 SSA 词/槽/字段/容器元素的统一表示：单个 i64（引用=裸指针、int=i64、float=f64 位、bool=0/1、nil=0，无 tag；见 §2.6） |
 | dialect | MLIR 中自定义类型与操作的扩展包（**本实现不使用自定义 dialect**，见 §4.3） |
 | ~~statepoint~~ | ~~LLVM 用于精确 GC 的栈上根定位机制~~ `【已过时·v1.0】` 已弃用 GC，无需栈图/statepoint |
 
@@ -72,7 +72,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | --- | --- | --- |
 | 单元 | `unit` | 空类型，替代 1.0 中"无返回值函数隐式返回 nil" |
 | 布尔 | `bool` | `true` / `false`，**取消** 1.0 的"任意值隐式转 bool" |
-| 数值 | `int`（**63 bit**）、`float`（**f63**） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数；`float` 为降精度 f64（见 §2.6）。`【已过时·v1.0】` 原为 `int`=i64、`float`=f64 |
+| 数值 | `int`（64 bit）、`float`（f64） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数。`【已过时·v1.0】` 原为 `int`=i64、`float`=f64，现行实现与其一致（去 tag 后满精度） |
 | 字符串 | `str` | UTF-8 不可变字符串；**无 string interning**，`==` 按内容比较 |
 | 范围 | `range` | 由 `..`、`..=` 构造，元素类型 `int` |
 | 数组 | `Array<T>` | 同构动态数组，替代 1.0 的异构数组 |
@@ -91,7 +91,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 - **`T?` 替代通用 `nil`**：1.0 中任何类型都可为 `nil` 是运行时错误的主要来源（对 `nil` 的运算报错）。sloth2 中只有显式声明为 `T?` 的类型可持有 `nil`，使用值前必须判空（`if` 条件中的 `is not nil` 收窄或 `?.` 语法，见 §3.6）。
 - **取消隐式布尔转换**：`while (x)` 要求 `x: bool`。1.0 的"Nil 转 false、其余转 true"规则与强类型冲突，且与 `T?` 判空习惯重叠。
 - **无隐式数值转换**：`int` 与 `float` 之间不隐式转换，提供显式内置函数 `int(x)` / `float(x)`。算术运算两侧类型必须一致。
-- **统一词面表示**：所有类型在运行期统一为带 tag 的单 i64 词（引用 `ptr|1`、`int` 63 bit、`float` f63、`bool` `0/2`、`nil` `0`），这是实现层 ABI，见 §2.6 与 §5.1。`int` 的 63 bit 与 `float` 的尾数损失是这一取舍的直接结果。
+- **统一词面表示**：所有类型在运行期统一为单个 i64 词（引用=裸指针、`int`=原生 i64、`float`=f64 位模式、`bool`=`0/1`、`nil`=`0`），这是实现层 ABI，见 §2.6 与 §5.1。词面无 tag；引用/值的区分由编译期已知的引用掩码（对象 `refmask`、数组 `elref`、Map `vref`、通道/协程 `eref`）在 ARC 级联处完成。
 
 ### 2.2 类型推断
 
@@ -145,16 +145,16 @@ func announce(s: Speaker): unit { s.say(); }
 
 ### 2.6 值类型、引用类型与内存表示
 
-> `【已过时·v1.0】` 原文为“值类型直接内联到原生栈 / 引用类型 GC 堆分配 / `int`=i64、`float`=f64 / `range` 双 i64 / `T?` 用 `{payload, has_value}` 标签布局 / `dyn` 两字 fat pointer”。现行实现**统一为带 tag 的单 i64 词面**，引用由 ARC 管理；以下为现行表示。
+> `【已过时·v1.0】` 原文为“值类型直接内联到原生栈 / 引用类型 GC 堆分配 / `int`=i64、`float`=f64 / `range` 双 i64 / `T?` 用 `{payload, has_value}` 标签布局 / `dyn` 两字 fat pointer”。现行实现**统一为单个 i64 词面（无 tag）**，引用由 ARC 管理；以下为现行表示。
 
-**统一词面（word plane）**——所有 SSA 词、局部槽、对象字段、容器元素、闭包捕获与内存词均为带 tag 的单个 i64（编解码常量见 `crates/sloth-codegen/src/irgen/util.rs`、`crates/sloth-rt/src/rc.rs`）：
+**统一词面（word plane）**——所有 SSA 词、局部槽、对象字段、容器元素、闭包捕获与内存词均为单个 i64（编解码常量见 `crates/sloth-codegen/src/irgen/util.rs`、`crates/sloth-rt/src/rc.rs`）。词面不自带类型；引用/值的区分由编译期已知的引用掩码在 ARC 级联处完成：
 
 | 面 | 编码 | 解码 |
 | --- | --- | --- |
-| 引用句柄 | `ptr \| 1`（payload 16 对齐，bit0 恒空） | `w & !1` |
-| `int` | `v << 1`（**收窄为 63 bit**，环绕语义） | 算术右移 1 |
-| `float` | 字面量 `(bits & !1) >> 1`；**运行时算术 `(bits & ~2) >> 1`**（**最多丢 2 个尾数 LSB**） | `w << 1` 后 bitcast |
-| `bool` | `0` / `2` | `!= 0` |
+| 引用句柄 | 裸 payload 指针（`0` = nil） | 直接使用 |
+| `int` | 原生 i64（64 bit，环绕语义） | 直接使用 |
+| `float` | 原生 f64 位模式（bitcast 到 i64） | `i64` bitcast 回 f64 |
+| `bool` | `0` / `1` | `!= 0` |
 | `nil` | `0` | `0` |
 
 **语言语义归类**（仅用于类型检查与所有权，不再对应不同的机器布局）：
@@ -163,12 +163,12 @@ func announce(s: Speaker): unit { s.say(); }
 - **引用类型**（`str`、`Array<T>`、`Map<K,V>`、类实例、闭包、`dyn`、`range`、`Tensor<T,R>`、`Weak<T>`、`Fiber<Y>`、值型 optional 盒）由 ARC 管理，变量持有句柄词：
   - `str`：堆上 `StrT { len, data }` 句柄词（**无驻留**；`==` 与 Map 键均按内容比较）；
   - `Array<T>` / `Map<K,V>`：稳定句柄对象，元素按单态化后的具体类型内联存储；数组增长只替换独立的数据缓冲，句柄不移动（`crates/sloth-rt/src/arrays.rs`）；
-  - 类实例：ARC 对象，RC 计数**带内**藏在对象头 `Hdr` 中（见 §5.1），头部含 class-id/类型信息；
-  - 闭包 `(A) -> R`：2 词 ARC 对象 `{ tagged fnptr, env }`（`lambda.rs`/`closure.rs`）；
-  - `dyn Trait`：**单字段虚表指针 + class-id**（运行时等价于两字 fat pointer）；
+  - 类实例：ARC 对象，RC 计数**带内**藏在对象头 `Hdr` 中（见 §5.1），头部含 class-id/类型信息与引用字段掩码 `refmask`；
+  - 闭包 `(A) -> R`：2 词 ARC 对象 `{ fnptr, env }`（`lambda.rs`/`closure.rs`）；
+  - `dyn Trait`：**单字段虚表指针 + class-id**（运行时等价于两字 fat pointer）；内建值类型 `int`/`float`/`bool` 隐式实现预定义 trait（`Display`/`Equatable`/`Hashable`/`Comparable`）及无方法 trait，在 `dyn` 位置自动装箱为合成对象（保留负 class-id + 按 (值类型, trait) 惰性虚表 + 字段 0 存值词，见 `crates/sloth-codegen/src/irgen/dynbox.rs`、`crates/sloth-rt/src/builtins.rs`）；
   - `range`：rc 双词盒 `{ lo, hi }`（`crates/sloth-rt/src/ranges.rs`）；
   - `Tensor<T,R>`：ARC 描述符（7 词 payload，见 §5.6）；
-  - `Fiber<Y>`：ARC 对象，payload 为 `[state, prev, inbox, stack_base, stack_size, ctx, entry, init, jmp_buf, cancel]`，`entry` 持有入口闭包；独立 `mmap` 栈 + 保护页（见协程扩展设计文档 §3.1/§4）。
+  - `Fiber<Y>`：ARC 对象，payload 为 `#[repr(C)] FiberObj`（`state`、`prev`、`inbox`、`eref`、`stack_base`、`stack_size`、`ctx`、`entry`、`init`、`jmp_buf`、`cancel`、`owner_tid`、`slots: Vec<usize>`），`entry` 持有入口闭包；独立 `mmap` 栈 + 保护页（见协程扩展设计文档 §3.1/§4）。
 
 **可空类型 `T?` 的表示：**
 
@@ -176,7 +176,7 @@ func announce(s: Speaker): unit { s.say(); }
 - **`T` 为值类型**（`int?`/`float?`/`bool?`）：**一词 payload 盒**（`sloth_box_new`/`sloth_box_get`，盒本身由 ARC 跟踪，归零即 `free`）；槽仍为 1 词，`nil` 仍为词 `0`，因此“值 0”与 `nil` 不再混淆（值 0 是合法盒句柄）；`【已过时·v1.0】` 原为 `{payload, has_value}` 两字标签布局；
 - 不允许嵌套可空：`T??` 编译期报错（parser 专用诊断）。
 
-**浮点精度说明**：`float` 是降精度 f64——字面量丢 1 个尾数 LSB，而**运行时算术路径的掩码为 `-3`（`~2`）**，比字面量多丢 1 位，二者不一致，属已记录的实现不一致（详见 `book/src/appendix_a_deviations.md` §A.2.1）。写浮点数值代码时应假定约 f62 精度。
+**浮点说明**：`float` 是原生 IEEE f64（满精度）。词面以 `i64` 位模式承载，运算在 `f64` 标量域进行，仅在边界 `llvm.bitcast`。`【已过时·v1.0】` 早先的 f63/f62 降精度取舍已随去 tag 迁移（PLAN §14）消除。
 
 ---
 
@@ -479,7 +479,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 2. **名称解析与依赖装配**：作为发射的一部分；`import` 由 `irgen::resolve_program` 递归装配，DFS 栈检测 `circular import`，`done` 集合去重（**无独立依赖图/拓扑排序阶段**）；
 3. **类型检查/推断**：单趟——收集符号/规划函数与 vtable、推断局部类型、做结构化 `surface_compat` 检查、求解 trait 约束、执行 `is` 收窄；允许前向引用与递归函数/类；
 4. **单态化**：以“泛型定义 + 具体类型实参”为键缓存实例（函数与类），可由参数或返回值驱动；
-5. **闭包**：统一为 2 词 ARC 对象 `{ tagged fnptr, env }`，捕获的标量按值快照、引用按引用共享（不做逃逸性/结构体布局分析）；
+5. **闭包**：统一为 2 词 ARC 对象 `{ fnptr, env }`，捕获的标量按值快照、引用按引用共享（不做逃逸性/结构体布局分析）；
 6. **错误诊断**：所有类型错误携带源码位置（行:列）与期望/实际类型，一次编译尽可能报多个错误（batch diagnostics，不做 fail-fast）。消息为英文。
 
 ### 4.3 MLIR 生成（无自定义 dialect）
@@ -532,17 +532,17 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 **决策**：不采用 GC（1.0 的 mark & sweep 与早期 Boehm 保守式兜底均已移除）。引用类型统一走**引用计数 + `Weak<T>` 弱引用破环**。理由：全部代码由本编译器发射，`retain`/`release` 插入点可在发射期静态确定，无需栈图/statepoint；确定性回收贴合单线程模型。分配器为 malloc 基确定性链（`sloth_rt_alloc/realloc`），对象头带内承载计数；归零即析构级联并 `free`，漏插 `release` 退化为内存滞留而非悬垂。
 
-**词面编码（word plane，与 §2.6/§4.3.1 对应）**：所有 SSA 词、槽、字段、容器元素、内存词均为带 tag 的单 i64：
+**词面编码（word plane，与 §2.6/§4.3.1 对应）**：所有 SSA 词、槽、字段、容器元素、内存词均为单个 i64（无 tag）：
 
 | 面 | 编码 | 解码 |
 | --- | --- | --- |
-| 引用句柄 | `ptr \| 1`（payload 16 对齐，bit0 恒空） | `w & !1` |
-| `int` | `v << 1`（收窄为 63 bit，环绕语义） | 算术右移 1 |
-| `float` | `(bits & !1) >> 1`（**f63**，牺牲尾数 LSB） | `w << 1` 后 bitcast |
-| `bool` | `0` / `2` | `!= 0` |
+| 引用句柄 | 裸 payload 指针（`0` = nil） | 直接使用 |
+| `int` | 原生 i64（64 bit，环绕语义） | 直接使用 |
+| `float` | 原生 f64 位模式（bitcast 到 i64） | `i64` bitcast 回 f64 |
+| `bool` | `0` / `1` | `!= 0` |
 | `nil` | `0` | `0` |
 
-**对象头 RC（带内）**：每个堆对象在 payload 之下内联 6 词 `Hdr = [cnt, size, dtor, aux, weak_head, pad]`（48 字节）。`retain`/`release` 首检 tag（tag0 惰性 no-op，不触内存）；归零 → 跑 dtor 级联 → 排空侵入式 weak 链（置 `target=0`）→ `free(header+payload)`。rt 内部 metadata（数组 len/cap、map kflag、vtable 容量等）保持裸 i64，不入 tag 词面。
+**对象头 RC（带内）**：每个堆对象在 payload 之下内联 6 词 `Hdr = [cnt, size, dtor, aux, weak_head, weak_cnt]`（48 字节）。`retain`/`release` 只对编译期判定的引用词发射（`0`=nil 惰性 no-op）；归零 → 跑 dtor 级联（按编译期引用掩码释放字段/元素）→ 排空侵入式 weak 链（置 `target=0`）→ 强计数归零且 `weak_cnt==0` 时 `free(header+payload)`；仍有 weak 盒时 header 存活到最后一个 weak 释放（`upgrade()` CAS 协议）。rt 内部 metadata（数组 len/cap、map kflag、vtable 容量等）保持裸 i64，不入词面。
 
 #### 5.1.1 ARC 所有权协议（ownership protocol）
 

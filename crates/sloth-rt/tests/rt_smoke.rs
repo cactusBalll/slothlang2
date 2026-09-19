@@ -1,17 +1,70 @@
 //! rt smoke suite (in-process; tagged-word header rc core).
-use sloth_rt::{arrays, maps, mmap, objects, rc, strings, tensors};
+use sloth_rt::{arrays, builtins, maps, mmap, objects, rc, strings, tensors};
+use std::sync::Mutex;
+
+/// Live rc accounting (`sloth_rc_live`) is process-global, so tests in this
+/// binary must not run concurrently or their drain assertions race.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Serialize a test; a failing test may have poisoned the lock, so recover the
+/// guard instead of cascading the failure into every later test.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// tagged len/index/field-count helpers (the word plane encodes ints)
 const fn wi(v: i64) -> i64 {
     rc::enc_i(v)
 }
 
+/// Build a `str` handle from a Rust string.
+///
+/// `sloth_str_intern` reads its first argument as a raw source pointer, so
+/// Rust string literals (only byte-aligned) are copied into an aligned heap
+/// buffer (capacity >= 1 keeps the pointer non-dangling even for the empty
+/// string) and handed over raw. The rt copies synchronously, so dropping the
+/// buffer afterwards is safe.
 fn inter(s: &str) -> i64 {
-    strings::sloth_str_intern(s.as_ptr() as i64, wi(s.len() as i64))
+    let mut buf: Vec<u8> = Vec::with_capacity(s.len().max(1));
+    buf.extend_from_slice(s.as_bytes());
+    let ptr = buf.as_ptr() as i64;
+    strings::sloth_str_intern(ptr, wi(s.len() as i64))
+}
+
+/// Unique temp file removed on drop, so the suite neither depends on nor
+/// leaves behind a fixed, possibly-missing path.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn write(tag: &str, bytes: &[u8]) -> TempFile {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "sloth_rt_{}_{}_{}.bin",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::write(&p, bytes).expect("write fixture");
+        TempFile(p)
+    }
+
+    fn as_str(&self) -> std::borrow::Cow<'_, str> {
+        self.0.to_string_lossy()
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[test]
 fn rt_smoke() {
+    let _serial = serial();
     unsafe {
         // ---- arrays: churn fires the rc path when counts reach zero ----
         let before = rc::dec_i(rc::sloth_rc_live());
@@ -35,12 +88,12 @@ fn rt_smoke() {
         assert_eq!(rc::dec_i(arrays::sloth_arr_get(a, wi(63))), 63, "last");
         rc::sloth_rc_release(a);
 
-        // ---- tagged int roundtrip: 63-bit wrap + sign decode ----
+        // ---- int roundtrip: full 64-bit width, identity codec ----
         assert_eq!(rc::dec_i(rc::enc_i(-1)), -1, "neg int roundtrip");
-        assert_eq!(rc::dec_i(rc::enc_i(i64::MIN)), 0, "min wraps to 0");
-        assert_eq!(rc::enc_i(3) & 1, 0, "int value tag clear");
+        assert_eq!(rc::dec_i(rc::enc_i(i64::MIN)), i64::MIN, "full-width int");
+        assert_eq!(rc::enc_i(3), 3, "int identity");
 
-        // ---- tagged f64 roundtrip (1 mantissa LSB sacrificed) ----
+        // ---- f64 roundtrip (identity codec: full precision) ----
         for bits in [1.5f64.to_bits(), (-0.5f64).to_bits(), 0f64.to_bits()] {
             let back = rc::dec_f_bits(rc::enc_f_bits(bits));
             assert_eq!(rc::enc_f_bits(back), rc::enc_f_bits(bits), "f64 roundtrip");
@@ -199,12 +252,10 @@ fn rt_smoke() {
             "relocated weak drained"
         );
 
-        // value words are inert no-ops (tag0 short-circuits)
-        rc::sloth_rc_retain(wi(1));
-        rc::sloth_rc_release(wi(1));
+        // nil words are inert no-ops; value words are never passed to rc
         rc::sloth_rc_retain(0);
         rc::sloth_rc_release(0);
-        assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "value words inert");
+        assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "nil words inert");
 
         // ---- checkpoint IO (design D7): mmap + i32 header + f32 widening ----
         let mb = rc::dec_i(rc::sloth_rc_live());
@@ -215,9 +266,8 @@ fn rt_smoke() {
         for v in [1.0f32, 2.0, 3.0, 4.0] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let path = "/tmp/opencode/rt_smoke_cfg.bin";
-        std::fs::write(path, &bytes).expect("write fixture");
-        let pth = inter(path);
+        let fixture = TempFile::write("mmap_cfg", &bytes);
+        let pth = inter(&fixture.as_str());
         let h = mmap::sloth_mmap(pth);
         assert_eq!(mmap::sloth_mmap_len(h), 44, "file length");
         assert_eq!(mmap::sloth_mmap_i32(h, 0), 4, "dim");
@@ -295,4 +345,159 @@ fn rt_smoke() {
 
         println!("rt smoke OK");
     }
+}
+
+/// `sloth_str_intern` untags its first argument, so the source must be even.
+/// `inter` copies odd-addressed Rust literals into an aligned buffer; both
+/// parities must round-trip length and content (the regression that broke the
+/// old hardcoded-path fixture).
+#[test]
+fn string_intern_alignment() {
+    let _serial = serial();
+    let before = rc::dec_i(rc::sloth_rc_live());
+    for lit in ["", "a", "hello world", "odd", "even", "path/x.bin"] {
+        let h = inter(lit);
+        assert_eq!(
+            rc::dec_i(strings::sloth_str_len(h)),
+            lit.len() as i64,
+            "len {lit:?}"
+        );
+        let h2 = inter(lit);
+        assert_eq!(
+            rc::dec_i(strings::sloth_str_eq(h, h2)),
+            1,
+            "content {lit:?}"
+        );
+        rc::sloth_rc_release(h);
+        rc::sloth_rc_release(h2);
+    }
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "intern drained");
+}
+
+/// Class metadata + instance fields: class-id round-trip, int/nil field
+/// access, and the mask-driven death cascade releasing an owned reference
+/// field (the `Hdr.aux`-counted walk + `ObjInfo.refmask`).
+#[test]
+fn object_fields_and_cascade() {
+    let _serial = serial();
+    let before = rc::dec_i(rc::sloth_rc_live());
+    let ci = objects::sloth_cls_info(0, wi(7));
+    // field 1 is a reference; fields 0/2 are values
+    objects::sloth_cls_refmask(ci, 1 << 1, 3);
+    let o = objects::sloth_obj_new(ci, wi(3));
+    assert_eq!(rc::dec_i(objects::sloth_obj_cls_id(o)), 7, "cls id");
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 1, "one instance");
+
+    // int field round-trip; an untouched slot stays nil
+    objects::sloth_obj_set_field(o, wi(0), wi(1234));
+    assert_eq!(
+        rc::dec_i(objects::sloth_obj_field(o, wi(0))),
+        1234,
+        "int field"
+    );
+    assert_eq!(objects::sloth_obj_field(o, wi(2)), 0, "nil field");
+
+    // reference field: the slot takes the interned +1 (codegen retains
+    // before storing); the borrow below proves the slot keeps it alive
+    let s = inter("owned-field");
+    objects::sloth_obj_set_field(o, wi(1), s);
+    let got = objects::sloth_obj_field(o, wi(1));
+    let want = inter("owned-field");
+    assert_eq!(rc::dec_i(strings::sloth_str_eq(got, want)), 1, "ref field");
+    rc::sloth_rc_release(want);
+
+    // death cascade releases the ref field; count returns to baseline
+    rc::sloth_rc_release(o);
+    assert_eq!(
+        rc::dec_i(rc::sloth_rc_live()),
+        before,
+        "obj cascade drained"
+    );
+}
+
+/// Builtin value-type auto-boxes backing `dyn Trait`: payload round-trip,
+/// Display/hash/comparison helpers, and the ordinary object death cascade.
+#[test]
+fn builtin_dyn_boxes() {
+    let _serial = serial();
+    let before = rc::dec_i(rc::sloth_rc_live());
+    // int box holding tagged 41
+    let info = builtins::sloth_builtin_info(wi(0));
+    let o = objects::sloth_obj_new(info, wi(1));
+    objects::sloth_obj_set_field(o, wi(0), wi(41));
+    assert_eq!(rc::dec_i(builtins::sloth_dyn_unbox(o)), 41, "int unbox");
+    assert_eq!(
+        rc::dec_i(builtins::sloth_dyn_hash(o, wi(0))),
+        41,
+        "int hash"
+    );
+    let s = builtins::sloth_dyn_to_str(o, wi(0));
+    let want = inter("41");
+    assert_eq!(rc::dec_i(strings::sloth_str_eq(s, want)), 1, "int to_str");
+    rc::sloth_rc_release(s);
+    rc::sloth_rc_release(want);
+    // comparison family (equal / less-than)
+    let p = objects::sloth_obj_new(info, wi(1));
+    objects::sloth_obj_set_field(p, wi(0), wi(41));
+    assert_eq!(
+        rc::dec_i(builtins::sloth_dyn_binop(o, p, wi(0), wi(0))),
+        1,
+        "eq"
+    );
+    let q = objects::sloth_obj_new(info, wi(1));
+    objects::sloth_obj_set_field(q, wi(0), wi(9));
+    assert_eq!(
+        rc::dec_i(builtins::sloth_dyn_binop(q, o, wi(0), wi(2))),
+        1,
+        "lt"
+    );
+    assert_eq!(
+        rc::dec_i(builtins::sloth_dyn_binop(o, q, wi(0), wi(2))),
+        0,
+        "not lt"
+    );
+    // float box keeps the encoded word; unbox/compare decode it
+    let finfo = builtins::sloth_builtin_info(wi(1));
+    let fw = objects::sloth_obj_new(finfo, wi(1));
+    objects::sloth_obj_set_field(fw, wi(0), rc::enc_f_bits(2.5f64.to_bits()));
+    assert_eq!(
+        rc::dec_f_bits(builtins::sloth_dyn_unbox(fw)),
+        2.5f64.to_bits(),
+        "float unbox"
+    );
+    // class metadata is untracked; only the four boxes sit in rc_live
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 4, "four boxes");
+    for w in [o, p, q, fw] {
+        rc::sloth_rc_release(w);
+    }
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "dyn boxes drained");
+}
+
+/// Content-hashed string keys: equal-content handles from distinct
+/// allocations hit the same slot, and overwrite releases the replaced pair.
+#[test]
+fn map_string_keys() {
+    let _serial = serial();
+    let before = rc::dec_i(rc::sloth_rc_live());
+    let m = maps::sloth_map_new(wi(1) | 4); // kkind 1 = str keys, vref = 1
+    let _ = maps::sloth_map_str_set(m, inter("alpha"), inter("one"));
+    let probe = inter("alpha");
+    let v = maps::sloth_map_str_get(m, probe);
+    rc::sloth_rc_release(probe);
+    let want = inter("one");
+    assert_eq!(rc::dec_i(strings::sloth_str_eq(v, want)), 1, "str key get");
+    rc::sloth_rc_release(want);
+
+    // overwrite: a fresh equal key/value pair replaces the slot's pair
+    let _ = maps::sloth_map_str_set(m, inter("alpha"), inter("two"));
+    assert_eq!(rc::dec_i(maps::sloth_map_len(m)), 1, "one slot");
+    let probe = inter("alpha");
+    let v = maps::sloth_map_str_get(m, probe);
+    rc::sloth_rc_release(probe);
+    let want2 = inter("two");
+    assert_eq!(rc::dec_i(strings::sloth_str_eq(v, want2)), 1, "overwrite");
+    rc::sloth_rc_release(want2);
+
+    rc::sloth_rc_release(m);
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "str map drained");
 }

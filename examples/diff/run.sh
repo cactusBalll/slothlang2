@@ -40,7 +40,7 @@ for algo in kmp nqueens dijkstra matmul quicksort edge corner json; do
 done
 echo "integer differentials: $match match, $fail differ"
 
-echo "-- float reproducers (expected to differ: word-plane f64 LSB loss) --"
+echo "-- float reproducers (informational: print format vs C %.17g) --"
 for algo in floatdiff fmatmul; do
     gcc -O2 -o "$tmp/$algo.bin" "$algo.c" 2> /dev/null
     "$tmp/$algo.bin" > "$tmp/$algo.c.out" 2>&1

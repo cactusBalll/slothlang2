@@ -11,9 +11,9 @@ extern func tok_val(t: Tok): int;
 
 - `extern func` 的符号名即 C 符号，走 **C ABI**。参数/返回值在边界做词面 ↔ C 类型
   的 marshalling：
-  - `float` 形参：解码 `f63` → `f64`；返回 `f64` → 重新编码为词；
-  - `int`/`bool` 形参：解码为原始标量；
-  - 标量返回值重新编码；不透明 extern-type 指针词直通。
+  - `float` 形参：词是原生 f64 位模式，`llvm.bitcast` 即得 `f64`；返回同理；
+  - `int`/`bool` 形参：词就是原始标量，直通；
+  - 标量返回值直通；不透明 extern-type 指针词直通。
 - `extern func` 不能是泛型，也不能可变参；参数必须有显式类型。
 - `extern type` 是不透明句柄，脚本侧**不能**解引用、取字段或构造，只能经 extern
   函数传递（编译期诊断）。
@@ -37,6 +37,5 @@ JIT（`run`）会链接 `libsloth_rt.so`；AOT（`build`）用 clang 把生成�
 ```
 
 `extern func` 的声明保留在剥离后的 MLIR 里（`@sloth_extern_floor` 等）。可以看到
-浮点参数在调用边界被解码成 `f64`：`arith.shli %w, 1` → `llvm.bitcast : i64 to f64`
-→ `call @sloth_extern_floor(%f)`，返回值再 `llvm.bitcast` 回 `i64` 并按 f63 掩码
-（`arith.andi %r, -3`）重编码。
+浮点参数在调用边界只做一次 `llvm.bitcast : i64 to f64`（词就是原生 f64 位模式）
+→ `call @sloth_extern_floor(%f)`，返回值再 `llvm.bitcast` 回 `i64`（无掩码/移位）。

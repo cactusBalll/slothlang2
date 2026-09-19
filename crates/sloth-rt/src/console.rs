@@ -1,6 +1,5 @@
-//! Console I/O: all value-plane primitives take tagged words (decoded on
-//! entry). The f64 print keeps the raw typed route — callers decode before
-//! the call since floats are typed scalars at that edge.
+//! Console I/O: value-plane primitives take raw words. The f64 print keeps
+//! the typed route — callers pass the scalar at that edge.
 
 #[no_mangle]
 pub extern "C" fn sloth_rt_hello() {
@@ -38,7 +37,7 @@ pub extern "C" fn sloth_rt_print_opt(h_w: i64, kind_w: i64) -> i64 {
     let kind = crate::rc::dec_i(kind_w);
     let payload = unsafe { *(crate::rc::w_unref(h_w) as *const i64) };
     match kind {
-        1 => println!("{}", f64::from_bits((payload as u64) << 1)),
+        1 => println!("{}", f64::from_bits(crate::rc::dec_f_bits(payload))),
         2 => println!("{}", crate::rc::dec_i(payload) != 0),
         _ => println!("{}", crate::rc::dec_i(payload)),
     }

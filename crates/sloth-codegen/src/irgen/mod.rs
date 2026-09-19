@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 mod class;
 mod closure;
 mod collect;
+mod dynbox;
 mod expr;
 mod fiber;
 mod fnwalk;
@@ -48,6 +49,8 @@ pub use util::WW;
 pub(crate) use class::*;
 #[allow(unused_imports)]
 pub(crate) use collect::*;
+#[allow(unused_imports)]
+pub(crate) use dynbox::*;
 #[allow(unused_imports)]
 pub(crate) use expr::*;
 #[allow(unused_imports)]

@@ -1,9 +1,11 @@
 //! mpmc channels (TH-P2): bounded ring / unbounded queue behind one mutex
-//! and two condvars. Elements are tagged words; `send` transfers an owned
+//! and two condvars. Elements are raw words; `send` transfers an owned
 //! +1 in, `recv` transfers an owned +1 (or a boxed value optional) out.
+//! `eref` records whether the element type is a reference (compile-time), so
+//! value payloads are never released by the death cascade.
 
 use crate::panics;
-use crate::rc::{self, w_is_ref, w_unref};
+use crate::rc::{self, w_unref};
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 
@@ -18,28 +20,33 @@ struct ChannelObj {
     state: Mutex<ChanState>,
     not_empty: Condvar,
     not_full: Condvar,
+    /// element type `T` carries references (0 = value element)
+    eref: i64,
 }
 
 fn chan_dtor(p: usize, _aux: u64) {
     unsafe {
         let c = &mut *(p as *mut ChannelObj);
         // no waiters can exist once the last reference drops; shed any
-        // elements still queued (each carries an owned +1)
+        // elements still queued (each references carries an owned +1)
         let st = c.state.get_mut().unwrap();
-        for w in st.buf.drain(..) {
-            if w != 0 {
-                rc::sloth_rc_release(w);
+        if c.eref != 0 {
+            for w in st.buf.drain(..) {
+                if w != 0 {
+                    rc::sloth_rc_release(w);
+                }
             }
+        } else {
+            st.buf.clear();
         }
         std::ptr::drop_in_place(p as *mut ChannelObj);
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_chan_new(cap_w: i64) -> i64 {
+pub extern "C" fn sloth_chan_new(cap_w: i64, eref: i64) -> i64 {
     unsafe {
-        let p = rc::rc_addr(std::mem::size_of::<ChannelObj>(), Some(chan_dtor))
-            as *mut ChannelObj;
+        let p = rc::rc_addr(std::mem::size_of::<ChannelObj>(), Some(chan_dtor)) as *mut ChannelObj;
         std::ptr::write(
             p,
             ChannelObj {
@@ -50,6 +57,7 @@ pub extern "C" fn sloth_chan_new(cap_w: i64) -> i64 {
                 }),
                 not_empty: Condvar::new(),
                 not_full: Condvar::new(),
+                eref,
             },
         );
         rc::w_ref(p as usize)
@@ -58,7 +66,7 @@ pub extern "C" fn sloth_chan_new(cap_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_chan_send(ch_w: i64, v_w: i64) -> i64 {
-    if !w_is_ref(ch_w) {
+    if ch_w == 0 {
         return 0;
     }
     unsafe {
@@ -79,7 +87,7 @@ pub extern "C" fn sloth_chan_send(ch_w: i64, v_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
-    if !w_is_ref(ch_w) {
+    if ch_w == 0 {
         return 0;
     }
     unsafe {
@@ -104,7 +112,7 @@ pub extern "C" fn sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_chan_close(ch_w: i64) -> i64 {
-    if !w_is_ref(ch_w) {
+    if ch_w == 0 {
         return 0;
     }
     unsafe {

@@ -419,8 +419,6 @@ impl ModEmitter {
         let et = self.tensor_elem_mlir(elem).to_string();
         let flat = self.emit_tensor_basis(fw, tv, elem);
         let flat_ty = format!("memref<?x{}, strided<[?], offset: ?>>", et);
-        let one = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one));
         let mut dims: Vec<String> = Vec::new();
         let mut strides: Vec<String> = Vec::new();
         for k in 0..rank {
@@ -435,12 +433,10 @@ impl ModEmitter {
                 "    {} = call @sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
                 dw, tv, ax
             ));
-            let di = fw.v();
-            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
             let d = fw.v();
             fw.op(&format!(
                 "    {} = arith.index_cast {} : i64 to index",
-                d, di
+                d, dw
             ));
             dims.push(d);
             let sw = fw.v();
@@ -448,12 +444,10 @@ impl ModEmitter {
                 "    {} = call @sloth_tensor_stride({}, {}) : (i64, i64) -> i64",
                 sw, tv, ax
             ));
-            let si = fw.v();
-            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", si, sw, one));
             let s = fw.v();
             fw.op(&format!(
                 "    {} = arith.index_cast {} : i64 to index",
-                s, si
+                s, sw
             ));
             strides.push(s);
         }
@@ -537,24 +531,15 @@ impl ModEmitter {
         (yv, yt)
     }
 
-    /// tagged encoding of a scalar MLIR value (f64/i64) into one word
+    /// encode a scalar MLIR value (f64/i64) into one word (de-tag: float
+    /// results are raw f64 bits, int results are the native i64)
     fn emit_encode_scalar(&mut self, fw: &mut FnWalk, val: &str, elem: TyId) -> String {
-        let one = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one));
         if self.is_float(elem) {
             let bv = fw.v();
             fw.op(&format!("    {} = arith.bitcast {} : f64 to i64", bv, val));
-            let mask = fw.v();
-            fw.op(&format!("    {} = arith.constant -2 : i64", mask));
-            let mw = fw.v();
-            fw.op(&format!("    {} = arith.andi {}, {} : i64", mw, bv, mask));
-            let e = fw.v();
-            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", e, mw, one));
-            e
+            bv
         } else {
-            let e = fw.v();
-            fw.op(&format!("    {} = arith.shli {}, {} : i64", e, val, one));
-            e
+            val.to_string()
         }
     }
 
@@ -764,17 +749,13 @@ impl ModEmitter {
         (enc, aelem)
     }
 
-    /// tagged dim word (`axis`) decoded to an `index`
+    /// dim word decoded to an `index` (de-tag: identity)
     fn emit_tensor_dim_index(&mut self, fw: &mut FnWalk, tv: &str, axis: i64) -> String {
         let dw = self.emit_tensor_dim_word(fw, tv, axis);
-        let one = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one));
-        let di = fw.v();
-        fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
         let d = fw.v();
         fw.op(&format!(
             "    {} = arith.index_cast {} : i64 to index",
-            d, di
+            d, dw
         ));
         d
     }
@@ -984,14 +965,9 @@ impl ModEmitter {
         c
     }
 
-    /// tagged dim word decoded to a bare `i64`
+    /// dim word decoded to a bare `i64` (de-tag: identity)
     fn emit_tensor_dim_i64(&mut self, fw: &mut FnWalk, tv: &str, axis: i64) -> String {
-        let dw = self.emit_tensor_dim_word(fw, tv, axis);
-        let one = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one));
-        let di = fw.v();
-        fw.op(&format!("    {} = arith.shrsi {}, {} : i64", di, dw, one));
-        di
+        self.emit_tensor_dim_word(fw, tv, axis)
     }
 
     /// allocate a same-shape output for `av` and return `(word, memref, ty, elem)`

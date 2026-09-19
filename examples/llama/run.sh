@@ -26,7 +26,7 @@ trap 'rm -rf "$tmp"' EXIT
 cd "$here"
 
 python3 gen_tiny.py "$tmp" >/dev/null
-"$SLOTHC" build main.sl "$tmp/llama.bin" >/dev/null || exit 1
+"$SLOTHC" build main_tiny.sl "$tmp/llama.bin" >/dev/null || exit 1
 
 # ---- 1. tiny differential (shared + unshared/GQA) ----
 for m in shared unshared; do

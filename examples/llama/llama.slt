@@ -9,7 +9,7 @@
 import "sloth/tensor.slt";
 import "sloth/fs.slt";
 import "sloth/random.slt";
-import "sloth/tokenizer.slt";
+import "tokenizer.slt";
 
 pub class Config {
     var dim: int;

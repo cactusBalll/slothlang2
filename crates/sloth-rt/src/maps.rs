@@ -1,26 +1,39 @@
-//! Open-addressing hash map (linear probing) over tagged words.
+//! Open-addressing hash map (linear probing) over raw words.
 //! Header layout: `[cap, used, kflag, buckets_ptr]` — the header stays put
 //! across growth, only the bucket array is reallocated, so stored map
 //! handles remain valid. Each bucket slot = 4 words
 //! `[used, key, value, hash]`: `hash` caches the caller-provided content
 //! hash for object keys (kkind: 2), so growth rehashes without re-calling
 //! the monomorphized hash(). kflag low bits = key kind (0 int / 1 str /
-//! 2 object); the old vref bit is gone — death cascades are tag-driven.
-//! Bucket buffers are untracked internal chunks freed by the map itself
-//! (grow frees the stale buffer directly, dying with the header otherwise).
+//! 2 object); bit 2 = `vref` (value words are references, so the death
+//! cascade releases them). Keys are references iff kkind != 0; value
+//! refness comes from VPREF. Bucket buffers are untracked internal chunks
+//! freed by the map itself (grow frees the stale buffer directly, dying
+//! with the header otherwise).
 
 use crate::alloc::sloth_rt_alloc;
 use crate::arrays::{sloth_arr_new_k, sloth_arr_push};
 use crate::panics;
-use crate::rc;
-use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
+use crate::rc::{rc_addr, w_ref, w_unref};
 use crate::strings::StrT;
 
 const MAP_HDR_W: i64 = 4;
 const MAP_SLOT_W: i64 = 4;
 
+/// value-ref flag of kflag (bit 2): set when V is a reference type
+const MAP_VREF: i64 = 4;
+
 fn map_kkind_raw(kflag: i64) -> i64 {
     kflag & 3
+}
+
+/// key words are references iff the key kind is str (1) or object (2)
+fn map_kref_raw(kflag: i64) -> bool {
+    map_kkind_raw(kflag) != 0
+}
+
+fn map_vref_raw(kflag: i64) -> bool {
+    kflag & MAP_VREF != 0
 }
 
 fn map_slot(m: usize, i: i64) -> *mut i64 {
@@ -106,21 +119,22 @@ pub extern "C" fn sloth_map_new(kflag_w: i64) -> i64 {
         let p = rc_addr((MAP_HDR_W * 8) as usize, Some(map_dtor)) as *mut i64;
         *p = cap;
         *p.offset(1) = 0;
-        // the vref bit is retired; only the kkind low bits are meaningful
-        *p.offset(2) = rc::dec_i(kflag_w) & 3;
+        // low 2 bits = key kind, bit 2 = value-ref flag
+        *p.offset(2) = kflag_w & 7;
         *p.offset(3) = map_alloc_buckets(cap) as i64;
         w_ref(p as usize)
     }
 }
 
-/// death cascade: release each live pair's key/value words (tag-driven,
-/// inert for value words), then free the bucket buffer (internal, untracked)
+/// death cascade: release each live pair's reference key/value (compile-time
+/// refness flags), then free the bucket buffer (internal, untracked)
 fn map_dtor(p: usize, _aux: u64) {
     unsafe {
         let m = p as *mut i64;
         let cap = *m;
         let kflag = map_kflag_raw(p);
-        let _kkind = map_kkind_raw(kflag);
+        let kref = map_kref_raw(kflag);
+        let vref = map_vref_raw(kflag);
         let bp = *m.offset(3) as *mut i64;
         if !bp.is_null() {
             let mut i = 0i64;
@@ -128,11 +142,11 @@ fn map_dtor(p: usize, _aux: u64) {
                 let s = bp.offset((i * MAP_SLOT_W) as isize);
                 if *s == 1 {
                     let k = *s.offset(1);
-                    if k != 0 {
+                    if kref && k != 0 {
                         crate::rc::sloth_rc_release(k);
                     }
                     let v = *s.offset(2);
-                    if v != 0 {
+                    if vref && v != 0 {
                         crate::rc::sloth_rc_release(v);
                     }
                 }
@@ -149,7 +163,7 @@ fn map_kflag_raw(p: usize) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_map_len(m_w: i64) -> i64 {
-    unsafe { rc::enc_i(*(w_unref(m_w) as *mut i64).offset(1)) }
+    unsafe { *(w_unref(m_w) as *mut i64).offset(1) }
 }
 
 /// bucket index for a lookup/insert: object keys use the caller-provided
@@ -246,14 +260,16 @@ fn map_upsert(m: usize, key: i64, h: i64) -> *mut i64 {
                 // release the old key and swap the new one into the slot
                 // (leaving the stale pointer behind would double-free it);
                 // then evict the old value's count
+                let kref = map_kref_raw(kflag);
+                let vref = map_vref_raw(kflag);
                 let ok = *s.offset(1);
-                if ok != 0 {
+                if kref && ok != 0 {
                     crate::rc::sloth_rc_release(ok);
                 }
                 *s.offset(1) = key;
                 *s.offset(3) = h;
                 let ov = *s.offset(2);
-                if ov != 0 {
+                if vref && ov != 0 {
                     crate::rc::sloth_rc_release(ov);
                 }
                 return s;
@@ -369,15 +385,15 @@ pub extern "C" fn sloth_map_keys(m_w: i64) -> i64 {
         let m = w_unref(m_w);
         let cap = *(m as *mut i64);
         let kflag = map_kflag_raw(m);
-        let _kkind = map_kkind_raw(kflag);
-        let mut arr = sloth_arr_new_k(0, 0);
+        let kref = map_kref_raw(kflag);
+        // the result array owns a copy of each reference key
+        let mut arr = sloth_arr_new_k(0, if kref { 1 } else { 0 });
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
                 let k = *s.offset(1);
-                // the result array owns its copy of each ref key
-                if k != 0 && w_is_ref(k) {
+                if kref && k != 0 {
                     crate::rc::sloth_rc_retain(k);
                 }
                 arr = sloth_arr_push(arr, k);
@@ -393,14 +409,15 @@ pub extern "C" fn sloth_map_values(m_w: i64) -> i64 {
     unsafe {
         let m = w_unref(m_w);
         let cap = *(m as *mut i64);
-        // values re-own their slots; tag-driven cascade needs no vref mask
-        let mut arr = sloth_arr_new_k(0, 0);
+        let vref = map_vref_raw(map_kflag_raw(m));
+        // values re-own their reference slots
+        let mut arr = sloth_arr_new_k(0, if vref { 1 } else { 0 });
         let mut i = 0i64;
         while i < cap {
             let s = map_slot(m, i);
             if *s == 1 {
                 let v = *s.offset(2);
-                if v != 0 {
+                if vref && v != 0 {
                     crate::rc::sloth_rc_retain(v);
                 }
                 arr = sloth_arr_push(arr, v);

@@ -32,27 +32,32 @@ impl ModEmitter {
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             ci, z, cid
         ));
-        // rc migration patch C: frames own ref-typed captures — the mask
-        // makes the death cascade release each capture's count
-        {
-            let mut lam_mask = 0i64;
-            for (j, _cn) in caps.iter().enumerate() {
-                match fw.lookup(&_cn.clone()) {
-                    Some((_, t)) => {
-                        if self.is_ref(t) {
-                            lam_mask |= 1 << j;
-                        }
-                    }
-                    None => {}
-                };
+        // per-frame reference mask: a captured field is a ref exactly when
+        // its surface type is (base-first == capture order)
+        let mut cmask: i64 = 0;
+        for (j, cn) in caps.iter().enumerate() {
+            if let Some((_a, ct)) = fw.lookup(cn) {
+                if !self.is_float(ct) && self.is_ref(ct) {
+                    cmask |= 1 << j;
+                }
             }
+        }
+        {
             let mvc = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", mvc, lam_mask));
-            let nfc = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", nfc, ncap));
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                mvc,
+                enc_i_lit(cmask)
+            ));
+            let nvc = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                nvc,
+                enc_i_lit(ncap as i64)
+            ));
             fw.op(&format!(
                 "    call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
-                ci, mvc, nfc
+                ci, mvc, nvc
             ));
         }
         let nf = fw.v();
@@ -266,7 +271,10 @@ fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
         }
         Ty::JoinHandle(e) => {
             let et = syn_ty_of(me, e)?;
-            Some(Type::Simple(SimpleType::Named("JoinHandle".into(), vec![et])))
+            Some(Type::Simple(SimpleType::Named(
+                "JoinHandle".into(),
+                vec![et],
+            )))
         }
         Ty::Channel(e) => {
             let et = syn_ty_of(me, e)?;

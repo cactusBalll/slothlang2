@@ -46,23 +46,24 @@ LLVM IR ──► JIT（`run`）或 目标文件（`build`，经 mlir-opt/mlir-t
 
 ## 2.3 MLIR 类型映射
 
-语言类型（值类型与引用类型）在 MLIR 层**统一映射为带 tag 的 `i64` 词**。
+语言类型（值类型与引用类型）在 MLIR 层**统一映射为 `i64` 词**（无 tag）。
 下表是源码类型到 MLIR 类型与运行时表示的对应：
 
 | 源码类型 | MLIR 类型 | 运行时词面编码 |
 | --- | --- | --- |
-| `int` | `i64` | `v << 1`（63-bit，环绕） |
-| `float` | `i64`（调用边界转 `f64`） | `(bits & !1) >> 1`（f63） |
-| `bool` | `i64` | `0` / `2` |
+| `int` | `i64` | 原生 i64（64-bit，环绕） |
+| `float` | `i64`（调用边界转 `f64`） | 原生 f64 位模式（bitcast） |
+| `bool` | `i64` | `0` / `1` |
 | `nil` | `i64` | `0` |
-| `str` / `Array<T>` / `Map<K,V>` / 类实例 / 闭包 / `dyn` | `i64` | `ptr \| 1`（tag=1 表示引用句柄） |
+| `str` / `Array<T>` / `Map<K,V>` / 类实例 / 闭包 / `dyn` | `i64` | 裸 payload 指针（`0` = nil） |
 | `T?`（值型 `T`） | `i64` | 指向 payload 盒的引用词，`0` = `nil` |
 | `T?`（引用型 `T`） | `i64` | 句柄本身，`0` = `nil` |
 | `range` | `i64` | 指向 `{lo, hi}` 双词盒的引用词 |
 
 注意：**所有** SSA 值、局部槽（`memref<1xi64>`）、对象字段、容器元素都是这一套
-词面；`mlir_ret_ty` / `mlir_word_ty` 恒为 `i64`。真实的 tag 编解码可在示例
-MLIR 里直接看到（`arith.shli` / `arith.shrsi` / `llvm.bitcast`）。
+词面；`mlir_ret_ty` / `mlir_word_ty` 恒为 `i64`。数值只在标量域转换：`float`
+用 `llvm.bitcast`；`int` 直接就是 `i64`。引用/值的区分由编译期掩码在 ARC
+级联处完成（不再有运行期 `arith.shli/shrsi` tag 编解码）。
 
 ## 2.4 运行时符号面
 

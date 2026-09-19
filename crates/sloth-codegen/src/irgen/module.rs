@@ -22,6 +22,14 @@ impl ModEmitter {
             self.mod_alias.insert(a.to_string(), mname.to_string());
         }
         let qname = alias.unwrap_or(mname).to_string();
+        // imported opaque extern types: register so `is_ref` never treats their
+        // raw C-pointer handles as rc-managed (de-tag: retain/release on a raw
+        // foreign pointer would corrupt memory)
+        for d in &prog.decls {
+            if let DeclNode::ExternType = &d.node {
+                self.extern_types.insert(d.name.clone());
+            }
+        }
         // foreign global cells (declared lazily; inits run in modinit):
         // register BEFORE func emission so foreign bodies can read their own
         // module's globals via fglobals
@@ -286,8 +294,8 @@ pub fn rt_decls() -> String {
     );
     // coroutine extension CE-P1: stackful fiber entry points
     s.push_str(
-        "  func.func private @sloth_fiber_create(i64, i64) -> i64
-  func.func private @sloth_fiber_create_with(i64, i64, i64) -> i64
+        "  func.func private @sloth_fiber_create(i64, i64, i64) -> i64
+  func.func private @sloth_fiber_create_with(i64, i64, i64, i64) -> i64
   func.func private @sloth_fiber_resume(i64, i64, i64) -> i64
   func.func private @sloth_fiber_transfer(i64, i64, i64) -> i64
   func.func private @sloth_fiber_yield(i64) -> i64
@@ -302,12 +310,12 @@ pub fn rt_decls() -> String {
     );
     // multithreading extension TH-P1/P2: threads, channels, mutexes, atomics
     s.push_str(
-        "  func.func private @sloth_thread_spawn(i64, i64) -> i64
+        "  func.func private @sloth_thread_spawn(i64, i64, i64, i64) -> i64
   func.func private @sloth_thread_join(i64) -> i64
   func.func private @sloth_thread_detach(i64) -> i64
   func.func private @sloth_thread_current_id() -> i64
   func.func private @sloth_thread_yield_now() -> i64
-  func.func private @sloth_chan_new(i64) -> i64
+  func.func private @sloth_chan_new(i64, i64) -> i64
   func.func private @sloth_chan_send(i64, i64) -> i64
   func.func private @sloth_chan_recv(i64, i64) -> i64
   func.func private @sloth_chan_close(i64) -> i64
@@ -628,6 +636,11 @@ pub fn obj_rt_decls() -> String {
     s.push_str("  func.func private @sloth_obj_vtable(i64) -> i64\n");
     s.push_str("  func.func private @sloth_panic_noimpl(i64) -> i64\n");
     s.push_str("  func.func private @sloth_panic_divzero() -> i64\n");
+    s.push_str("  func.func private @sloth_builtin_info(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_dyn_unbox(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_dyn_to_str(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_dyn_hash(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_dyn_binop(i64, i64, i64, i64) -> i64\n");
     s
 }
 

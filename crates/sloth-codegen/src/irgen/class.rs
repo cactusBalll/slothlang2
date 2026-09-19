@@ -117,7 +117,8 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    /// field offsets in words: idx counted from slot 2 (slot 0: cls info, 1: unused?id)
+    /// field offsets in words: idx counted from word 2 (word 0: raw ObjInfo
+    /// pointer, word 1: raw vtable pointer)
     pub(crate) fn field_index(&self, clsname: &str, field: &str) -> usize {
         // layout: base-class fields first; materialize the chain base-first
         let mut chain: Vec<String> = Vec::new();
@@ -358,7 +359,7 @@ pub(crate) fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
 
 impl ModEmitter {
     /// per-class rc field mask: bit i (base-class-first layout) = field i is
-    /// a refcounted word; fields are the flat chain of the superclass chain
+    /// a reference word; fields are the flat chain of the superclass chain
     pub(crate) fn class_refmask(&self, clsname: &str) -> (i64, i64) {
         let mut chain: Vec<String> = Vec::new();
         let mut cur = Some(clsname.to_string());
@@ -421,14 +422,22 @@ impl ModEmitter {
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             cid, z, ids
         ));
-        // rc migration patch C: crate the class's refcounted-field mask so
-        // the rt cascade releases ref fields on instance death
+        // crate the class's reference-field mask so the rt death cascade
+        // releases exactly the ref fields on instance death
         {
             let (mask, nft) = self.class_refmask(clsname);
             let mv = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", mv, mask));
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                mv,
+                enc_i_lit(mask)
+            ));
             let nfv = fw.v();
-            fw.op(&format!("    {} = arith.constant {} : i64", nfv, nft));
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                nfv,
+                enc_i_lit(nft)
+            ));
             fw.op(&format!(
                 "    call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
                 cid, mv, nfv
@@ -591,7 +600,7 @@ impl ModEmitter {
         let vals: Vec<String> = {
             // patch 42: caller-side Opt-param coercion before the emission;
             // the ABI surface follows the PLAN spelling (boxes ride i64)
-            let vals2 = self.coerce_args_to_params(fw, argv, &plan.params);
+            let vals2 = self.coerce_args_to_params(fw, argv, &plan.params, pos);
             let _sigs: Vec<String> = match plan.params.len().cmp(&argv.len()) {
                 std::cmp::Ordering::Greater => vec![],
                 _ => vec![],
@@ -822,14 +831,10 @@ impl ModEmitter {
                 slotc,
                 enc_i_lit(slot as i64)
             ));
-            // tagged fn-pointer word (bit0 set); dyn dispatch clears it back
-            let one = fw.v();
-            fw.op(&format!("    {} = arith.constant 1 : i64", one));
-            let fpw = fw.v();
-            fw.op(&format!("    {} = arith.ori {}, {} : i64", fpw, fp, one));
+            // raw fn-pointer word in the slot
             fw.op(&format!(
                 "    call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
-                vt, slotc, fpw
+                vt, slotc, fp
             ));
         }
         // cache the pointer for later objects, then merge
@@ -940,17 +945,12 @@ impl ModEmitter {
         let saved_dangling = std::mem::take(&mut fw.dangling);
         let saved_xfer = std::mem::take(&mut fw.xfer);
         fw.cjump(&ce, &lbl_call, &lbl_panic);
-        // resolved: call through the slot pointer
+        // resolved: call through the slot pointer (raw fn ptr)
         fw.label(&lbl_call);
-        // clear the tag bit: slots hold tagged fn-pointer words
-        let fm2 = fw.v();
-        fw.op(&format!("    {} = arith.constant -2 : i64", fm2));
-        let fpr = fw.v();
-        fw.op(&format!("    {} = arith.andi {}, {} : i64", fpr, fp, fm2));
         let vp = fw.v();
         fw.op(&format!(
             "    {} = llvm.inttoptr {} : i64 to !llvm.ptr",
-            vp, fpr
+            vp, fp
         ));
         let mut vals: Vec<String> = Vec::new();
         vals.extend(argv.iter().map(|x| x.0.clone()));
@@ -1049,16 +1049,27 @@ impl ModEmitter {
     ) {
         let _ = pos;
         // patch 42: value-optional fields box bare scalar stores (nil /
-        // already-opt words pass through untouched)
-        let (v, _vt2) = if self.opt_inner(ft).is_some() || self.weak_inner(ft).is_some() {
+        // already-opt words pass through untouched); `dyn` fields auto-box
+        // builtin values into a synthetic object
+        let (v, _vt2) = if self.opt_inner(ft).is_some()
+            || self.weak_inner(ft).is_some()
+            || matches!(self.r.get(ft), Ty::Dyn(_))
+        {
             self.coerce_word_to(fw, v, vt, ft)
         } else {
             (v.to_string(), vt)
         };
         let _ = _vt2;
-        // tag migration: one word route — release the overwritten word and
-        // retain the new one; rt no-ops on non-ref/nil words, so the owner
-        // bookkeeping is unconditional
+        // de-tag: reference fields release the overwritten word and retain
+        // the new one; value fields (int/float/bool) are not rc-managed and
+        // store raw
+        if !self.is_ref(ft) {
+            fw.op(&format!(
+                "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                obj, idx, v
+            ));
+            return;
+        }
         let old = fw.v();
         fw.op(&format!(
             "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",

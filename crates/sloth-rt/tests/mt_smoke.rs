@@ -34,7 +34,7 @@ fn channel_mpmc() {
     const P: usize = 4;
     const C: usize = 4;
     const N: i64 = 25_000;
-    let ch = channel::sloth_chan_new(wi(64));
+    let ch = channel::sloth_chan_new(wi(64), 0);
     let mut hs = Vec::new();
     for _ in 0..P {
         let c = rc::sloth_rc_retain(ch);
@@ -66,7 +66,7 @@ fn channel_mpmc() {
 
 #[test]
 fn channel_close_drain() {
-    let ch = channel::sloth_chan_new(wi(0));
+    let ch = channel::sloth_chan_new(wi(0), 0);
     channel::sloth_chan_send(ch, wi(7));
     channel::sloth_chan_send(ch, wi(8));
     channel::sloth_chan_close(ch);

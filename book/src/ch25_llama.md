@@ -3,7 +3,7 @@
 本章对应张量扩展专项（TE-P4）的验收目标：**在 sloth2 上从 checkpoint 加载到
 文本生成，单机跑通 llama2.c `run.c` 推理**。llama2.c 是一个纯 C 的 Llama-2
 推理实现，本章说明 sloth2 的 `Tensor` 类型、`tensor.*`/`math` 内建、张量标准
-库，以及 `lib/sloth/llama.slt` 对 `run.c` 的移植。
+库，以及 `examples/llama/llama.slt` 对 `run.c` 的移植。
 
 ## 25.1 总览
 
@@ -12,8 +12,8 @@
 | 语言类型 | `Ty::Tensor(TyId, u32)` | `Tensor<float, R>` / `Tensor<int, R>`，rank 编译期常量 |
 | 编译器内建 | 发射器识别 `tensor.*` / `float_*` 调用 | 直接发 `linalg`/`scf`/`math` IR |
 | 运行时 | `crates/sloth-rt/src/{tensors,mmap,strings,math}.rs` | 张量描述符、mmap、字符串面、标量 libm |
-| 标准库 | `lib/sloth/{tensor,random,fs,tokenizer,llama}.slt` | 纯 sloth 的包装与推理实现 |
-| 用例 | `examples/llama/` | tiny 差分 + stories42M 生成 |
+| 标准库 | `lib/sloth/{tensor,random,fs}.slt` | 纯 sloth 的包装 |
+| 用例 | `examples/llama/` | `llama.slt`/`tokenizer.slt` 推理 + tiny 差分 + stories42M 生成 |
 
 `tensor.*` 不是普通函数，而是**调用点识别的内建**（与 `print`/`len` 同类）。
 运算符写在 `.slt` 里，需要 `linalg` lowering 的核由发射器生成 IR。
@@ -21,7 +21,7 @@
 ## 25.2 `Tensor<T, R>` 与两条 lowering 通道
 
 `Tensor<T, R>` 的元素 `T` 仅允许 `float`/`int`，rank `R` 支持 1..=3。在槽
-位 / 形参 / 返回 / 字段里它仍是**一个 tagged rc 词**（与 `Array` 同构），负载
+位 / 形参 / 返回 / 字段里它仍是**一个引用词（rc 句柄）**（与 `Array` 同构），负载
 为 7 词：
 
 ```
@@ -77,7 +77,9 @@ f64 张量（见 §25.8）。
 lib/sloth/
 ├─ tensor.slt      # normalize/sumsq/l2 + matrix_view/cube_view/flatten_view
 ├─ random.slt      # XorShift（TE-P0 位运算）
-├─ fs.slt          # ByteBuffer + mmap 读取 + 字符串/输出助手
+└─ fs.slt          # ByteBuffer + mmap 读取 + 字符串/输出助手
+
+examples/llama/
 ├─ tokenizer.slt   # BPE encode/decode
 └─ llama.slt       # Config/Weights/RunState + forward + 采样 + generate
 ```
@@ -204,8 +206,8 @@ pub func sample(cfg, logits, temperature, topp, rng): int {
 | 项 | `run.c` | sloth2 | 影响 |
 | --- | --- | --- | --- |
 | 权重精度 | 直接读 f32 | f32 → f64 **加宽拷贝** | 内存 ×2；数值更精确 |
-| 算术精度 | IEEE f32 | f63 存储 / f62 算术（见附录 A.2.1） | greedy 下确定性对齐 |
-| 整数 | i64 | **63 bit** | RNG 需注意溢出 |
+| 算术精度 | IEEE f32 | 原生 f64（满精度） | greedy 下确定性对齐 |
+| 整数 | i64 | 原生 i64（64 bit） | RNG 需注意溢出 |
 | RNG | 64-bit `xorshift64*` | 31-bit `XorShift` | greedy 无 RNG，逐 token 对齐；temperature 采样暂未逐位对齐 |
 | 显存/内存 | 权重 mmap | 权重加宽后常驻 | 42M ≈ 500MB（167MB 映射 + 334MB f64） |
 
@@ -213,8 +215,8 @@ pub func sample(cfg, logits, temperature, topp, rng): int {
 
 下面的片段由 `slothc ir <file>.sl` 实际发射（做了删减）。阅读前先记住三点：
 
-- **整数常量是 tagged 的**：IR 里 `arith.constant 2 : i64` 表示值 `1`
-  （`v << 1` 让出 tag 位），运行时助手内部 `dec_i` 还原；`float` 同理。
+- **整数就是原生的**：IR 里 `arith.constant 2 : i64` 就是值 `2`（无 tag/移位）；
+  `float` 以 `i64` 位模式承载，标量域用 `llvm.bitcast` 转换。
 - **引用赋值点会插 ARC**：`sloth_rc_retain`/`sloth_rc_release` 在片段中省略。
 - **`memref<1xi64>` 是一词槽位**（张量句柄），不是张量数据。
 
@@ -269,7 +271,7 @@ call @sloth_tensor_dim_eq(%w, %c1, %x, %c0) : (i64, i64, i64, i64) -> i64
 // 描述符词 -> rank-1 基 memref
 %wb = call @sloth_tensor_basis_f64(%w)
         : (i64) -> memref<?xf64, strided<[?], offset: ?>>
-// dim/stride 是 tagged 整数：shrsi 1 解码后 index_cast
+// dim/stride 是原生 i64：index_cast 后直接用
 %wm = memref.reinterpret_cast %wb to offset: [%c0],
         sizes: [%dw0, %dw1], strides: [%sw0, %sw1]
       : memref<?xf64, strided<[?], offset: ?>>
@@ -322,10 +324,9 @@ linalg.generic {
 再用一个融合 `linalg.generic` 完成 `out = x*inv*w`：
 
 ```mlir
-// 维度是 tagged：sloth_tensor_dim -> shrsi 1 解码 -> index_cast
+// 维度是原生 i64：sloth_tensor_dim -> index_cast
 %nd = call @sloth_tensor_dim(%a, %c0) : (i64, i64) -> i64
-%n  = arith.shrsi %nd, %c1 : i64
-%ni = arith.index_cast %n : i64 to index
+%ni = arith.index_cast %nd : i64 to index
 // 1) sum(x^2)
 %ss = scf.for %i = %c0 to %ni step %c1 iter_args(%acc = %zero) -> (f64) {
   %xi = memref.load %a_m[%i] : memref<?xf64, strided<[?], offset: ?>>
@@ -368,7 +369,7 @@ w[0][1] = 7.0;
 
 ```mlir
 func.func private @sloth_tensor_reshape2(i64, i64, i64, i64) -> i64
-// matrix_view(d, 0, 2, 3): off, d0, d1（tagged）
+// matrix_view(d, 0, 2, 3): off, d0, d1（原生 i64）
 %w = call @sloth_tensor_reshape2(%d, %c0, %c2, %c3) : (i64, i64, i64, i64) -> i64
 // w[0][1] = 7.0：降 rank 视图 + 标量写（写进 d 的缓冲）
 %r0 = call @sloth_tensor_view(%w, %c0, %c1, %c0) : (i64, i64, i64, i64) -> i64

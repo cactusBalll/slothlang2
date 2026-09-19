@@ -72,19 +72,25 @@ impl ModEmitter {
         } else {
             "sloth_fiber_create"
         };
+        let eref = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            eref,
+            if self.is_ref(y) { 1 } else { 0 }
+        ));
         let r = fw.v();
         match sarg {
             Some(s) => {
                 let (sv, _st) = self.emit_expr(fw, s);
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
-                    r, sym, fv, iv, sv
+                    "    {} = call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                    r, sym, fv, iv, sv, eref
                 ));
             }
             None => {
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}) : (i64, i64) -> i64",
-                    r, sym, fv, iv
+                    "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                    r, sym, fv, iv, eref
                 ));
             }
         }

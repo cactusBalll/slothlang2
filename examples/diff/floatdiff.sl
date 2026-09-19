@@ -1,4 +1,4 @@
-// Float precision differential: LSB clearing on every stored value.
+// Float precision differential: native f64 (de-tag); print format differs from C %.17g.
 func main(): unit {
     print(1.0 / 3.0 * 3.0);            // exact 1.0 in IEEE f64
     print(1.0 / 7.0 * 7.0);            // exact 1.0 in IEEE f64

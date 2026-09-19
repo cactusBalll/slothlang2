@@ -1,7 +1,7 @@
-//! Small shared helpers: mangling, word types, super-init scanners, and
-//! the tagged-word encode/decode emit points (word plane: LSB = tag bit;
-//! ref = `ptr | 1`, int = `v << 1` 63-bit, f64 = the f64 bits with the
-//! mantissa LSB cleared and shifted right once, nil = 0).
+//! Small shared helpers: mangling, word types, super-init scanners, and the
+//! word encode/decode emit points (de-tag word plane: reference = raw
+//! payload pointer, int = native i64, float = f64 bits, bool = 0/1, nil = 0;
+//! the codec is identity/bitcast so callers are unchanged).
 
 #[allow(unused_imports)]
 use super::*;
@@ -16,60 +16,39 @@ use std::collections::{HashMap, HashSet};
 
 pub const WW: usize = 8;
 
-// ---------------- tagged-word encode/decode emit points ----------------
+// ---------------- word encode/decode emit points ----------------
 
-/// int literal -> tagged word form (63-bit)
+/// int literal -> word form (de-tag: identity, full 64-bit)
 pub(crate) fn enc_i_lit(v: i64) -> i64 {
-    v << 1
+    v
 }
 
-/// f64 literal -> tagged word form (mantissa LSB sacrificed)
+/// f64 literal -> word form (de-tag: raw IEEE bits)
 pub(crate) fn enc_f_lit(v: f64) -> i64 {
-    ((v.to_bits() & !1) as i64) >> 1
+    v.to_bits() as i64
 }
 
-/// tag an int scalar into a word (encode)
-pub(crate) fn emit_enc_int(fw: &mut FnWalk, v: &str) -> String {
-    let one = fw.v();
-    fw.op(&format!("    {} = arith.constant 1 : i64", one));
-    let r = fw.v();
-    fw.op(&format!("    {} = arith.shli {}, {} : i64", r, v, one));
-    r
+/// int scalar -> word (de-tag: identity)
+pub(crate) fn emit_enc_int(_fw: &mut FnWalk, v: &str) -> String {
+    v.to_string()
 }
 
-/// decode a word into a raw int scalar (63-bit arithmetic)
-pub(crate) fn emit_dec_int(fw: &mut FnWalk, w: &str) -> String {
-    let one = fw.v();
-    fw.op(&format!("    {} = arith.constant 1 : i64", one));
-    let r = fw.v();
-    fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, w, one));
-    r
+/// word -> raw int scalar (de-tag: identity)
+pub(crate) fn emit_dec_int(_fw: &mut FnWalk, w: &str) -> String {
+    w.to_string()
 }
 
-/// tag an f64 scalar into a word: bitcast to the bit pattern, clear the
-/// mantissa LSB, shift right
+/// f64 scalar -> word: bitcast to the raw bit pattern
 pub(crate) fn emit_enc_f(fw: &mut FnWalk, v: &str) -> String {
     let b = fw.v();
     fw.op(&format!("    {} = llvm.bitcast {} : f64 to i64", b, v));
-    let mask = fw.v();
-    fw.op(&format!("    {} = arith.constant -3 : i64", mask));
-    let m = fw.v();
-    fw.op(&format!("    {} = arith.andi {}, {} : i64", m, b, mask));
-    let one = fw.v();
-    fw.op(&format!("    {} = arith.constant 1 : i64", one));
-    let r = fw.v();
-    fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, m, one));
-    r
+    b
 }
 
-/// decode a word into an f64 scalar: shift left once and bitcast back
+/// word -> f64 scalar: bitcast back
 pub(crate) fn emit_dec_f(fw: &mut FnWalk, w: &str) -> String {
-    let one = fw.v();
-    fw.op(&format!("    {} = arith.constant 1 : i64", one));
-    let s = fw.v();
-    fw.op(&format!("    {} = arith.shli {}, {} : i64", s, w, one));
     let r = fw.v();
-    fw.op(&format!("    {} = llvm.bitcast {} : i64 to f64", r, s));
+    fw.op(&format!("    {} = llvm.bitcast {} : i64 to f64", r, w));
     r
 }
 
@@ -84,17 +63,16 @@ pub(crate) fn w_dec_word(me: &mut ModEmitter, fw: &mut FnWalk, w: &str, ty: TyId
     }
 }
 
-/// i1 -> encoded bool word (0 / enc(1)); bool words ride the int codec
+/// i1 -> bool word (0 / 1)
 pub(crate) fn ext_bool(fw: &mut FnWalk, c: &str) -> String {
     let z = fw.v();
-    // zero-extend: an i1 `true` sign-extends to -1, which would corrupt
-    // the encoded bool word (we need exactly 1)
+    // zero-extend: an i1 `true` sign-extends to -1, which would corrupt the
+    // bool word (we need exactly 1)
     fw.op(&format!("    {} = arith.extui {} : i1 to i64", z, c));
-    emit_enc_int(fw, &z)
+    z
 }
 
-/// convert an int word into an f64 word (decode, promote, re-encode);
-/// replaces the legacy bare `sitofp` int-word boundary
+/// convert an int word into an f64 word (decode, promote, re-encode)
 pub(crate) fn iw_to_f64_word(fw: &mut FnWalk, w: &str) -> String {
     let d = emit_dec_int(fw, w);
     let f = fw.v();

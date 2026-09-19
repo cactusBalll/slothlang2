@@ -1,19 +1,22 @@
-//! Tagged-word rc core over the in-band object header (ARC migration).
+//! rc core over the in-band object header (de-tag migration, PLAN §14).
 //!
-//! Word tag (LSB): bit0 = 1 marks a refcounted handle (`ptr | 1`, payload is
-//! 16-aligned); bit0 = 0 is a value word (63-bit int `v << 1`, f64
-//! `(bits & !1) >> 1`, nil = 0) — retain/release/weak all no-op on value
-//! words without ever touching memory.
+//! The word plane is untagged: a reference is a bare payload pointer (0 =
+//! nil) and a value is its native word (int = i64, float = f64 bits,
+//! bool = 0/1). Because a word no longer carries its own kind, the runtime
+//! never guesses: every `retain`/`release` call is emitted by the compiler on
+//! a statically-ref-typed word, and death cascades read the compile-time
+//! refness masks/flags recorded on the object header (obj `refmask`, arr
+//! `aux` elref, map kflag vref, channel/fiber `eref`). A `release(0)` (nil)
+//! is the only inert input.
 //!
 //! Every rc-managed handle (object, array, map, string, lambda frame,
 //! payload box, weak box) carries a hidden header 48 bytes BELOW its
 //! payload pointer: `[cnt, size, dtor, aux, weak_head, weak_cnt]`.
 //! `retain`/`release` bump the header count; reaching zero runs the entry's
-//! death destructor (cascading field/element releases — mask-free,
-//! tag-driven), invalidates every weak box chained into the header's weak
-//! list, then frees the header+payload chunk. No collector exists, so a
-//! missed release leaks memory rather than crashing; a release of a value
-//! word is an inert no-op by the tag bit alone.
+//! death destructor (cascading field/element releases, mask-driven),
+//! invalidates every weak box chained into the header's weak list, then
+//! frees the header+payload chunk. No collector exists, so a missed release
+//! leaks memory rather than crashing.
 //!
 //! Multithreading (TH): counts are atomic (`fetch_add` Relaxed /
 //! `fetch_sub` Release + Acquire fence). The strong count and a separate
@@ -25,50 +28,40 @@
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-/// tag bit of a word (LSB): 1 = refcounted handle, 0 = value word
-pub const W_TAG: i64 = 1;
-/// mask to clear the tag bit (handle -> raw payload pointer)
-pub const W_UNTAG: i64 = !1;
-
-#[inline]
-pub const fn w_is_ref(w: i64) -> bool {
-    w & W_TAG != 0
-}
-
-/// handle word -> raw payload pointer
+/// reference word -> raw payload pointer (de-tag: identity)
 #[inline]
 pub const fn w_unref(w: i64) -> usize {
-    (w & W_UNTAG) as usize
+    w as usize
 }
 
-/// raw payload pointer -> handle word
+/// raw payload pointer -> reference word (de-tag: identity)
 #[inline]
 pub const fn w_ref(p: usize) -> i64 {
-    (p as i64) | W_TAG
+    p as i64
 }
 
-/// tagged int word -> raw value (63-bit arithmetic, the sign rides bit `62`)
+/// int word -> raw value (de-tag: identity)
 #[inline]
 pub const fn dec_i(w: i64) -> i64 {
-    w >> 1
+    w
 }
 
-/// raw int value -> tagged word (63-bit wrap semantics)
+/// raw int value -> word (de-tag: identity)
 #[inline]
 pub const fn enc_i(v: i64) -> i64 {
-    v << 1
+    v
 }
 
-/// tagged f64 word bits -> raw f64 bits (1 mantissa LSB sacrificed)
+/// float word bits -> raw f64 bits (de-tag: identity)
 #[inline]
 pub const fn dec_f_bits(w: i64) -> u64 {
-    (w as u64) << 1
+    w as u64
 }
 
-/// raw f64 bits -> tagged word (mantissa LSB cleared, then shift in)
+/// raw f64 bits -> word (de-tag: identity)
 #[inline]
 pub const fn enc_f_bits(bits: u64) -> i64 {
-    ((bits & !1) as i64) >> 1
+    bits as i64
 }
 
 /// hidden header for a tracked payload (6 words, 48 bytes, payload-aligned)
@@ -79,9 +72,10 @@ pub(crate) struct Hdr {
     /// payload size in bytes (drives the relocating realloc copy)
     size: usize,
     /// death hook executed when the count reaches zero (cascade releases
-    /// tagged words; mask-free)
+    /// via the kind's compile-time refness mask)
     dtor: Option<fn(usize, u64)>,
-    /// reserved kind flags (tag migration retired the elref aux)
+    /// per-kind auxiliary word: object field count, array element-ref flag
+    /// (`elref`); interpreted by each kind's destructor
     aux: u64,
     /// intrusive chain of weak boxes targeting this payload
     weak_head: *mut WeakBox,
@@ -141,7 +135,7 @@ impl Drop for WeakGuard {
 
 #[no_mangle]
 pub extern "C" fn sloth_weak_new(h: i64) -> i64 {
-    if !w_is_ref(h) {
+    if h == 0 {
         return 0;
     }
     unsafe {
@@ -192,7 +186,7 @@ fn weak_dtor(b: usize, _aux: u64) {
 /// mapped while this box lives.
 #[no_mangle]
 pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
-    if !w_is_ref(w) {
+    if w == 0 {
         return 0;
     }
     unsafe {
@@ -213,12 +207,10 @@ pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
             if c == 0 {
                 return 0;
             }
-            match (*hdr).cnt.compare_exchange_weak(
-                c,
-                c + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
+            match (*hdr)
+                .cnt
+                .compare_exchange_weak(c, c + 1, Ordering::Acquire, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(_) => continue,
             }
@@ -230,7 +222,7 @@ pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
 /// release a weak box's slot ownership (detach + free; idempotent)
 #[no_mangle]
 pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
-    if w_is_ref(w) {
+    if w != 0 {
         sloth_rc_release(w);
     }
     0
@@ -238,7 +230,7 @@ pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
 
 // ---------------- diagnostics ----------------
 
-/// number of live tracked handles (diagnostics; tagged int word)
+/// number of live tracked handles (diagnostics; raw int word)
 #[no_mangle]
 pub extern "C" fn sloth_rc_live() -> i64 {
     enc_i(RC_LIVE.load(Ordering::Relaxed) as i64)
@@ -246,7 +238,7 @@ pub extern "C" fn sloth_rc_live() -> i64 {
 
 static RC_LIVE: AtomicU64 = AtomicU64::new(0);
 
-/// number of release calls executed (diagnostics; tagged int word)
+/// number of release calls executed (diagnostics; raw int word)
 #[no_mangle]
 pub extern "C" fn sloth_rc_drops() -> i64 {
     enc_i(DROPS.load(Ordering::Relaxed) as i64)
@@ -256,7 +248,7 @@ static DROPS: AtomicU64 = AtomicU64::new(0);
 
 // ---------------- core ----------------
 
-/// allocate a tracked chunk: header + zeroed payload; returns the tagged
+/// allocate a tracked chunk: header + zeroed payload; returns the raw
 /// handle word. Payload zeroing keeps the rt contract (fresh slots are nil).
 pub(crate) unsafe fn rc_addr(n: usize, dtor: Option<fn(usize, u64)>) -> usize {
     let raw = libc::malloc(n + HDR_BYTES) as *mut u8;
@@ -288,10 +280,10 @@ pub(crate) unsafe fn set_aux(payload: usize, aux: u64) {
     (*hdr_of(payload)).aux = aux;
 }
 
-/// retain: bump the count of a tracked handle (no-op for value words)
+/// retain: bump the count of a tracked handle (nil is inert)
 #[no_mangle]
 pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {
-    if w_is_ref(w) {
+    if w != 0 {
         unsafe {
             let h = hdr_of(w_unref(w)) as *mut Hdr;
             (*h).cnt.fetch_add(1, Ordering::Relaxed);
@@ -301,12 +293,12 @@ pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {
 }
 
 /// release: drop the count of a tracked handle; zero runs the death
-/// destructor (cascading tagged-word releases), invalidates the weak chain
-/// and frees header+payload once no weak box remains (no-op for value words)
+/// destructor (cascading mask-driven releases), invalidates the weak chain
+/// and frees header+payload once no weak box remains (nil is inert)
 #[no_mangle]
 pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
     DROPS.fetch_add(1, Ordering::Relaxed);
-    if !w_is_ref(w) {
+    if w == 0 {
         return w;
     }
     unsafe {
@@ -353,10 +345,9 @@ pub(crate) unsafe fn relocate(old_w: i64, n: usize) -> i64 {
     // carry the identity (cnt/dtor/aux/weaks) to the new header field-wise
     // (UB-check friendly: copy_nonoverlapping::<Hdr> trips the alignment
     // guard on some toolchains even for legitimately aligned malloc blocks)
-    (*new_hdr).cnt.store(
-        (*old_hdr).cnt.load(Ordering::Relaxed),
-        Ordering::Relaxed,
-    );
+    (*new_hdr)
+        .cnt
+        .store((*old_hdr).cnt.load(Ordering::Relaxed), Ordering::Relaxed);
     (*new_hdr).size = n;
     (*new_hdr).dtor = (*old_hdr).dtor;
     (*new_hdr).aux = (*old_hdr).aux;

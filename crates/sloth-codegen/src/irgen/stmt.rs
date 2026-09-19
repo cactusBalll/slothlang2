@@ -93,6 +93,29 @@ impl ModEmitter {
                         out
                     }
                 };
+                // declared `dyn T`: auto-box builtin value types so the dyn
+                // surface always holds a real object handle (see dynbox.rs)
+                let (v, t) = if let Some(te) = ty {
+                    let dt0 = self.ty_of(te);
+                    if let Ty::Dyn(tn) = self.r.get(dt0).clone() {
+                        if self.value_kind(t).is_some() {
+                            if self.value_impls_trait(&tn) {
+                                let b = self.emit_dyn_box(fw, &v, t, &tn);
+                                (b, dt0)
+                            } else {
+                                let got = self.surface_name(self.r.get(t));
+                                self.err_diff(&s.pos, "initializer", &format!("dyn {}", tn), &got);
+                                (v, t)
+                            }
+                        } else {
+                            (v, t)
+                        }
+                    } else {
+                        (v, t)
+                    }
+                } else {
+                    (v, t)
+                };
                 // declared `dyn T` / trait positions coerce the binding's type
                 let t = match ty {
                     Some(te) => {
@@ -519,7 +542,9 @@ impl ModEmitter {
                                             }
                                         }
                                     }
-                                    if self.opt_inner(v2).is_some() || self.weak_inner(v2).is_some()
+                                    if self.opt_inner(v2).is_some()
+                                        || self.weak_inner(v2).is_some()
+                                        || matches!(self.r.get(v2), Ty::Dyn(_))
                                     {
                                         let (vc, _tc) = self.coerce_word_to(fw, &v, vty, v2);
                                         v = vc;
@@ -1021,13 +1046,15 @@ impl ModEmitter {
             None => self.emit_expr(fw, e),
         };
         // patch 42: value-optional return surfaces box bare scalars; nil
-        // word (0) passes through as nil
-        let (mut v, mut t) = if self.opt_inner(fw.ret).is_some() {
-            let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
-            (vc, tc)
-        } else {
-            (v, t)
-        };
+        // word (0) passes through as nil. `dyn T` returns auto-box builtin
+        // values the same way.
+        let (mut v, mut t) =
+            if self.opt_inner(fw.ret).is_some() || matches!(self.r.get(fw.ret), Ty::Dyn(_)) {
+                let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
+                (vc, tc)
+            } else {
+                (v, t)
+            };
         // declared-return surface check (design §2.2 static typing): int
         // words promote into float returns; word-family conflicts diagnose.
         // Unit returns and unannotated bodies stay lenient.
@@ -1112,7 +1139,19 @@ impl ModEmitter {
                     // builtin `is` on an optional: look through the option
                     // layer and narrow to the payload family when it matches
                     ExprNode::Ident(cn) if Self::is_builtin_type_name(cn) => {
-                        let mut wt = fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone())?;
+                        let cur = fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone())?;
+                        // `dyn T` value narrowed by a builtin test: the branch
+                        // sees the value family (walk_narrowed unboxes)
+                        if matches!(cur, Ty::Dyn(_)) {
+                            let ni = match cn.as_str() {
+                                "int" | "i64" => Some(Ty::I64),
+                                "float" | "f64" => Some(Ty::F64),
+                                "bool" => Some(Ty::Bool),
+                                _ => None,
+                            };
+                            return ni.map(|t| (x.clone(), self.r.mk(t)));
+                        }
+                        let mut wt = cur;
                         let mut had_opt = false;
                         while let Ty::Opt(inner) = wt {
                             had_opt = true;
@@ -1199,8 +1238,8 @@ impl ModEmitter {
     /// are unboxed into a fresh scalar shadow slot)
     pub(crate) fn walk_narrowed(&mut self, fw: &mut FnWalk, x: &str, nty: TyId, body: &Stmt) {
         if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) {
-            let slot = fw.lookup(x).map(|(a, _t)| a);
-            if let Some(a) = slot {
+            let slot = fw.lookup(x).map(|(a, t)| (a, self.r.get(t).clone()));
+            if let Some((a, cur)) = slot {
                 let w = {
                     let zz = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : index", zz));
@@ -1211,8 +1250,19 @@ impl ModEmitter {
                     ));
                     w2
                 };
-                let ot = self.r.mk(Ty::Opt(nty));
-                let (u, _ut) = self.unwrap_opt_word(fw, &w, ot);
+                // a `dyn T` word is a box: unbox its payload; otherwise the
+                // optional payload route applies
+                let (u, _ut) = if matches!(cur, Ty::Dyn(_)) {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_dyn_unbox({}) : (i64) -> i64",
+                        r, w
+                    ));
+                    (r, nty)
+                } else {
+                    let ot = self.r.mk(Ty::Opt(nty));
+                    self.unwrap_opt_word(fw, &w, ot)
+                };
                 fw.push_scope();
                 let sa = fw.v();
                 fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", sa));

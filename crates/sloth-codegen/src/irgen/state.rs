@@ -97,6 +97,8 @@ pub struct ModEmitter {
     /// a 2-word object { tagged fnptr, env }; the bridge has the uniform
     /// `(i64 env, i64 args...) -> i64` ABI that any `Ty::Fn` call site uses.
     pub bridges: HashMap<String, String>,
+    /// auto-boxed builtin value-type method bridges: (kind, method, arity) -> sym
+    pub(crate) builtin_bridges: HashMap<String, String>,
     /// mangled instance name forced for the next plan_func/emit_func
     pub(crate) tp_mangled: Vec<String>,
     /// generic instance cache: base mangled -> concrete word spelling key
@@ -167,6 +169,7 @@ impl ModEmitter {
             tp_mangled: Vec::new(),
             insts: std::collections::HashMap::new(),
             bridges: HashMap::new(),
+            builtin_bridges: HashMap::new(),
         }
     }
 }

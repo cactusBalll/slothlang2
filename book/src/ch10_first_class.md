@@ -16,7 +16,7 @@ let ann = |x: int| -> int { return x; };// 可标注返回类型
 
 ## 10.2 表示与调用
 
-闭包统一发射为 **2 词对象 `{ tagged fnptr, env }`**（`sloth_closure_new`，
+闭包统一发射为 **2 词对象 `{ fnptr, env }`**（`sloth_closure_new`，
 `dtor` 只释放 env）。任何函数值调用都经过为每个目标生成的 **bridge**，ABI 为
 `(env, args...) -> word`。
 

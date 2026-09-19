@@ -16,8 +16,8 @@
 //! arrays, then either releases the owner (view) or frees the data buffer.
 
 use crate::rc::{
-    dec_f_bits, dec_i, enc_f_bits, enc_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_is_ref,
-    w_ref, w_unref,
+    dec_f_bits, dec_i, enc_f_bits, enc_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_ref,
+    w_unref,
 };
 
 const HDR_WORDS: usize = 7;
@@ -135,7 +135,7 @@ pub extern "C" fn sloth_tensor_new_3(d0: i64, d1: i64, d2: i64, kind: i64) -> i6
 /// `len0` (`t[a..b]`). Bounds-checked.
 #[no_mangle]
 pub extern "C" fn sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         crate::panics::panic_msg("view of a nil tensor");
     }
     unsafe {
@@ -198,7 +198,7 @@ pub extern "C" fn sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64
 /// rank-1 element read (bounds-checked) as a tagged scalar word
 #[no_mangle]
 pub extern "C" fn sloth_tensor_get1(t: i64, i_w: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     unsafe {
@@ -221,7 +221,7 @@ pub extern "C" fn sloth_tensor_get1(t: i64, i_w: i64) -> i64 {
 /// rank-1 element write (bounds-checked); the tagged value word decodes by kind
 #[no_mangle]
 pub extern "C" fn sloth_tensor_set1(t: i64, i_w: i64, v: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     unsafe {
@@ -246,7 +246,7 @@ pub extern "C" fn sloth_tensor_set1(t: i64, i_w: i64, v: i64) -> i64 {
 /// view assignment `kc[l][pos] = k`
 #[no_mangle]
 pub extern "C" fn sloth_tensor_copy_into(dst: i64, src: i64) -> i64 {
-    if !w_is_ref(dst) || !w_is_ref(src) {
+    if dst == 0 || src == 0 {
         crate::panics::panic_msg("tensor copy of a nil operand");
     }
     unsafe {
@@ -270,7 +270,7 @@ pub extern "C" fn sloth_tensor_copy_into(dst: i64, src: i64) -> i64 {
 /// copy the leading elements of an `Array<T>` into a tensor (construction)
 #[no_mangle]
 pub extern "C" fn sloth_tensor_copy_from_array(t: i64, arr: i64) -> i64 {
-    if !w_is_ref(t) || !w_is_ref(arr) {
+    if t == 0 || arr == 0 {
         return 0;
     }
     unsafe {
@@ -298,7 +298,7 @@ pub extern "C" fn sloth_tensor_copy_from_array(t: i64, arr: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_tensor_rank(t: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     enc_i(unsafe { ndim_of(w_unref(t) as *mut i64) } as i64)
@@ -333,7 +333,7 @@ unsafe fn basis_desc(t: i64) -> MemRefDesc {
 
 #[no_mangle]
 pub extern "C" fn sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
-    if !w_is_ref(t) {
+    if t == 0 {
         crate::panics::panic_msg("basis of a nil tensor");
     }
     unsafe { basis_desc(t) }
@@ -341,7 +341,7 @@ pub extern "C" fn sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
 
 #[no_mangle]
 pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
-    if !w_is_ref(t) {
+    if t == 0 {
         crate::panics::panic_msg("basis of a nil tensor");
     }
     unsafe { basis_desc(t) }
@@ -352,7 +352,7 @@ pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
 /// design §3.1)
 #[no_mangle]
 pub extern "C" fn sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
-    if !w_is_ref(a) || !w_is_ref(b) {
+    if a == 0 || b == 0 {
         crate::panics::panic_msg("shape check on a nil tensor");
     }
     unsafe {
@@ -378,7 +378,7 @@ pub extern "C" fn sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
 /// panic unless `dim(a, axa) == dim(b, axb)`; matvec/matmul inner dims
 #[no_mangle]
 pub extern "C" fn sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) -> i64 {
-    if !w_is_ref(a) || !w_is_ref(b) {
+    if a == 0 || b == 0 {
         crate::panics::panic_msg("shape check on a nil tensor");
     }
     unsafe {
@@ -401,7 +401,7 @@ pub extern "C" fn sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) ->
 /// stride of `axis` (tagged int word); 0 for a nil tensor
 #[no_mangle]
 pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     unsafe {
@@ -417,7 +417,7 @@ pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     unsafe {
@@ -434,7 +434,7 @@ pub extern "C" fn sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
 /// zero-fill the tensor's elements in place
 #[no_mangle]
 pub extern "C" fn sloth_tensor_fill_zero(t: i64) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         return 0;
     }
     unsafe {
@@ -452,7 +452,7 @@ pub extern "C" fn sloth_tensor_fill_zero(t: i64) -> i64 {
 /// Used to turn the flat widened checkpoint into rank-2/3 weight slices.
 /// Bounds-checked against `t`'s flat element count.
 unsafe fn reshape_impl(t: i64, off: i64, dims: &[i64]) -> i64 {
-    if !w_is_ref(t) {
+    if t == 0 {
         crate::panics::panic_msg("reshape of a nil tensor");
     }
     let base = w_unref(t) as *mut i64;

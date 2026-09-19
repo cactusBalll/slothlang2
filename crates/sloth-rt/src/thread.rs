@@ -10,7 +10,7 @@
 //! dropped handle cannot free state the worker still writes.
 
 use crate::panics;
-use crate::rc::{self, w_is_ref, w_unref};
+use crate::rc::{self, w_unref};
 use std::sync::{Condvar, Mutex};
 
 struct ThreadState {
@@ -24,10 +24,14 @@ struct ThreadHandle {
     cond: Condvar,
     /// owned entry closure `{tagged fnptr, env}` (retained by spawn)
     entry: i64,
-    /// owned argument word (retained by spawn)
+    /// owned argument word (retained by spawn iff `aref`)
     arg: i64,
+    /// argument type carries references (0 = value arg, stored raw)
+    aref: i64,
     /// owned worker result (transferred to `join`, else shed by the dtor)
     result: i64,
+    /// result type carries references (0 = value result, stored raw)
+    rref: i64,
     /// OS thread reaper; `None` once joined or detached
     joinable: Option<std::thread::JoinHandle<()>>,
 }
@@ -40,7 +44,7 @@ unsafe fn worker(ptr: usize) {
     let arg = (*h).arg;
     let fnptr_w = crate::objects::sloth_obj_field(entry, rc::enc_i(0));
     let env = crate::objects::sloth_obj_field(entry, rc::enc_i(1));
-    let raw = (fnptr_w & !1) as usize;
+    let raw = fnptr_w as usize;
     let cb: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(raw);
     let res = cb(env, arg);
     {
@@ -66,11 +70,12 @@ fn thread_dtor(p: usize, _aux: u64) {
                 panics::panic_msg("abandoned thread handle (join or detach it)");
             }
         }
-        // shed any untaken result, then the owned closure + argument
-        if h.result != 0 {
+        // shed any untaken result (reference results only), then the owned
+        // closure + reference argument
+        if h.rref != 0 && h.result != 0 {
             rc::sloth_rc_release(h.result);
         }
-        if h.arg != 0 {
+        if h.aref != 0 && h.arg != 0 {
             rc::sloth_rc_release(h.arg);
         }
         if h.entry != 0 {
@@ -81,12 +86,10 @@ fn thread_dtor(p: usize, _aux: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_thread_spawn(entry_w: i64, arg_w: i64) -> i64 {
+pub extern "C" fn sloth_thread_spawn(entry_w: i64, arg_w: i64, aref: i64, rref: i64) -> i64 {
     unsafe {
-        let p = rc::rc_addr(
-            std::mem::size_of::<ThreadHandle>(),
-            Some(thread_dtor),
-        ) as *mut ThreadHandle;
+        let p = rc::rc_addr(std::mem::size_of::<ThreadHandle>(), Some(thread_dtor))
+            as *mut ThreadHandle;
         std::ptr::write(
             p,
             ThreadHandle {
@@ -101,12 +104,14 @@ pub extern "C" fn sloth_thread_spawn(entry_w: i64, arg_w: i64) -> i64 {
                 } else {
                     rc::sloth_rc_retain(entry_w)
                 },
-                arg: if arg_w == 0 {
-                    0
-                } else {
+                arg: if aref != 0 && arg_w != 0 {
                     rc::sloth_rc_retain(arg_w)
+                } else {
+                    arg_w
                 },
+                aref,
                 result: 0,
+                rref,
                 joinable: None,
             },
         );
@@ -131,7 +136,7 @@ pub extern "C" fn sloth_thread_spawn(entry_w: i64, arg_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_thread_join(h_w: i64) -> i64 {
-    if !w_is_ref(h_w) {
+    if h_w == 0 {
         return 0;
     }
     unsafe {
@@ -165,7 +170,7 @@ pub extern "C" fn sloth_thread_join(h_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_thread_detach(h_w: i64) -> i64 {
-    if !w_is_ref(h_w) {
+    if h_w == 0 {
         return 0;
     }
     unsafe {

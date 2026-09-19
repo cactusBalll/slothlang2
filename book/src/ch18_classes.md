@@ -39,8 +39,9 @@ class Counter {
 
 - 实例是 rc 追踪的堆对象：`sloth_obj_new(cls_id, n_fields)`，字段按索引访问
   （`sloth_obj_field` / `sloth_obj_set_field`）。
-- 类信息（字段元数据、refmask 等）经 `sloth_cls_info` / `sloth_cls_refmask`
-  发射点登记；虚表按类**全局缓存**，不再每对象重建。
+- 类信息（仅 class-id）经 `sloth_cls_info` 登记；`sloth_cls_refmask` 保留为
+  no-op 发射点（死亡级联已改为 tag 驱动，不再需要 per-class refmask）。
+  虚表按类**全局缓存**，不再每对象重建。
 - 字段写会检查词面类型：`c.n = "s"` 报 `type mismatch in field assignment `n``。
 
 ## 18.5 示例

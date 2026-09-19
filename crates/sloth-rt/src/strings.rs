@@ -5,8 +5,8 @@
 //! equal-content strings are distinct objects. Equality is therefore by
 //! content (`sloth_str_eq`), never by handle identity.
 //!
-//! Handles cross the boundary as tagged words; the `StrT` payload internals
-//! (len/data) are raw. String builders stay untracked libc chunks (they
+//! Handles cross the boundary as raw words; the `StrT` payload internals
+//! (len/data) are raw too. String builders stay untracked libc chunks (they
 //! exist only inside a single expression and are finalized by finish).
 
 use crate::rc;
@@ -244,7 +244,7 @@ pub extern "C" fn sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
         match kind {
             1 => {
                 let bits = *(w_unref(h_w) as *const i64);
-                let s = format!("{}", f64::from_bits((bits as u64) << 1));
+                let s = format!("{}", f64::from_bits(rc::dec_f_bits(bits)));
                 strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
             }
             2 => {

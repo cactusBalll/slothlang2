@@ -88,10 +88,22 @@ impl ModEmitter {
                     .into(),
             );
         }
+        let aref = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            aref,
+            if self.is_ref(t) { 1 } else { 0 }
+        ));
+        let rref = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            rref,
+            if self.is_ref(r) { 1 } else { 0 }
+        ));
         let out = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_thread_spawn({}, {}) : (i64, i64) -> i64",
-            out, fv, iv
+            "    {} = call @sloth_thread_spawn({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            out, fv, iv, aref, rref
         ));
         let rt = self.r.mk(Ty::JoinHandle(r));
         self.dangling_producer(fw, &out, rt);
@@ -131,10 +143,16 @@ impl ModEmitter {
         if !matches!(self.r.get(ct), Ty::I64) {
             self.err(pos, "channel capacity must be an `int`".into());
         }
+        let eref = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            eref,
+            if self.is_ref(targ) { 1 } else { 0 }
+        ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_chan_new({}) : (i64) -> i64",
-            r, cv
+            "    {} = call @sloth_chan_new({}, {}) : (i64, i64) -> i64",
+            r, cv, eref
         ));
         let rt = self.r.mk(Ty::Channel(targ));
         self.dangling_producer(fw, &r, rt);
@@ -143,16 +161,18 @@ impl ModEmitter {
 
     pub(crate) fn emit_mutex_new(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let r = fw.v();
-        fw.op(&format!(
-            "    {} = call @sloth_mutex_new() : () -> i64",
-            r
-        ));
+        fw.op(&format!("    {} = call @sloth_mutex_new() : () -> i64", r));
         let rt = self.r.mk(Ty::Mutex);
         self.dangling_producer(fw, &r, rt);
         (r, rt)
     }
 
-    pub(crate) fn emit_atomic_new(&mut self, fw: &mut FnWalk, iarg: &Expr, pos: &Pos) -> (String, TyId) {
+    pub(crate) fn emit_atomic_new(
+        &mut self,
+        fw: &mut FnWalk,
+        iarg: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
         let (iv, it) = self.emit_expr(fw, iarg);
         if !matches!(self.r.get(it), Ty::I64) {
             self.err(pos, "atomic.new requires an `int` initial value".into());
@@ -169,8 +189,12 @@ impl ModEmitter {
 
     /// transfer the owned +1 of an already-emitted argument to a callee that
     /// takes ownership (channel send): consume a producer/xfer temp, else
-    /// materialize a retain
-    fn transfer_arg(&mut self, fw: &mut FnWalk, vv: &str) -> String {
+    /// materialize a retain. Value element types are not rc-managed and pass
+    /// raw (de-tag).
+    fn transfer_arg(&mut self, fw: &mut FnWalk, vv: &str, et: TyId) -> String {
+        if !self.is_ref(et) {
+            return vv.to_string();
+        }
         if fw.rc_consume(vv) || fw.rc_take_xfer(vv) {
             vv.to_string()
         } else {
@@ -219,7 +243,7 @@ impl ModEmitter {
                         self.err(pos, "channel.send requires one argument".into());
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
-                    let owned = self.transfer_arg(fw, &argv[1].0);
+                    let owned = self.transfer_arg(fw, &argv[1].0, t);
                     fw.op(&format!(
                         "    call @sloth_chan_send({}, {}) : (i64, i64) -> i64",
                         recvv, owned

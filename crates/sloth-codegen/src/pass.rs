@@ -4390,9 +4390,9 @@ mod irgen_te_p4 {
 mod irgen_te_p2_r1 {
     use super::*;
 
-    const ENC_I: fn(i64) -> i64 = |v| v << 1;
+    const ENC_I: fn(i64) -> i64 = |v| v;
     fn enc_f(v: f64) -> i64 {
-        ((v.to_bits() & !1) as i64) >> 1
+        v.to_bits() as i64
     }
 
     #[test]
@@ -4441,8 +4441,7 @@ mod irgen_te_p2_r1 {
         ir.push_str(
             "    %flat = call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
         );
-        // runtime dims/strides from the descriptor (tagged words -> index)
-        ir.push_str("    %one64 = arith.constant 1 : i64\n");
+        // runtime dims/strides from the descriptor (de-tag: raw words -> index)
         for (name, axis) in [("0", 0i64), ("1", 1i64)] {
             ir.push_str(&format!(
                 "    %ax{name} = arith.constant {} : i64\n",
@@ -4452,13 +4451,13 @@ mod irgen_te_p2_r1 {
                 "    %dw{name} = call @sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
-                "    %di{name} = arith.shrsi %dw{name}, %one64 : i64\n    %d{name} = arith.index_cast %di{name} : i64 to index\n"
+                "    %d{name} = arith.index_cast %dw{name} : i64 to index\n"
             ));
             ir.push_str(&format!(
                 "    %sw{name} = call @sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
-                "    %si{name} = arith.shrsi %sw{name}, %one64 : i64\n    %s{name} = arith.index_cast %si{name} : i64 to index\n"
+                "    %s{name} = arith.index_cast %sw{name} : i64 to index\n"
             ));
         }
         ir.push_str("    %o0 = arith.constant 0 : index\n");
@@ -4488,8 +4487,7 @@ mod irgen_te_p2_r1 {
         ir.push_str(&format!(
             "    %g = call @sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
         ));
-        ir.push_str("    %g1 = arith.shli %g, %one64 : i64\n");
-        ir.push_str("    %gv = arith.bitcast %g1 : i64 to f64\n");
+        ir.push_str("    %gv = arith.bitcast %g : i64 to f64\n");
         ir.push_str("    %p2 = call @sloth_rt_print_f64(%gv) : (f64) -> i64\n");
         ir.push_str("    return\n  }\n}\n");
 

@@ -45,7 +45,34 @@ func announce(s: dyn Speaker): str { return s.say(); }
 `int`/`float`/`bool`/`str`/`range` 内置实现 `Hashable`/`Display`。用户类若不
 `impl Display`，对它 `print` 或插值报 `requires trait bound `Display``。
 
-## 19.4 示例
+## 19.4 值类型自动装箱
+
+内建值类型 `int`/`float`/`bool` 隐式实现预定义 trait（`Display`/`Equatable`/
+`Hashable`/`Comparable`），也可满足**无方法**的 trait（如 `trait Any {}`）。
+在这些 trait 的 `dyn` 位置上，值类型会**自动装箱**为一个合成对象：
+
+```sloth
+trait Any {}
+trait Display { func to_str(): str; }
+
+var a: dyn Any = 42;          // 装箱：class-id + 虚表 + 字段0 = 值词
+if a is int {                 // 运行时 class-id 判定
+    var n: int = a;           // 收窄并拆箱
+    print(n);
+}
+var d: dyn Display = 7;
+print(d);                     // 经虚表 to_str() 打印
+```
+
+- 装箱对象：保留的负 class-id、按 (值类型, trait) 惰性构建的虚表、`word2` 存值词；
+  本身是普通 rc 对象，死亡级联无需特例（值词永不参与引用释放）。
+- 方法桥：codegen 为每个 `(kind, 方法)` 生成薄 `llvm.func`，转发到运行时
+  `sloth_dyn_to_str`/`sloth_dyn_hash`/`sloth_dyn_binop`（`crates/sloth-rt/src/builtins.rs`）。
+- 只允许值类型进入它**能满足**的 `dyn`：带方法但非预定义的 trait（如
+  `trait Speaker { func noise(): str; }`）会把 `var s: dyn Speaker = 42` 报为
+  `type mismatch in initializer`。
+
+## 19.5 示例
 
 ```sloth
 {{#include examples/traits.sl}}

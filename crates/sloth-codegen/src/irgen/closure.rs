@@ -20,7 +20,7 @@ pub(crate) const BR_NAMED: u8 = 1;
 pub(crate) const BR_METHOD: u8 = 2;
 
 impl ModEmitter {
-    /// raw tagged function-pointer word for `sym` (bit0 set)
+    /// raw function-pointer word for `sym`
     pub(crate) fn emit_fnptr_word(&mut self, fw: &mut FnWalk, sym: &str) -> String {
         let p = fw.v();
         fw.op(&format!(
@@ -32,17 +32,13 @@ impl ModEmitter {
             "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
             iw, p
         ));
-        let one = fw.v();
-        fw.op(&format!("    {} = arith.constant 1 : i64", one));
-        let w = fw.v();
-        fw.op(&format!("    {} = arith.ori {}, {} : i64", w, iw, one));
-        w
+        iw
     }
 
-    /// wrap `{ tagged fnptr, env }` into a fresh closure object; the box owns
+    /// wrap `{ fnptr, env }` into a fresh closure object; the box owns
     /// its own count on a ref-typed env
     pub(crate) fn emit_closure_box(&mut self, fw: &mut FnWalk, fnptr: &str, env: &str) -> String {
-        // dedicated ctor: field 0 is a tagged (non-rc) fn pointer, so the
+        // dedicated ctor: field 0 is a raw (non-rc) fn pointer, so the
         // generic object cascade must not walk it (rt closure_dtor handles
         // the env field only)
         let rev = self.emit_retain(fw, env);
@@ -265,14 +261,10 @@ impl ModEmitter {
             "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
             env, clo, f1
         ));
-        let fm2 = fw.v();
-        fw.op(&format!("    {} = arith.constant -2 : i64", fm2));
-        let fpr = fw.v();
-        fw.op(&format!("    {} = arith.andi {}, {} : i64", fpr, fp, fm2));
         let vp = fw.v();
         fw.op(&format!(
             "    {} = llvm.inttoptr {} : i64 to !llvm.ptr",
-            vp, fpr
+            vp, fp
         ));
         if args.len() != ft.params.len() {
             self.err_diff(

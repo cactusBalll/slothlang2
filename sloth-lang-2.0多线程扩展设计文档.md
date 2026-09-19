@@ -107,7 +107,7 @@ let r: int = h.join();        // 阻塞等待，取回返回值；重复 join �
 | --- | --- |
 | `Mutex` | `extern type`（不透明，pthread_mutex）；`mutex.new(): Mutex`、`m.lock(): unit`、`m.unlock(): unit`、`m.try_lock(): bool`；配合 `m.with(|g| { ... })` 闭包形式（unlock 在闭包返回后自动执行，**唯一推荐用法**，避免漏 unlock） |
 | `Channel<T>` | 引用类型，泛型；`channel.new<T>(capacity: int): Channel<T>`（capacity=0 为无界）；`send(v: T): unit`（有界满则阻塞）、`recv(): T?`（关闭且空返回 `nil`）、`close(): unit`；mpmc 语义，send/recv 构成 happens-before（§6） |
-| `AtomicInt` | `extern type`；`load/store/add/sub/cas`，供无锁计数/标志位（词面 int 语义，63 bit） |
+| `AtomicInt` | `extern type`；`load/store/add/sub/cas`，供无锁计数/标志位（词面 int 语义，原生 i64 / 64 bit） |
 
 ### 4.4 EBNF 增量
 
@@ -223,7 +223,7 @@ type_base ::= ... | 'JoinHandle' '<' type '>' | 'Channel' '<' type '>'
 | 4 | **Fiber 跨线程误用** | 中 | 封闭性靠运行时 tid 校验，误用即 panic——失败显式化，风险可控 |
 | 5 | **死锁/锁序** | 低 | 语言不提供锁序分析；`Mutex.with` 单一获取点降低死锁面；文档建议 Channel 优先于共享锁 |
 | 6 | **extern 宿主代码的线程安全** | 低 | 宿主函数被多线程并发调用时责任在宿主；文档明示 |
-| 7 | **词面 63-bit int 与 64-bit 原子槽的语义缝隙** | 低 | `AtomicInt` 按词面编码存储（63 bit），与词面 ABI 一致，无新表示 |
+| 7 | ~~词面 63-bit int 与 64-bit 原子槽的语义缝隙~~ | 已消除 | 去 tag 后 `int` 为原生 i64，与 64-bit 原子槽一致（PLAN §14） |
 
 ---
 

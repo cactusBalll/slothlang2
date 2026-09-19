@@ -3,7 +3,7 @@
 //! semantics. Both are ARC objects (builtin opaque handles), so the emitted
 //! retain/release protocol cleans them up automatically.
 
-use crate::rc::{self, w_is_ref, w_unref};
+use crate::rc::{self, w_unref};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 // ---------------- Mutex ----------------
@@ -23,8 +23,7 @@ fn mutex_dtor(p: usize, _aux: u64) {
 #[no_mangle]
 pub extern "C" fn sloth_mutex_new() -> i64 {
     unsafe {
-        let p = rc::rc_addr(std::mem::size_of::<MutexObj>(), Some(mutex_dtor))
-            as *mut MutexObj;
+        let p = rc::rc_addr(std::mem::size_of::<MutexObj>(), Some(mutex_dtor)) as *mut MutexObj;
         let m = &mut (*p).m;
         libc::pthread_mutex_init(m, std::ptr::null());
         rc::w_ref(p as usize)
@@ -33,7 +32,7 @@ pub extern "C" fn sloth_mutex_new() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_mutex_lock(m_w: i64) -> i64 {
-    if w_is_ref(m_w) {
+    if m_w != 0 {
         unsafe {
             libc::pthread_mutex_lock(&mut (*(w_unref(m_w) as *mut MutexObj)).m);
         }
@@ -43,7 +42,7 @@ pub extern "C" fn sloth_mutex_lock(m_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_mutex_unlock(m_w: i64) -> i64 {
-    if w_is_ref(m_w) {
+    if m_w != 0 {
         unsafe {
             libc::pthread_mutex_unlock(&mut (*(w_unref(m_w) as *mut MutexObj)).m);
         }
@@ -53,7 +52,7 @@ pub extern "C" fn sloth_mutex_unlock(m_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_mutex_try_lock(m_w: i64) -> i64 {
-    if !w_is_ref(m_w) {
+    if m_w == 0 {
         return 0;
     }
     unsafe {
@@ -66,7 +65,7 @@ pub extern "C" fn sloth_mutex_try_lock(m_w: i64) -> i64 {
 /// The unique recommended acquisition point (design §4.3).
 #[no_mangle]
 pub extern "C" fn sloth_mutex_with(m_w: i64, f_w: i64) -> i64 {
-    if !w_is_ref(m_w) || !w_is_ref(f_w) {
+    if m_w == 0 || f_w == 0 {
         return 0;
     }
     unsafe {
@@ -98,8 +97,7 @@ fn atomic_dtor(p: usize, _aux: u64) {
 #[no_mangle]
 pub extern "C" fn sloth_atomic_new(init_w: i64) -> i64 {
     unsafe {
-        let p = rc::rc_addr(std::mem::size_of::<AtomicObj>(), Some(atomic_dtor))
-            as *mut AtomicObj;
+        let p = rc::rc_addr(std::mem::size_of::<AtomicObj>(), Some(atomic_dtor)) as *mut AtomicObj;
         std::ptr::write(
             p,
             AtomicObj {
@@ -111,7 +109,7 @@ pub extern "C" fn sloth_atomic_new(init_w: i64) -> i64 {
 }
 
 fn atomic_of(w: i64) -> Option<&'static AtomicI64> {
-    if w_is_ref(w) {
+    if w != 0 {
         Some(unsafe { &(*(w_unref(w) as *const AtomicObj)).v })
     } else {
         None
@@ -120,7 +118,9 @@ fn atomic_of(w: i64) -> Option<&'static AtomicI64> {
 
 #[no_mangle]
 pub extern "C" fn sloth_atomic_load(a_w: i64) -> i64 {
-    atomic_of(a_w).map(|a| a.load(Ordering::SeqCst)).unwrap_or(0)
+    atomic_of(a_w)
+        .map(|a| a.load(Ordering::SeqCst))
+        .unwrap_or(0)
 }
 
 #[no_mangle]

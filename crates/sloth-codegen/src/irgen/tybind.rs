@@ -264,17 +264,21 @@ impl ModEmitter {
         }
         match self.r.get(t).clone() {
             Ty::Fiber(_) => false,
-            Ty::Array(e)
-            | Ty::Opt(e)
-            | Ty::Weak(e)
-            | Ty::JoinHandle(e)
-            | Ty::Channel(e) => self.send_ok(e, depth + 1),
+            Ty::Array(e) | Ty::Opt(e) | Ty::Weak(e) | Ty::JoinHandle(e) | Ty::Channel(e) => {
+                self.send_ok(e, depth + 1)
+            }
             Ty::Map(k, v) => self.send_ok(k, depth + 1) && self.send_ok(v, depth + 1),
             _ => true,
         }
     }
 
     pub fn is_ref(&self, t: TyId) -> bool {
+        // `extern type` handles are opaque C pointers: never rc-managed
+        if let Ty::Named(n, _) = self.r.get(t) {
+            if self.extern_types.contains(n) {
+                return false;
+            }
+        }
         match self.r.get(t) {
             // optionals are ref-shaped when their payload is (value optionals
             // ride an rc box; reference optionals are the bare handle)
@@ -454,19 +458,30 @@ impl ModEmitter {
         fw: &mut FnWalk,
         argv: &[(String, TyId)],
         params: &[(String, TyId, bool)],
+        pos: &Pos,
     ) -> Vec<String> {
         let n = argv.len().min(params.len());
         (0..argv.len())
             .map(|i| {
-                if i < n
-                    && (self.opt_inner(params[i].1).is_some()
-                        || self.weak_inner(params[i].1).is_some())
-                {
-                    self.coerce_word_to(fw, &argv[i].0, argv[i].1, params[i].1)
-                        .0
-                } else {
-                    argv[i].0.clone()
+                if i < n {
+                    // a value actual into a `dyn T` formal only boxes when the
+                    // builtin satisfies T (predefined / method-free)
+                    if let Ty::Dyn(tn) = self.r.get(params[i].1).clone() {
+                        if self.value_kind(argv[i].1).is_some() && !self.value_impls_trait(&tn) {
+                            let got = self.surface_name(self.r.get(argv[i].1));
+                            self.err_diff(pos, "function argument", &format!("dyn {}", tn), &got);
+                        }
+                    }
+                    if self.opt_inner(params[i].1).is_some()
+                        || self.weak_inner(params[i].1).is_some()
+                        || matches!(self.r.get(params[i].1), Ty::Dyn(_))
+                    {
+                        return self
+                            .coerce_word_to(fw, &argv[i].0, argv[i].1, params[i].1)
+                            .0;
+                    }
                 }
+                argv[i].0.clone()
             })
             .collect()
     }
@@ -480,6 +495,14 @@ impl ModEmitter {
         from: TyId,
         to: TyId,
     ) -> (String, TyId) {
+        // auto-box a builtin value into a `dyn Trait` surface
+        if let Ty::Dyn(tname) = self.r.get(to).clone() {
+            if self.value_kind(from).is_some() && self.value_impls_trait(&tname) {
+                let b = self.emit_dyn_box(fw, v, from, &tname);
+                return (b, to);
+            }
+            return (v.to_string(), from);
+        }
         if self.opt_inner(to).is_some() {
             return self.coerce_into_opt(fw, v, from, to);
         }
@@ -534,6 +557,11 @@ impl ModEmitter {
             // faces (patch 42/43): wrap at bind time
             (Ty::Weak(..), _) => true,
             (Ty::Dyn(_), Ty::Named(..)) => true,
+            // builtin value types auto-box into a dyn surface when the trait
+            // is predefined (or has no methods to satisfy)
+            (Ty::Dyn(t), Ty::I64) | (Ty::Dyn(t), Ty::F64) | (Ty::Dyn(t), Ty::Bool) => {
+                self.value_impls_trait(t)
+            }
             // function surfaces compare structurally (lambda metadata — the
             // closure frame symbol — must not defeat compatibility)
             (Ty::Fn(x), Ty::Fn(y)) => {
@@ -549,9 +577,7 @@ impl ModEmitter {
             (Ty::JoinHandle(x), Ty::JoinHandle(y)) => {
                 self.surface_compat(self.r.get(*x), self.r.get(*y))
             }
-            (Ty::Channel(x), Ty::Channel(y)) => {
-                self.surface_compat(self.r.get(*x), self.r.get(*y))
-            }
+            (Ty::Channel(x), Ty::Channel(y)) => self.surface_compat(self.r.get(*x), self.r.get(*y)),
             // tensor surfaces require element AND rank to match exactly
             (Ty::Tensor(x, rx), Ty::Tensor(y, ry)) => {
                 rx == ry && self.surface_compat(self.r.get(*x), self.r.get(*y))
@@ -653,7 +679,10 @@ impl ModEmitter {
                 format!("Fiber<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
             }
             Ty::JoinHandle(e) => {
-                format!("JoinHandle<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
+                format!(
+                    "JoinHandle<{}>",
+                    sloth_frontend::ty::ty_name(self.r.get(*e))
+                )
             }
             Ty::Channel(e) => {
                 format!("Channel<{}>", sloth_frontend::ty::ty_name(self.r.get(*e)))
@@ -679,11 +708,15 @@ impl ModEmitter {
         pos: &Pos,
     ) {
         // value-optional surfaces (patch 42): wrap bare scalars into boxes,
-        // keep nil (Unit) / already-opt words as they are, then the common
-        // i64 store path below releases the old and retains the new owner
+        // keep nil (Unit) / already-opt words as they are; `dyn T` surfaces
+        // auto-box builtin values too. The common i64 store path below
+        // releases the old and retains the new owner.
         let mut v = v.to_string();
         let mut vty = vty;
-        if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+        if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Dyn(_))
+        {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
             vty = vtc;
@@ -713,10 +746,15 @@ impl ModEmitter {
             self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
         }
         // rc patch B: release the overwritten word, retain the new owner's
-        // copy (nil/untracked = rt no-ops). Loop variables are BORROWS of
-        // container elements (patch C): their slot owns no count.
+        // copy (nil = rt no-op; value words are NOT rc-managed under the
+        // de-tag word plane and must store raw). Loop variables are BORROWS
+        // of container elements (patch C): their slot owns no count.
         // patch 42: transferred call-result words already carry their +1 —
         // bind them raw instead of retaining a second count
+        if !self.is_ref(dt) {
+            fw.assign(name, &v, false);
+            return;
+        }
         let xferred = fw.rc_take_xfer(&v);
         match fw.lookup(name) {
             Some((a, _)) if !fw.loopvars.contains(&name.to_string()) => {
@@ -781,7 +819,10 @@ impl ModEmitter {
     ) {
         let mut v = v.to_string();
         let mut vty = vty;
-        if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
+        if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Dyn(_))
+        {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
             vty = vtc;
@@ -813,6 +854,11 @@ impl ModEmitter {
         }
         // rc: read old, retain new (unless ownership transferred), release old,
         // then store. Retain-before-release keeps `g = g` self-assignment safe.
+        // Value globals are not rc-managed (de-tag): store the raw word.
+        if !self.is_ref(dt) {
+            self.store_global(fw, gsym, dt, &v);
+            return;
+        }
         let (old, _) = self.emit_global_read(fw, gsym, dt);
         let stored = if fw.rc_take_xfer(&v) {
             v.clone()
@@ -887,6 +933,8 @@ impl ModEmitter {
             }
             Ty::Named(cls, _) => self.impl_chain_has(&cls, bound),
             Ty::Opt(e) => self.satisfies_bound(e, bound),
+            // a `dyn T` value carries exactly trait T's surface
+            Ty::Dyn(t) => t == bound,
             _ => false,
         }
     }

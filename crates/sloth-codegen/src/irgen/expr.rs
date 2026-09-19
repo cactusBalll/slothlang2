@@ -261,6 +261,39 @@ impl ModEmitter {
                                             ));
                                         }
                                     }
+                                } else if let Ty::Dyn(ref tname) = self.r.get(t).clone() {
+                                    // dyn Display interpolation: vtable to_str
+                                    let tname = tname.clone();
+                                    let has = self
+                                        .traits
+                                        .get(&tname)
+                                        .map(|ms| ms.iter().any(|m| m.name == "to_str"))
+                                        .unwrap_or(false);
+                                    if has {
+                                        let (sv, _st) = self.emit_dyn_call(
+                                            fw,
+                                            &tname,
+                                            "to_str",
+                                            &v,
+                                            &vec![(v.clone(), t)],
+                                            &vec![],
+                                            &e.pos,
+                                        );
+                                        fw.op(&format!(
+                                            "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
+                                            r, curw, sv
+                                        ));
+                                    } else {
+                                        self.err(
+                                            &e.pos,
+                                            "`${}` on dyn requires a Display trait with `to_str`"
+                                                .to_string(),
+                                        );
+                                        fw.op(&format!(
+                                            "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
+                                            r, curw, v
+                                        ));
+                                    }
                                 } else {
                                     fw.op(&format!(
                                         "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
@@ -415,6 +448,56 @@ impl ModEmitter {
                         let mut wt = self.r.get(lt).clone();
                         while let Ty::Opt(inner) = wt {
                             wt = self.r.get(inner).clone();
+                        }
+                        // `dyn T` value: the concrete builtin kind is only
+                        // known at runtime (reserved class id on the box)
+                        if matches!(&wt, Ty::Dyn(_)) {
+                            let cid = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                                cid, lv
+                            ));
+                            let cls = match cn.as_str() {
+                                "int" | "i64" => Some(Self::value_cls_id(0)),
+                                "float" | "f64" => Some(Self::value_cls_id(1)),
+                                "bool" => Some(Self::value_cls_id(2)),
+                                _ => None,
+                            };
+                            let base = match cls {
+                                Some(c) => {
+                                    let cv = fw.v();
+                                    fw.op(&format!(
+                                        "    {} = arith.constant {} : i64",
+                                        cv,
+                                        enc_i_lit(c)
+                                    ));
+                                    let c2 = fw.v();
+                                    fw.op(&format!(
+                                        "    {} = arith.cmpi eq, {}, {} : i64",
+                                        c2, cid, cv
+                                    ));
+                                    ext_bool(fw, &c2)
+                                }
+                                None => {
+                                    let z = fw.v();
+                                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                                    z
+                                }
+                            };
+                            let r = if *negated {
+                                let one = fw.v();
+                                let o = fw.v();
+                                fw.op(&format!(
+                                    "    {} = arith.constant {} : i64",
+                                    one,
+                                    enc_i_lit(1)
+                                ));
+                                fw.op(&format!("    {} = arith.xori {}, {} : i64", o, base, one));
+                                o
+                            } else {
+                                base
+                            };
+                            return (r, self.r.mk(Ty::Bool));
                         }
                         let matches = match (&wt, cn.as_str()) {
                             (Ty::I64, "int") | (Ty::I64, "i64") => true,
@@ -1326,7 +1409,10 @@ impl ModEmitter {
                 };
                 if !anyf {
                     if let Some(he) = hint_el {
-                        if self.weak_inner(he).is_some() || self.opt_inner(he).is_some() {
+                        if self.weak_inner(he).is_some()
+                            || self.opt_inner(he).is_some()
+                            || matches!(self.r.get(he), Ty::Dyn(_))
+                        {
                             for i in 0..evs.len() {
                                 if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
                                     let (c2, t2) = self.coerce_word_to(fw, &evs[i], ets[i], he);
@@ -1344,8 +1430,14 @@ impl ModEmitter {
                     enc_i_lit(evs.len() as i64)
                 ));
                 let arr = fw.v();
-                // element refness flag: historical no-op under the tag bit
-                if ets.iter().any(|t| self.is_ref(*t)) {
+                // element-refness flag drives the death cascade; an empty
+                // literal takes it from the annotation hint
+                let el_ref = if ets.is_empty() {
+                    hint_el.map(|h| self.is_ref(h)).unwrap_or(false)
+                } else {
+                    ets.iter().any(|t| self.is_ref(*t))
+                };
+                if el_ref {
                     let k2 = fw.v();
                     fw.op(&format!(
                         "    {} = arith.constant {} : i64",
@@ -1502,7 +1594,10 @@ impl ModEmitter {
                 };
                 if !anyf {
                     if let Some(hv) = hint_v {
-                        if self.weak_inner(hv).is_some() || self.opt_inner(hv).is_some() {
+                        if self.weak_inner(hv).is_some()
+                            || self.opt_inner(hv).is_some()
+                            || matches!(self.r.get(hv), Ty::Dyn(_))
+                        {
                             for x in vevs.iter_mut() {
                                 if self.r.get(x.1).clone() != self.r.get(hv).clone() {
                                     let (c2, t2) = self.coerce_word_to(fw, &x.0, x.1, hv);
@@ -1549,18 +1644,23 @@ impl ModEmitter {
                     }
                 }
                 // key route follows the resolved key surface: str=1, hashable
-                // class=2, int=0 (empty literals take it from the annotation)
+                // class=2, int=0 (empty literals take it from the annotation);
+                // bit 2 = value-ref flag driving the death cascade
                 let kk = match self.r.get(kty).clone() {
                     Ty::Str => 1i64,
                     Ty::Named(_, _) => 2i64,
                     _ => 0i64,
                 };
-                // the vref bit is retired: death cascades are tag-driven
+                let vref = if !anyf && self.is_ref(vty) {
+                    1i64
+                } else {
+                    0i64
+                };
                 let kv0 = fw.v();
                 fw.op(&format!(
                     "    {} = arith.constant {} : i64",
                     kv0,
-                    enc_i_lit(kk)
+                    enc_i_lit(kk | (vref << 2))
                 ));
                 let m = fw.v();
                 fw.op(&format!(
@@ -1956,13 +2056,11 @@ impl ModEmitter {
             if matches!(&obj.node, ExprNode::Ident(m) if m == "channel") && name == "new" {
                 let targ = match targs_in.and_then(|v| v.first()) {
                     Some(t) => self.ty_of(t),
-                    None => {
-                        return self.th_bail(
-                            fw,
-                            pos,
-                            "channel.new requires an explicit element type: `channel.new<T>(capacity)`",
-                        )
-                    }
+                    None => return self.th_bail(
+                        fw,
+                        pos,
+                        "channel.new requires an explicit element type: `channel.new<T>(capacity)`",
+                    ),
                 };
                 if args.len() == 1 {
                     return self.emit_channel_new(fw, targ, &args[0], pos);
@@ -2304,7 +2402,7 @@ impl ModEmitter {
             // patch 42: caller-side Opt(值型)-param coercion (bare scalars
             // box up against the callee's declared parameter surfaces)
             let argv_c: Vec<(String, TyId)> = {
-                let vals = self.coerce_args_to_params(fw, &argv, &plan.params);
+                let vals = self.coerce_args_to_params(fw, &argv, &plan.params, pos);
                 argv.iter()
                     .enumerate()
                     .map(|(i, x)| {
@@ -2546,6 +2644,38 @@ impl ModEmitter {
                             self.err(
                                 pos,
                                 "`print` on class requires impl Display with `to_str`".to_string(),
+                            );
+                            (r, self.r.mk(Ty::Unit))
+                        }
+                    }
+                    Ty::Dyn(ref tname) => {
+                        // dyn Display print: dispatch to_str through the vtable
+                        let tname = tname.clone();
+                        let has = self
+                            .traits
+                            .get(&tname)
+                            .map(|ms| ms.iter().any(|m| m.name == "to_str"))
+                            .unwrap_or(false);
+                        if has {
+                            let (sv, _st) = self.emit_dyn_call(
+                                fw,
+                                &tname,
+                                "to_str",
+                                &v,
+                                &vec![(v.clone(), t.clone())],
+                                &vec![],
+                                pos,
+                            );
+                            let r2 = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_rt_print_str({}) : (i64) -> i64",
+                                r2, sv
+                            ));
+                            (r2, self.r.mk(Ty::Unit))
+                        } else {
+                            self.err(
+                                pos,
+                                "`print` on dyn requires a Display trait with `to_str`".to_string(),
                             );
                             (r, self.r.mk(Ty::Unit))
                         }
@@ -2805,7 +2935,7 @@ impl ModEmitter {
         // patch 42: caller-side Opt(值型)-param coercion against the
         // monomorphized plan surfaces (bare scalars box up)
         let argv_c: Vec<(String, TyId)> = {
-            let vals9 = self.coerce_args_to_params(fw, argv, &plan.params);
+            let vals9 = self.coerce_args_to_params(fw, argv, &plan.params, pos);
             argv.iter()
                 .enumerate()
                 .map(|(i, x)| (vals9[i].clone(), x.1))
@@ -2857,9 +2987,15 @@ impl ModEmitter {
             enc_i_lit(vals.len() as i64)
         ));
         let arr = fw.v();
+        let elref = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_arr_new({}) : (i64) -> i64",
-            arr, n
+            "    {} = arith.constant {} : i64",
+            elref,
+            if self.is_ref(elem) { 1 } else { 0 }
+        ));
+        fw.op(&format!(
+            "    {} = call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
+            arr, n, elref
         ));
         for (i, v) in vals.iter().enumerate() {
             let zi = fw.v();

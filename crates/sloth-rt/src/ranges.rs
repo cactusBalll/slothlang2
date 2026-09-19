@@ -1,4 +1,4 @@
-//! Range values: a two-word rc box `{lo, hi}` carrying tagged bounds.
+//! Range values: a two-word rc box `{lo, hi}` carrying raw bounds.
 //!
 //! The word plane is a single i64, so a first-class `range` value (bound to a
 //! variable, passed around) cannot inline both bounds. It rides a small
@@ -6,9 +6,9 @@
 //! exclusive upper bound (inclusive ranges add one at construction), so the
 //! for-loop only needs a signed `<` test.
 
-use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
+use crate::rc::{rc_addr, w_ref, w_unref};
 
-/// pack tagged `lo`/`hi` words into a fresh range handle
+/// pack `lo`/`hi` words into a fresh range handle
 #[no_mangle]
 pub extern "C" fn sloth_range_pack(lo: i64, hi: i64) -> i64 {
     unsafe {
@@ -22,7 +22,7 @@ pub extern "C" fn sloth_range_pack(lo: i64, hi: i64) -> i64 {
 /// lower bound word
 #[no_mangle]
 pub extern "C" fn sloth_range_lo(h_w: i64) -> i64 {
-    if w_is_ref(h_w) {
+    if h_w != 0 {
         unsafe { *(w_unref(h_w) as *const i64) }
     } else {
         0
@@ -32,7 +32,7 @@ pub extern "C" fn sloth_range_lo(h_w: i64) -> i64 {
 /// exclusive upper bound word
 #[no_mangle]
 pub extern "C" fn sloth_range_hi(h_w: i64) -> i64 {
-    if w_is_ref(h_w) {
+    if h_w != 0 {
         unsafe { *((w_unref(h_w) as *const i64).add(1)) }
     } else {
         0

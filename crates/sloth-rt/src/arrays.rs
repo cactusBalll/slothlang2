@@ -1,16 +1,17 @@
-//! Arrays of tagged words with a *stable handle*.
+//! Arrays of raw words with a *stable handle*.
 //!
 //! The rc-tracked payload is a fixed 3-word header `[len, cap, buf]`; the
 //! elements live in a separate, untracked buffer (`buf`, `cap * 8` bytes).
-//! Growth reallocates only the buffer, never the header, so the tagged
-//! handle word never moves — every alias (locals, params, closure captures,
-//! nested container slots) keeps pointing at the same live array.
+//! Growth reallocates only the buffer, never the header, so the handle word
+//! never moves — every alias (locals, params, closure captures, nested
+//! container slots) keeps pointing at the same live array.
 //!
-//! Every element word is tagged (ref | 1, int `v<<1`, f64 `(bits&!1)>>1`,
-//! nil=0); rt treats elements as opaque tagged words, indexes are decoded
-//! ints.
+//! Elements are raw words (reference = payload pointer, value = native word).
+//! The element-refness flag (`elref`, compile-time from `Array<T>`) rides the
+//! header `aux`, so the death cascade releases only reference elements; value
+//! elements are left untouched. Indexes arrive raw.
 
-use crate::rc::{rc_addr, w_is_ref, w_ref, w_unref};
+use crate::rc::{rc_addr, w_ref, w_unref};
 
 /// header words: `[len, cap, buf]`
 const HDR_WORDS: usize = 3;
@@ -20,11 +21,10 @@ unsafe fn arr_buf(w: i64) -> *mut i64 {
     *((w_unref(w) as *mut i64).offset(2)) as *mut i64
 }
 
-/// bounds-checked element pointer (`i` arrives as a tagged index word)
-fn arr_index(w: i64, i_w: i64) -> *mut i64 {
+/// bounds-checked element pointer (`i` arrives raw)
+fn arr_index(w: i64, i: i64) -> *mut i64 {
     unsafe {
         let p = w_unref(w) as *mut i64;
-        let i = crate::rc::dec_i(i_w);
         let len = *p;
         if i < 0 || i >= len {
             crate::panics::panic_oob("array", i, len);
@@ -43,20 +43,22 @@ fn alloc_buf(cap: i64) -> *mut i64 {
     b
 }
 
-/// death cascade: release every element word, then free the elements buffer
-/// (value elements are inert no-ops thanks to the tag checks)
-fn arr_dtor(p: usize, _aux: u64) {
+/// death cascade: release every reference element (per the header `elref`
+/// flag), then free the elements buffer
+fn arr_dtor(p: usize, aux: u64) {
     unsafe {
         let a = p as *mut i64;
         let len = *a;
         let buf = *a.offset(2) as *mut i64;
-        let mut i = 0i64;
-        while i < len {
-            let w = *buf.offset(i as isize);
-            if w != 0 && w_is_ref(w) {
-                crate::rc::sloth_rc_release(w);
+        if aux != 0 {
+            let mut i = 0i64;
+            while i < len {
+                let w = *buf.offset(i as isize);
+                if w != 0 {
+                    crate::rc::sloth_rc_release(w);
+                }
+                i += 1;
             }
-            i += 1;
         }
         if !buf.is_null() {
             libc::free(buf as *mut libc::c_void);
@@ -66,21 +68,22 @@ fn arr_dtor(p: usize, _aux: u64) {
 
 #[no_mangle]
 pub extern "C" fn sloth_arr_new(len_w: i64) -> i64 {
-    arr_new_impl(len_w)
+    arr_new_impl(len_w, 0)
 }
 
-/// element-ref-aware creation signature kept (the tag bit replaced the
-/// elref mask; the parameter is ignored — callers keep shape)
+/// element-ref-aware creation: `elref` = 1 marks elements as references so
+/// the death cascade releases them
 #[no_mangle]
-pub extern "C" fn sloth_arr_new_k(len_w: i64, _elref: i64) -> i64 {
-    arr_new_impl(len_w)
+pub extern "C" fn sloth_arr_new_k(len_w: i64, elref: i64) -> i64 {
+    arr_new_impl(len_w, elref)
 }
 
-fn arr_new_impl(len_w: i64) -> i64 {
+fn arr_new_impl(len_w: i64, elref: i64) -> i64 {
     unsafe {
-        let n = crate::rc::dec_i(len_w).max(0);
+        let n = len_w.max(0);
         let cap = ((n as usize) * 2).next_power_of_two().max(8) as i64;
         let h = rc_addr(HDR_WORDS * 8, Some(arr_dtor));
+        crate::rc::set_aux(h, elref as u64);
         let p = h as *mut i64;
         *p = n;
         *p.offset(1) = cap;
@@ -91,10 +94,10 @@ fn arr_new_impl(len_w: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sloth_arr_len(w: i64) -> i64 {
-    unsafe { crate::rc::enc_i(*(w_unref(w) as *mut i64)) }
+    unsafe { *(w_unref(w) as *mut i64) }
 }
 
-/// append one tagged word; the handle is stable (only the elements buffer
+/// append one raw word; the handle is stable (only the elements buffer
 /// grows), so the same word is returned and aliases stay valid
 #[no_mangle]
 pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
@@ -117,7 +120,7 @@ pub extern "C" fn sloth_arr_push(a: i64, w: i64) -> i64 {
     }
 }
 
-/// remove and return the last tagged word
+/// remove and return the last raw word
 #[no_mangle]
 pub extern "C" fn sloth_arr_pop(a: i64) -> i64 {
     unsafe {

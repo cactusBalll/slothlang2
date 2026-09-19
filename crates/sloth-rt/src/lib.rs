@@ -6,6 +6,7 @@
 pub mod alloc;
 pub mod arrays;
 pub mod boxopt;
+pub mod builtins;
 pub mod channel;
 pub mod console;
 pub mod externs;
