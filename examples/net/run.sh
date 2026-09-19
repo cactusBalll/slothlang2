@@ -37,8 +37,9 @@ expect() {
 expect "event_backends.sl"  "event backends OK"
 expect "tcp_echo_fiber.sl"  "tcp echo (fiber) OK"
 expect "udp_echo.sl"        "udp echo: ping" "udp echo OK"
-expect "http_server.sl"     "http server OK"
+expect "http_server.sl"    "http server OK"
 expect "tcp_echo_threads.sl" "tcp echo (threads) OK"
+expect "thread_offload.sl"  "compute offload OK" "loop still serving"
 
 if [ "$fail" -eq 0 ]; then
     echo "net examples: OK"

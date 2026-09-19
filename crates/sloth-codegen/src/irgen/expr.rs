@@ -1275,7 +1275,19 @@ impl ModEmitter {
                         | Ty::Array(_)
                         | Ty::Map(..)
                         | Ty::Tensor(..)
-                        | Ty::Bool => {
+                        | Ty::Bool
+                        // builtin handle surfaces keep their type through a
+                        // field read (fn / fiber / joinhandle / channel /
+                        // mutex / atomic / any), or a later `.method()` call
+                        // and indirect call can't dispatch on the receiver
+                        | Ty::Fn(_)
+                        | Ty::Fiber(_)
+                        | Ty::JoinHandle(_)
+                        | Ty::Channel(_)
+                        | Ty::Mutex
+                        | Ty::AtomicInt
+                        | Ty::Any
+                        | Ty::Range => {
                             let r = fw.v();
                             fw.op(&format!(
                                 "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
@@ -2147,6 +2159,17 @@ impl ModEmitter {
             if let ExprNode::Ident(m) = &obj.node {
                 let key = format!("{}.{}", m, mname2);
                 self.guard_hidden(m, mname2, pos);
+                if let Some((defmod, fd)) = self.foreign_func_defs.get(&key).cloned() {
+                    // qualified call to an imported generic function: build the
+                    // monomorphic instance in the defining module's namespace
+                    let cargv: Vec<(String, TyId)> =
+                        args.iter().map(|a| self.emit_expr(fw, a)).collect();
+                    let saved = self.cur_mod.clone();
+                    self.cur_mod = defmod;
+                    let out = self.emit_gfunc_call(fw, mname2, &fd, &cargv, pos);
+                    self.cur_mod = saved;
+                    return out;
+                }
                 if let Some(fs) = self.cross_funcs.get(&key).cloned() {
                     let mut cargv: Vec<(String, TyId)> = Vec::new();
                     let mut csig: Vec<String> = Vec::new();

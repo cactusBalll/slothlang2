@@ -128,6 +128,36 @@ extern func sloth_evbuf_count(b: EvBuf): int;
 extern func sloth_evbuf_token(b: EvBuf, i: int): int;
 extern func sloth_evbuf_events(b: EvBuf, i: int): int;
 
+// ---------------- async completion (cross-thread) ----------------
+// A worker OS thread signals an eventfd when a task finishes; the event loop
+// watches the fd and wakes the waiting fiber. Safe to signal before the watch
+// is registered (the counter keeps the fd readable until drained).
+
+extern func sloth_async_new(): int;
+extern func sloth_async_signal(fd: int): int;
+extern func sloth_async_drain(fd: int): int;
+extern func sloth_async_free(fd: int): int;
+
+/// create a completion fd (eventfd), or <0 on error
+pub func async_new(): int {
+    return sloth_async_new();
+}
+
+/// signal a completion fd from any thread
+pub func async_signal(fd: int): int {
+    return sloth_async_signal(fd);
+}
+
+/// reset a completion fd (nonblocking)
+pub func async_drain(fd: int): int {
+    return sloth_async_drain(fd);
+}
+
+/// close a completion fd
+pub func async_free(fd: int): int {
+    return sloth_async_free(fd);
+}
+
 // backend kinds
 pub func kind_select(): int {
     return 0;

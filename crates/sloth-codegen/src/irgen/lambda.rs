@@ -140,7 +140,14 @@ impl ModEmitter {
             body: l.body.clone(),
             is_extern: false,
         };
+        // a lambda body is its own function: it must not inherit the enclosing
+        // generic instance's mangled name (`tp_mangled`), or every instantiation
+        // would share one body whose ARC depends on the concrete type args
+        let saved_tpm = self.tp_mangled.pop();
         let sym = self.emit_func(&lname, None, &fd, None, false);
+        if let Some(m) = saved_tpm {
+            self.tp_mangled.push(m);
+        }
         let pty: Vec<TyId> = l
             .params
             .iter()
@@ -295,6 +302,20 @@ fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
             Some(Type::Simple(SimpleType::Tensor(Box::new(el), rank)))
         }
         Ty::Dyn(n) => Some(Type::Simple(SimpleType::Dyn(n))),
+        Ty::Fn(ft) => {
+            // captured function value: keep the surface a callable function so
+            // the generated lambda body can call the capture indirectly
+            let params: Vec<Type> = ft
+                .params
+                .iter()
+                .map(|p| syn_ty_of(me, *p).unwrap_or(Type::Simple(SimpleType::Ident("_".into()))))
+                .collect();
+            let ret = syn_ty_of(me, ft.ret).unwrap_or(Type::Unit);
+            Some(Type::Simple(SimpleType::Fn(Box::new(FnType {
+                params,
+                ret,
+            }))))
+        }
         Ty::Array(e) => syn_ty_of(me, e).map(|x| Type::Simple(SimpleType::Array(Box::new(x)))),
         Ty::Map(k, v) => {
             let kt = syn_ty_of(me, k)?;

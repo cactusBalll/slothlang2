@@ -1086,6 +1086,14 @@ impl ModEmitter {
                 map.entry(n).or_insert(act);
             }
             (Ty::Array(pe), Ty::Array(ae)) => self.unify_tp(tnames, pe, ae, map),
+            (Ty::Fn(pf), Ty::Fn(af)) => {
+                // unify a function-typed parameter: `(T) -> R` binds T from the
+                // parameter types and R from the return type
+                for (p, a) in pf.params.iter().zip(af.params.iter()) {
+                    self.unify_tp(tnames, *p, *a, map);
+                }
+                self.unify_tp(tnames, pf.ret, af.ret, map);
+            }
             (Ty::Fiber(pe), Ty::Fiber(ae)) => self.unify_tp(tnames, pe, ae, map),
             (Ty::Opt(pe), Ty::Opt(ae)) => self.unify_tp(tnames, pe, ae, map),
             (Ty::Map(pk, pv), Ty::Map(ak, av)) => {

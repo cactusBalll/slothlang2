@@ -120,7 +120,7 @@ import "sloth/http.slt";   // Request / Response / Router / serve
 | `bytes.rs` | `sloth_bytes_new/len/cap/ensure/set_len/get/set/fill/append/copy_from_str/to_str/as_str/free` | 可变字节缓冲；recv/HTTP 帧定界的热数据留在 rt |
 | `time.rs` | `sloth_now_ms`、`sloth_sleep_ms` | `CLOCK_MONOTONIC`；超时/keep-alive 用 |
 | `net.rs` | `sloth_net_socket/close/shutdown/set_nonblocking/set_blocking/set_reuse{addr,port}/set_nodelay/bind/listen/accept/connect/recv/send/send_str/recvfrom/sendto/peer_addr/local_port`、`sloth_addr_*`、`sloth_io_errno/would_block/conn_closed` | 非阻塞为默认（`SOCK_NONBLOCK|SOCK_CLOEXEC`） |
-| `event.rs` | `sloth_ev_available/backend_name/new/free/wakeup/ctl/poll`、`sloth_evbuf_*` | 五机制统一后端 |
+| `event.rs` | `sloth_ev_available/backend_name/new/free/wakeup/ctl/poll`、`sloth_evbuf_*`、`sloth_async_new/signal/drain/free` | 五机制统一后端 + 独立完成通知 eventfd |
 | `strings.rs`（增补） | `sloth_str_find`、`sloth_str_starts_with` | HTTP 分帧/路由 |
 
 ### 5.2 错误约定
@@ -227,6 +227,21 @@ while running:
 
 `active`（存活任务数）归零时 `run` 返回；`shutdown()` 置 `running=0` 并 `ev_wakeup` 打断阻塞 wait。`serve_n` 接受固定连接数后返回，配合 handler fiber 使进程自然收敛，适合 CI。
 
+### 7.7 计算卸载：fiber → OS 线程
+
+事件循环要求每个任务都不长时间占用 loop 线程，但计算密集任务无法改写为非阻塞。为此 `event.slt` 提供计算卸载原语：
+
+```rust
+pub func run_blocking<T, R>(loop: EventLoop, entry: (T) -> R, arg: T): R
+```
+
+- `entry(arg)` 在**新建的 OS 线程**上运行（`thread.spawn`），当前 fiber 立即 `fiber.yield(wait_read(fd))`，loop 继续服务其他 fiber；
+- 该线程完成时经 `io.async_signal(fd)`（rt 独立 eventfd，§5.1/§6）通知 loop，fiber 被唤醒后 `io.async_drain/free` 并 `handle.join()` 取回结果（此时线程已结束，`join` 不阻塞）；
+- `JoinHandle<R>` 作为 fiber 局部量跨越 `yield` 存活，因此**无需类型擦除容器**；`T`/`R` 为泛型，受 `Send` 约束（TH §7）；
+- 与「每线程一个 event loop」正交：卸载用线程只跑纯计算，不持有 loop；`run_blocking` 必须从 fiber 内调用（依赖 `fiber.yield`）。
+
+事件队列的完成通知因此同时覆盖「I/O 就绪」与「后台线程完成」两类可等待事件。
+
 ---
 
 ## 8. 服务器模型
@@ -277,14 +292,22 @@ loop.run()
 | --- | --- |
 | `sloth-frontend` | **无** |
 | `sloth-codegen/ty` | **无**（无新 Ty；extern type 走既有 `extern_types`） |
-| `sloth-codegen/irgen` | **无新内建**；仅修三处与标准库可用性相关的真 bug（见下） |
+| `sloth-codegen/irgen` | **无新内建**；仅修与标准库可用性相关的真 bug（见下） |
 | pass 管线 | 无新增 pass |
 
-**过程中修掉的三处 codegen 真 bug**（均带回归面，非本扩展的语法改动）：
+**过程中修掉的 codegen 真 bug**（均带回归面，非本扩展的语法改动）：
 
 1. `keys(Map<K,V>)` 结果元素类型恒为 `int`（`values` 已按 V 推导）→ 按 `K` 推导。原因：本项目 Map 迭代依赖 `Entry<K,V>`，而 `Entry` 预注入仅发生在根模块，导入模块不可用，标准库只能经 `keys()` 迭代。
 2. lambda 捕获误判**模块限定调用**：`event.sleep(...)`/`io.bytes_new(...)` 的模块名被当作待捕获变量 → `lambda_caps` 纳入 `init_mods`/`mod_alias`。
 3. lambda 捕获漏扫**字符串插值** `${expr}` 中的自由变量 → `walk_ids_expr` 增 `ExprNode::Str`（`StrPart::ExprAst`）分支。
+
+**计算卸载（§7.7）过程中修掉的 codegen 真 bug**：
+
+4. **类字段读取丢失内建句柄类型**：`JoinHandle`/`Channel`/`Fiber`/`Fn`/`Mutex`/`AtomicInt`/`Any`/`Range` 字段读到后落到 `_ => int`，导致 `obj.handle.join()` 之类调用「call to unknown」。→ `ExprNode::Field` 读路径把这些内建 surface 原样返回。
+5. **lambda 捕获函数值后无法调用**：`syn_ty_of` 缺 `Ty::Fn` 分支，捕获到的函数参数被重建为 `int`，lambda 体内 `f(x)` 报未知调用。→ `syn_ty_of` 重建 `(T)->R` 函数 surface。
+6. **泛型参数从函数型实参无法推断**：`unify_tp` 无 `(Ty::Fn, Ty::Fn)` 分支，`run_blocking(loop, f, x)` 推断不出 `R`。→ 按参数与返回类型逐位 unify。
+7. **lambda 体错误继承泛型实例符号**：泛型单态化时 `tp_mangled` 泄漏进嵌套 `emit_func(lambda)`，使不同实例共用同一 lambda 体（ARC 按未解析类型生成，int 结果被误 retain/release → `rc` 溢出崩溃）。→ `emit_lambda` 在发射 lambda 体前临时弹出 `tp_mangled`，让每个实例得到独立、按具体类型生成的 lambda。
+8. **跨模块泛型函数未单态化**：`lib.fn<T,U>(...)` 走 `cross_funcs` 直呼未单态的模板（未解析类型 → 错误的 ref 标志）。→ 记录外部 `FuncDef`（`foreign_func_defs`），限定调用命中泛型时在定义模块命名空间内单态化（临时切换 `cur_mod`）。
 
 ---
 
@@ -300,6 +323,7 @@ loop.run()
 | 6 | `Serve` 阻塞退出 | 低 | `active` 归零自然退出；`serve_n`/`shutdown` 收敛；测试用 `serve_n` 避免弃置挂起 Fiber（debug 下 Fiber dtor 会 panic） |
 | 7 | kqueue 未实现 | 低 | 明确报告 unavailable，不广告不可用后端；ABI 预留 |
 | 8 | 无 TLS/HTTP2 | 低 | 非目标；面向内网/压测/示例 |
+| 9 | 计算卸载线程的生命周期 | 低 | `run_blocking` 始终 `join`，不弃置句柄（debug 下弃置会 panic）；`T`/`R` 受 `Send` 约束，Fiber 不可作载荷；卸载线程不持有 event loop |
 
 ---
 
@@ -308,8 +332,8 @@ loop.run()
 ### 12.1 分层测试
 
 - **rt 单元/集成**（`crates/sloth-rt/tests/net_smoke.rs`，9 用例）：四后端 socketpair 可读/可写、TCP loopback accept/connect/send/recv、UDP echo、字节缓冲、地址解析、eventfd 唤醒打断阻塞 wait、无限超时（`-1`）就绪即返回、后端命名/可用性。
-- **spec**（`crates/slothc/tests/spec/`）：`119_net_api`（无网络：bytes/clock/后端常量/地址/字符串工具）、`120_event_queue`（定时器顺序 + 四后端 fiber TCP echo + `sloth_rc_live` 回落）、`121_http_parse`（解析/响应/路由 + 四后端端到端 200）。
-- **示例**（`examples/net/run.sh`）：`event_backends`、`tcp_echo_fiber`、`udp_echo`、`http_server`、`tcp_echo_threads`（thread-per-connection）全 PASS。
+- **spec**（`crates/slothc/tests/spec/`）：`119_net_api`（无网络：bytes/clock/后端常量/地址/字符串工具）、`120_event_queue`（定时器顺序 + 四后端 fiber TCP echo + `sloth_rc_live` 回落）、`121_http_parse`（解析/响应/路由 + 四后端端到端 200）、`122_thread_offload`（四后端计算卸载：结果正确 + loop 未被阻塞）。
+- **示例**（`examples/net/run.sh`）：`event_backends`、`tcp_echo_fiber`、`udp_echo`、`http_server`、`tcp_echo_threads`（thread-per-connection）、`thread_offload`（fiber→OS 线程计算卸载）全 PASS。
 
 ### 12.2 双后端
 
@@ -331,6 +355,8 @@ loop.run()
 | **IO-P3** | `event.slt` 事件队列 + 定时器 + fiber reactor | spec 120（定时器顺序、fiber echo、rc 回落） |
 | **IO-P4** | `http.slt` 解析/路由/服务器 | spec 121 + examples/net |
 | **IO-P5** | examples/net + run.sh + 文档 | 五示例 JIT/AOT 全 PASS |
+
+> **IO-P6（增值）**：fiber→OS 线程计算卸载（`event.run_blocking`，§7.7）：rt 独立 eventfd（`sloth_async_*`）+ 导入模块泛型函数单态化等 codegen 修复；验收 spec `122_thread_offload` 与 `examples/net/thread_offload.sl`。
 
 **后续（非本版）**：kqueue 后端；定时器最小堆；HTTP chunked 与 query/percent 解码；TLS（需引入密码库，另立扩展）；io_uring 由「就绪」升级为「直接收发」（`IORING_OP_RECV/SEND`）；`SLOTH_STDLIB` 安装布局与文档。
 
@@ -387,6 +413,7 @@ wait_read/write/accept/sleep/yield
 class EventLoop     { spawn/run/shutdown/close/ok/backend }
 await_readable/await_writable/await_accept/sleep
 read_some/write_all/write_str_all/accept_blocking
+run_blocking(loop, entry: (T)->R, arg: T) -> R   // 计算卸载到 OS 线程（§7.7）
 ```
 
 ### A.4 http.slt

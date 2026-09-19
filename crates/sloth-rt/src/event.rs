@@ -161,6 +161,62 @@ fn drain_eventfd(fd: i32) {
     }
 }
 
+// ---------------- standalone eventfd (cross-thread completion signal) ----------------
+//
+// A worker OS thread signals one of these when a compute task finishes; the
+// owning `EventLoop` watches the fd and wakes the waiting fiber. The counter
+// nature of eventfd makes "signal before the watch is registered" safe: the
+// fd stays readable until drained.
+
+/// create a nonblocking eventfd; returns the fd or `-errno`
+#[no_mangle]
+pub extern "C" fn sloth_async_new() -> i64 {
+    let fd = make_eventfd();
+    if fd < 0 {
+        unsafe { errno() }
+    } else {
+        fd as i64
+    }
+}
+
+/// signal an eventfd (add 1); returns 0 or `-errno`
+#[no_mangle]
+pub extern "C" fn sloth_async_signal(fd: i64) -> i64 {
+    let v: u64 = 1;
+    let r = unsafe { libc::write(fd as i32, &v as *const u64 as *const libc::c_void, 8) };
+    if r < 0 {
+        unsafe { errno() }
+    } else {
+        0
+    }
+}
+
+/// drain an eventfd (nonblocking read); returns 0 or `-errno`
+#[no_mangle]
+pub extern "C" fn sloth_async_drain(fd: i64) -> i64 {
+    let mut v: u64 = 0;
+    let r = unsafe { libc::read(fd as i32, &mut v as *mut u64 as *mut libc::c_void, 8) };
+    if r < 0 {
+        unsafe { errno() }
+    } else {
+        0
+    }
+}
+
+/// close an eventfd; returns 0 or `-errno`
+#[no_mangle]
+pub extern "C" fn sloth_async_free(fd: i64) -> i64 {
+    if fd < 0 {
+        return 0;
+    }
+    let r = unsafe { libc::close(fd as i32) };
+    if r < 0 {
+        unsafe { errno() }
+    } else {
+        0
+    }
+}
+
 // ---------------- availability / naming ----------------
 
 #[cfg(target_os = "linux")]

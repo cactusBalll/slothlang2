@@ -38,6 +38,9 @@ pub struct ModEmitter {
     pub cur_mod: String,
     /// foreign module surface: simple name -> (mangled symbol, ret ty)
     pub cross_funcs: HashMap<String, (String, TyId)>,
+    /// foreign function defs (same keys as `cross_funcs`): lets a qualified
+    /// call to an imported *generic* function be monomorphized at the caller
+    pub foreign_func_defs: HashMap<String, (String, FuncDef)>,
     /// satisfied import paths (file canonical)
     pub imported_paths: Vec<String>,
     /// raw class defs (for field-initializer emission at ctor time)
@@ -195,6 +198,7 @@ impl ModEmitter {
             emitted_names: Vec::new(),
             cur_mod: name.to_string(),
             cross_funcs: HashMap::new(),
+            foreign_func_defs: HashMap::new(),
             imported_paths: Vec::new(),
             class_defs: HashMap::new(),
             hidden: HashSet::new(),

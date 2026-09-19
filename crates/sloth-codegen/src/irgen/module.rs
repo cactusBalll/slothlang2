@@ -91,6 +91,16 @@ impl ModEmitter {
                     }
                     self.cross_funcs
                         .insert(format!("{}.{}", qname, d.name), (mangled, plan.ret));
+                    // keep the def so qualified calls to an imported generic
+                    // function can be monomorphized in the caller
+                    if !f.is_extern && !f.type_params.is_empty() {
+                        self.foreign_func_defs
+                            .insert(d.name.clone(), (mname.to_string(), (**f).clone()));
+                        self.foreign_func_defs.insert(
+                            format!("{}.{}", qname, d.name),
+                            (mname.to_string(), (**f).clone()),
+                        );
+                    }
                     if !d.visible {
                         self.hidden.insert(format!("{}.{}", qname, d.name));
                     }

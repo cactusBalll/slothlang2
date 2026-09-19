@@ -378,3 +378,33 @@ pub func accept_blocking(loop: EventLoop, listener: TcpListener): int {
     }
     return fd;
 }
+
+// ---------------- compute offload to an OS thread ----------------
+//
+// A fiber that must run CPU-bound work hands it to a fresh OS thread and
+// suspends until that thread signals completion, so the event loop keeps
+// making progress on the other fibers. The result travels back on the
+// thread's `JoinHandle<R>`; the completion eventfd only tells the loop *when*
+// the thread is done. `join` therefore returns immediately after the wake.
+// The handle stays a fiber-local across the yield, so no type-erased container
+// is needed.
+
+/// Run `entry(arg)` on a new OS thread and suspend the calling fiber until it
+/// finishes, then return its result. Other fibers keep running while the
+/// thread computes. `T` and `R` must satisfy `Send`.
+pub func run_blocking<T, R>(loop: EventLoop, entry: (T) -> R, arg: T): R {
+    let fd = io.async_new();
+    let h = thread.spawn(|x: T| -> R {
+        let r = entry(x);
+        if fd >= 0 {
+            io.async_signal(fd);
+        }
+        return r;
+    }, arg);
+    if fd >= 0 {
+        let got = fiber.yield(wait_read(fd));
+        io.async_drain(fd);
+        io.async_free(fd);
+    }
+    return h.join();
+}
