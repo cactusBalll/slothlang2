@@ -302,6 +302,25 @@ impl ModEmitter {
             ),
         }
     }
+
+    /// can a value of this surface hold `nil`? Per design §2.1 only `T?` can,
+    /// but `dyn` accepts `nil`, `Weak<T>` yields a 0 handle from a nil target,
+    /// `Unit` is the `nil` literal / unknown surface, and a generic `Tp`
+    /// placeholder is not yet resolved — all stay nil-testable.
+    pub(crate) fn nil_capable(&self, t: TyId) -> bool {
+        match self.r.get(t) {
+            Ty::Opt(_) | Ty::Unit | Ty::Tp(_) | Ty::Dyn(_) | Ty::Weak(_) => true,
+            // an unresolved generic type parameter surfaces as a `Named` that
+            // is not a declared class/trait/extern type (generic bodies are
+            // emitted once as a template before monomorphization)
+            Ty::Named(n, _) => {
+                !self.classes.contains_key(n)
+                    && !self.traits.contains_key(n)
+                    && !self.extern_types.contains(n)
+            }
+            _ => false,
+        }
+    }
 }
 
 impl ModEmitter {

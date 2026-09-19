@@ -428,6 +428,21 @@ mod irgen_p4 {
         run_src(src, "main").unwrap();
     }
 
+    /// `is nil` on a non-optional surface is a type error (design §2.1)
+    #[test]
+    fn isnil_nonoptional_diag() {
+        let src = r#"
+            func main(): unit {
+                var n: int = 0;
+                print(n is nil);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected non-optional `is nil` diag"),
+            Err(e) => assert!(e.contains("non-optional"), "unexpected: {}", e),
+        }
+    }
+
     /// elvis default
     #[test]
     fn elvis_nil_default_works() {

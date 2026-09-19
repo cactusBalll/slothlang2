@@ -419,6 +419,23 @@ impl ModEmitter {
                 let (lv, lt) = self.emit_expr(fw, lhs);
                 // nil test
                 if let ExprNode::Nil = &rhs.node {
+                    // only nil-capable surfaces may be nil-tested: `T?`, `dyn`,
+                    // `Weak<T>`, the `nil`/unknown surface, or a generic
+                    // placeholder. A plain value/ref (int/str/class/...) can
+                    // never be nil, so `x is nil` there is a type error.
+                    if !self.nil_capable(lt) {
+                        let tn = self.surface_name(&self.r.get(lt).clone());
+                        self.err(
+                            &e.pos,
+                            format!(
+                                "`is nil` on non-optional type `{}` (only `T?`, `dyn` or `Weak<T>` can be nil)",
+                                tn
+                            ),
+                        );
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        return (z, self.r.mk(Ty::Bool));
+                    }
                     let zc = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : i64", zc));
                     let c = fw.v();

@@ -4,6 +4,9 @@
 
 - 只有显式声明为 `T?` 的类型可持有 `nil`；`nil` 只能赋给 `T?`。
 - 不允许嵌套：`int??` 报 `nested optional T?? is not allowed`。
+- `x is nil` 仅对**可空表面**合法：`T?`、`dyn`、`Weak<T>`、`nil`/未知与未解析泛型。
+  对非可空类型（如 `int`/`str`/类实例）写 `is nil` 是编译期诊断。否则
+  `int 0`/`bool false`/`float 0.0` 与 `nil` 在词面同为 `0`，会造成语义混淆。
 - 表示（见 §5）：
   - 引用型 `T?`：句柄本身，`nil` 即 `0`；
   - 值型 `T?`（`int?`/`float?`/`bool?`）：指向 rc 跟踪 payload 盒的引用词，
