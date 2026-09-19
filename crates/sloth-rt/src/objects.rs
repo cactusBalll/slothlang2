@@ -16,6 +16,10 @@ use crate::rc::{rc_addr, w_ref, w_unref};
 pub(crate) struct ObjInfo {
     cls_id: i64,
     refmask: u64,
+    /// display name of the concrete class (raw bytes, untracked, points into
+    /// a codegen-emitted byte global); used by the `type_name` builtin
+    name: *const u8,
+    name_len: usize,
 }
 pub(crate) const OBJ_FIELD_OFFSET: isize = 2;
 
@@ -29,9 +33,26 @@ pub extern "C" fn sloth_cls_info(_super_w: i64, cls_id_w: i64) -> i64 {
         let o = crate::alloc::sloth_rt_alloc(std::mem::size_of::<ObjInfo>()) as *mut ObjInfo;
         (*o).cls_id = cls_id_w;
         (*o).refmask = 0;
+        (*o).name = std::ptr::null();
+        (*o).name_len = 0;
         // class metadata is never freed: the word is representational only
         w_ref(o as usize)
     }
+}
+
+/// register the runtime display name of a class (raw bytes pointer + length,
+/// untracked). Called by codegen at instance construction and by the builtin
+/// value-box builder; the bytes live in a codegen-emitted global.
+#[no_mangle]
+pub extern "C" fn sloth_cls_name(info_w: i64, ptr_w: i64, len_w: i64) -> i64 {
+    if info_w != 0 {
+        unsafe {
+            let o = w_unref(info_w) as *mut ObjInfo;
+            (*o).name = w_unref(ptr_w) as *const u8;
+            (*o).name_len = len_w.max(0) as usize;
+        }
+    }
+    0
 }
 
 /// mark the refcounted fields of a class (codegen knows the field kinds);
@@ -134,15 +155,53 @@ pub extern "C" fn sloth_obj_set_field(obj_w: i64, idx_w: i64, val: i64) -> i64 {
     }
 }
 
+/// runtime type name for a statically-known reference type: `w == 0` (nil) →
+/// `"nil"`, otherwise a fresh `str` from the compile-time name bytes (owned
+/// +1). Used by `type_name` on non-class reference types and reference
+/// optionals, whose concrete type is known to the compiler.
+#[no_mangle]
+pub extern "C" fn sloth_type_name_or(w: i64, ptr_w: i64, len_w: i64) -> i64 {
+    if w == 0 {
+        crate::strings::intern_bytes(b"nil".as_ptr() as usize, 3)
+    } else {
+        crate::strings::intern_bytes(w_unref(ptr_w), len_w.max(0))
+    }
+}
+
 /// runtime class id of an object (raw from the type header)
 #[no_mangle]
 pub extern "C" fn sloth_obj_cls_id(obj_w: i64) -> i64 {
+    if obj_w == 0 {
+        return 0;
+    }
     unsafe {
         let info = *(w_unref(obj_w) as *mut *mut ObjInfo);
         if info.is_null() {
             0
         } else {
             (*info).cls_id
+        }
+    }
+}
+
+/// runtime display name of an object's concrete class as a fresh owned `str`
+/// (+1). nil → `"nil"`; missing metadata/name → empty string.
+#[no_mangle]
+pub extern "C" fn sloth_obj_type_name(obj_w: i64) -> i64 {
+    unsafe {
+        if obj_w == 0 {
+            return crate::strings::intern_bytes(b"nil".as_ptr() as usize, 3);
+        }
+        let info = *(w_unref(obj_w) as *mut *mut ObjInfo);
+        if info.is_null() {
+            return crate::strings::intern_bytes(b"".as_ptr() as usize, 0);
+        }
+        let n = (*info).name;
+        let l = (*info).name_len;
+        if n.is_null() {
+            crate::strings::intern_bytes(b"".as_ptr() as usize, 0)
+        } else {
+            crate::strings::intern_bytes(n as usize, l as i64)
         }
     }
 }

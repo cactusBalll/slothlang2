@@ -54,6 +54,7 @@ impl ModEmitter {
                 }
                 DeclNode::Class(c) => {
                     self.class_ids.insert(d.name.clone(), class_id);
+                    self.cls_display.insert(d.name.clone(), d.name.clone());
                     if !self.class_order.contains(&d.name) {
                         self.class_order.push(d.name.clone());
                     }

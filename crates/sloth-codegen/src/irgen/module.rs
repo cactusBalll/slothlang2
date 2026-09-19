@@ -96,6 +96,7 @@ impl ModEmitter {
                     }
                     self.cls_mod.insert(d.name.clone(), mname.to_string());
                     self.class_ids.insert(d.name.clone(), cid);
+                    self.cls_display.insert(d.name.clone(), d.name.clone());
                     if !self.class_order.contains(&d.name) {
                         self.class_order.push(d.name.clone());
                     }
@@ -355,6 +356,80 @@ pub(crate) fn emit_str_globals(me: &ModEmitter) -> String {
     out
 }
 
+/// byte globals backing `type_name` results (NUL-terminated; the runtime is
+/// handed the explicit length so the terminator is only a safety cap)
+pub(crate) fn emit_tyname_globals(me: &ModEmitter) -> String {
+    let mut out = String::new();
+    for (i, s) in me.tyname_pool.iter().enumerate() {
+        let mut bytes: Vec<u8> = s.bytes().collect();
+        bytes.push(0);
+        let n = bytes.len();
+        let mut lit = String::new();
+        for b in &bytes {
+            match b {
+                b'"' => lit.push_str("\\\""),
+                b'\\' => lit.push_str("\\\\"),
+                0x20..=0x7e => lit.push(*b as char),
+                _ => lit.push_str(&format!("\\{:02X}", b)),
+            }
+        }
+        out.push_str(&format!(
+            "  llvm.mlir.global private constant @sloth_tynm_{}(\"{}\") : !llvm.array<{} x i8>\n",
+            i, lit, n
+        ));
+    }
+    out
+}
+
+impl ModEmitter {
+    /// reserve (or fetch) a pooled byte global for a type-name string
+    pub(crate) fn declare_tyname_global(&mut self, s: &str) -> String {
+        if let Some(sym) = self.tyname_syms.get(s) {
+            return sym.clone();
+        }
+        let sym = format!("sloth_tynm_{}", self.tyname_pool.len());
+        self.tyname_pool.push(s.to_string());
+        self.tyname_syms.insert(s.to_string(), sym.clone());
+        sym
+    }
+
+    /// emit the raw address word (i64) of a pooled type-name byte global
+    pub(crate) fn emit_tyname_ptr(&mut self, fw: &mut FnWalk, s: &str) -> String {
+        let sym = self.declare_tyname_global(s);
+        let a = fw.v();
+        fw.op(&format!(
+            "    {} = llvm.mlir.addressof @{} : !llvm.ptr",
+            a, sym
+        ));
+        let p = fw.v();
+        fw.op(&format!(
+            "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
+            p, a
+        ));
+        p
+    }
+
+    /// materialize a fresh owned `str` naming a statically-known reference
+    /// type; `v` guards nil (returns "nil"). Marks the result a producer.
+    pub(crate) fn emit_tyname_lit(&mut self, fw: &mut FnWalk, v: &str, s: &str) -> String {
+        let p = self.emit_tyname_ptr(fw, s);
+        let lc = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            lc,
+            enc_i_lit(s.len() as i64)
+        ));
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_type_name_or({}, {}, {}) : (i64, i64, i64) -> i64",
+            r, v, p, lc
+        ));
+        let t = self.r.mk(Ty::Str);
+        self.dangling_producer(fw, &r, t);
+        r
+    }
+}
+
 impl ModEmitter {
     pub fn emit_module(&mut self, prog: &Program) -> Vec<Diag> {
         // stdlib Result<T,E> prelude (only injected once)
@@ -605,6 +680,7 @@ impl ModEmitter {
         }
         let mut m = format!("module @{} {{\n", me.name);
         m.push_str(&emit_str_globals(me));
+        m.push_str(&emit_tyname_globals(me));
         m.push_str(&rt_decls());
         m.push_str(&obj_rt_decls());
         for gd in &me.global_decls {
@@ -627,6 +703,9 @@ pub fn obj_rt_decls() -> String {
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_refmask(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_cls_name(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_type_name(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_type_name_or(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_arr_new_k(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_cls_id(i64) -> i64\n");
     s.push_str("  func.func private @sloth_vt_new(i64) -> i64\n");

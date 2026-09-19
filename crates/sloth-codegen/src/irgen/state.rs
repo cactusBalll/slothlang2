@@ -103,6 +103,17 @@ pub struct ModEmitter {
     pub(crate) tp_mangled: Vec<String>,
     /// generic instance cache: base mangled -> concrete word spelling key
     pub(crate) insts: std::collections::HashMap<String, Vec<String>>,
+    /// runtime `typeid` registry: canonical type key -> integer id (monomorphic
+    /// non-class reference types; classes/dyn use `ObjInfo.cls_id` instead)
+    pub(crate) type_ids: HashMap<String, i64>,
+    /// next fresh `typeid` constant (starts at `TYPEID_BASE`)
+    pub(crate) next_type_id: i64,
+    /// display name per concrete class (incl. generic instances) for type_name
+    pub(crate) cls_display: HashMap<String, String>,
+    /// byte blobs backing `type_name` results (pooled, emitted as LLVM globals)
+    pub(crate) tyname_pool: Vec<String>,
+    /// byte blob -> global symbol (dedupe)
+    pub(crate) tyname_syms: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +181,11 @@ impl ModEmitter {
             insts: std::collections::HashMap::new(),
             bridges: HashMap::new(),
             builtin_bridges: HashMap::new(),
+            type_ids: HashMap::new(),
+            next_type_id: TYPEID_BASE,
+            cls_display: HashMap::new(),
+            tyname_pool: Vec::new(),
+            tyname_syms: HashMap::new(),
         }
     }
 }

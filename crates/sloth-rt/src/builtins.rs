@@ -59,6 +59,13 @@ pub extern "C" fn sloth_builtin_info(kind_w: i64) -> i64 {
     }
     // ref mask stays 0: field 0 holds a value word, never an rc handle
     let h = crate::objects::sloth_cls_info(0, kind_cls(kind));
+    // register the display name for the `type_name` builtin
+    let nm: &[u8] = match kind {
+        KIND_FLOAT => b"float",
+        KIND_BOOL => b"bool",
+        _ => b"int",
+    };
+    crate::objects::sloth_cls_name(h, nm.as_ptr() as i64, nm.len() as i64);
     let _ = slot.compare_exchange(0, h, Ordering::AcqRel, Ordering::Acquire);
     slot.load(Ordering::Acquire)
 }

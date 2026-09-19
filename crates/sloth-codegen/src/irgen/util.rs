@@ -16,6 +16,10 @@ use std::collections::{HashMap, HashSet};
 
 pub const WW: usize = 8;
 
+/// base of compile-time-assigned ids for monomorphic non-class reference types
+/// (classes/dyn use the small `ObjInfo.cls_id` space; the two never collide)
+pub(crate) const TYPEID_BASE: i64 = 1 << 40;
+
 // ---------------- word encode/decode emit points ----------------
 
 /// int literal -> word form (de-tag: identity, full 64-bit)

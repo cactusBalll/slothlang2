@@ -152,6 +152,13 @@ impl Reg {
     }
 }
 
+/// Canonical structural key of a Ty: fully distinguishes nested generic
+/// arguments (used by codegen's runtime `typeid` registry). Delegates to the
+/// backend cache key so both stay in lockstep.
+pub fn ty_key(t: &Ty) -> String {
+    fmt_ty(t)
+}
+
 /// Printable structural name of a Ty (also backend cache key).
 fn fmt_ty(t: &Ty) -> String {
     match t {

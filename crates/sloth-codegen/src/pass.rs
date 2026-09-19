@@ -428,6 +428,46 @@ mod irgen_p4 {
         run_src(src, "main").unwrap();
     }
 
+    /// runtime `typeid`/`type_name` over reference types: class/dyn resolve
+    /// the most-derived runtime type; monomorphic containers stay distinct
+    #[test]
+    fn typeid_ref_types_work() {
+        let src = r#"
+            trait Animal { func sound(): str; }
+            class Dog impl Animal { func sound(): str { return "woof"; } }
+            class Cat impl Animal { func sound(): str { return "meow"; } }
+            class Box<T> {
+                var v: T;
+                func __init__(x: T) { this.v = x; }
+            }
+            func main(): unit {
+                var d: dyn Animal = Dog();
+                print(type_name(d));
+                print(typeid(d) == typeid(Dog()));
+                print(typeid(d) == typeid(Cat()));
+                print(type_name([1, 2]));
+                print(typeid([1]) == typeid(["s"]));
+                print(type_name(Box<int>(1)));
+                print(typeid(Box<int>(1)) == typeid(Box<str>("x")));
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `typeid` on a value type is a compile diagnostic
+    #[test]
+    fn typeid_value_diag() {
+        let src = r#"
+            func main(): unit {
+                print(typeid(3));
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected `typeid` value-type diag"),
+            Err(e) => assert!(e.contains("requires a reference type"), "unexpected: {}", e),
+        }
+    }
+
     /// `is nil` on a non-optional surface is a type error (design §2.1)
     #[test]
     fn isnil_nonoptional_diag() {

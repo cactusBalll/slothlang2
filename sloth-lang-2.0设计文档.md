@@ -502,6 +502,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 | `sloth.call_indirect` | 闭包 `{fnptr, env}` 拆解后经 `llvm.call`（每目标生成 bridge） |
 | `sloth.call_virtual` | 对象头虚表指针 + class-id 分支/间接调用 |
 | `sloth.type_test` | class-id / 运行时活跃判定 |
+| `typeid(x)` / `type_name(x)` | 引用类型运行时类型身份：类/`dyn` 经 `ObjInfo`（`@sloth_obj_cls_id` / `@sloth_obj_type_name`）取**最派生**具体类；其余单态引用类型为编译期常量 id/名字（`TYPEID_BASE=2^40` 起，见 §2.6）；非引用类型编译期诊断 |
 | `sloth.closure_create` | `@sloth_closure_new` + env 字段写入 |
 | `sloth.iter_begin / iter_next` | 结构化 `iter()`/`next()` 协议，展开发射到 `cf`/`scf` |
 | `sloth.panic` | `@sloth_panic_divzero` / `@sloth_panic_unwrap` / `@sloth_panic_noimpl` |

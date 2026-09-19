@@ -422,6 +422,25 @@ impl ModEmitter {
             "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             cid, z, ids
         ));
+        // register the concrete class display name for the `type_name` builtin
+        {
+            let disp = self
+                .cls_display
+                .get(clsname)
+                .cloned()
+                .unwrap_or_else(|| clsname.to_string());
+            let p = self.emit_tyname_ptr(fw, &disp);
+            let lc = fw.v();
+            fw.op(&format!(
+                "    {} = arith.constant {} : i64",
+                lc,
+                enc_i_lit(disp.len() as i64)
+            ));
+            fw.op(&format!(
+                "    call @sloth_cls_name({}, {}, {}) : (i64, i64, i64) -> i64",
+                cid, p, lc
+            ));
+        }
         // crate the class's reference-field mask so the rt death cascade
         // releases exactly the ref fields on instance death
         {

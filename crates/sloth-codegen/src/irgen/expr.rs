@@ -2812,6 +2812,9 @@ impl ModEmitter {
                 self.dangling_producer(fw, &r, at);
                 (r, at)
             }
+            // runtime type identity over reference types: class/dyn resolve
+            // most-derived through ObjInfo; monomorphic refs are constants
+            "typeid" | "type_name" => self.emit_typeid_builtin(fw, &name, &argv, pos),
             _ => {
                 self.err(pos, format!("call to unknown `{}`", name));
                 let z = fw.v();
@@ -3032,5 +3035,177 @@ impl ModEmitter {
             ));
         }
         arr
+    }
+}
+
+/// emission plan for a `typeid`/`type_name` argument surface
+pub(crate) enum TypeidPlan {
+    /// class instance or `dyn` box: resolved at runtime through `ObjInfo`
+    Dynamic,
+    /// monomorphic non-class reference type: compile-time id/name
+    Const {
+        key: String,
+        name: String,
+        nullable: bool,
+    },
+    /// value type / unresolved: compile diagnostic
+    Value,
+}
+
+impl ModEmitter {
+    /// assign (or fetch) the stable integer id of a canonical non-class
+    /// reference type key (`< 2^40` class ids never collide with these)
+    pub(crate) fn typeid_const(&mut self, key: &str) -> i64 {
+        if let Some(id) = self.type_ids.get(key) {
+            return *id;
+        }
+        let id = self.next_type_id;
+        self.next_type_id += 1;
+        self.type_ids.insert(key.to_string(), id);
+        id
+    }
+
+    /// classify the argument surface of `typeid`/`type_name`
+    pub(crate) fn typeid_plan(&self, t: TyId) -> TypeidPlan {
+        let mut core = t;
+        let mut nullable = false;
+        loop {
+            match self.r.get(core).clone() {
+                Ty::Opt(e) => {
+                    nullable = true;
+                    if self.is_ref(e) {
+                        core = e;
+                        continue;
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        match self.r.get(core).clone() {
+            // opaque C-ABI handles (`extern type`) carry no ObjInfo: reject
+            Ty::Named(n, _) if self.extern_types.contains(&n) => TypeidPlan::Value,
+            Ty::Named(..) | Ty::Dyn(_) => TypeidPlan::Dynamic,
+            _ => {
+                if self.is_ref(core) {
+                    TypeidPlan::Const {
+                        key: sloth_frontend::ty::ty_key(self.r.get(core)),
+                        name: self.pretty_ty(core),
+                        nullable,
+                    }
+                } else {
+                    TypeidPlan::Value
+                }
+            }
+        }
+    }
+
+    /// `typeid`/`type_name` builtin emission (single reference argument)
+    pub(crate) fn emit_typeid_builtin(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        argv: &[(String, TyId)],
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let want_name = name == "type_name";
+        let i64t = self.r.mk(Ty::I64);
+        let strt = self.r.mk(Ty::Str);
+        if argv.len() != 1 {
+            self.err(pos, format!("`{}` takes exactly one argument", name));
+            if want_name {
+                return (self.empty_str_lit(fw), strt);
+            }
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, i64t);
+        }
+        let (v, t) = argv[0].clone();
+        match self.typeid_plan(t) {
+            TypeidPlan::Value => {
+                let tn = self.surface_name(&self.r.get(t).clone());
+                self.err(
+                    pos,
+                    format!("`{}` requires a reference type, got `{}`", name, tn),
+                );
+                if want_name {
+                    (self.empty_str_lit(fw), strt)
+                } else {
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    (z, i64t)
+                }
+            }
+            TypeidPlan::Dynamic => {
+                if want_name {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_obj_type_name({}) : (i64) -> i64",
+                        r, v
+                    ));
+                    self.dangling_producer(fw, &r, strt);
+                    (r, strt)
+                } else {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                        r, v
+                    ));
+                    (r, i64t)
+                }
+            }
+            TypeidPlan::Const {
+                key,
+                name: nm,
+                nullable,
+            } => {
+                if want_name {
+                    let r = self.emit_tyname_lit(fw, &v, &nm);
+                    (r, strt)
+                } else {
+                    let id = self.typeid_const(&key);
+                    if nullable {
+                        let z = fw.v();
+                        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                        let c = fw.v();
+                        fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", c, v, z));
+                        let ic = fw.v();
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            ic,
+                            enc_i_lit(id)
+                        ));
+                        let r = fw.v();
+                        fw.op(&format!(
+                            "    {} = arith.select {}, {}, {} : i64",
+                            r, c, z, ic
+                        ));
+                        (r, i64t)
+                    } else {
+                        let c = fw.v();
+                        fw.op(&format!(
+                            "    {} = arith.constant {} : i64",
+                            c,
+                            enc_i_lit(id)
+                        ));
+                        (c, i64t)
+                    }
+                }
+            }
+        }
+    }
+
+    /// fresh empty owned `str` (diagnostic fallback for `type_name`)
+    pub(crate) fn empty_str_lit(&mut self, fw: &mut FnWalk) -> String {
+        let c0 = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", c0));
+        let fin = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_str_finish({}) : (i64) -> i64",
+            fin, c0
+        ));
+        let t = self.r.mk(Ty::Str);
+        self.dangling_producer(fw, &fin, t);
+        fin
     }
 }

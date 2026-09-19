@@ -190,6 +190,13 @@ impl ModEmitter {
             nid += 1;
         }
         self.class_ids.insert(inst.clone(), nid);
+        let disp = if a.is_empty() {
+            n.to_string()
+        } else {
+            let args: Vec<String> = a.iter().map(|x| self.pretty_ty(*x)).collect();
+            format!("{}<{}>", n, args.join(", "))
+        };
+        self.cls_display.insert(inst.clone(), disp);
         self.cls_mod.insert(inst.clone(), defmod.clone());
         self.class_defs
             .insert(inst.clone(), (defmod.clone(), cdef.clone()));
@@ -674,6 +681,42 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// fully recursive readable type name for the `type_name` builtin
+    pub(crate) fn pretty_ty(&self, t: TyId) -> String {
+        match self.r.get(t) {
+            Ty::Unit => "unit".to_string(),
+            Ty::Bool => "bool".to_string(),
+            Ty::I64 => "int".to_string(),
+            Ty::F64 => "float".to_string(),
+            Ty::Str => "str".to_string(),
+            Ty::Range => "range".to_string(),
+            Ty::Array(e) => format!("Array<{}>", self.pretty_ty(*e)),
+            Ty::Map(k, v) => format!("Map<{}, {}>", self.pretty_ty(*k), self.pretty_ty(*v)),
+            Ty::Tensor(e, r) => format!("Tensor<{}, {}>", self.pretty_ty(*e), r),
+            Ty::Fn(f) => {
+                let ps: Vec<String> = f.params.iter().map(|p| self.pretty_ty(*p)).collect();
+                format!("({}) -> {}", ps.join(", "), self.pretty_ty(f.ret))
+            }
+            Ty::Named(n, a) => {
+                if a.is_empty() {
+                    n.clone()
+                } else {
+                    let args: Vec<String> = a.iter().map(|x| self.pretty_ty(*x)).collect();
+                    format!("{}<{}>", n, args.join(", "))
+                }
+            }
+            Ty::Opt(e) => format!("{}?", self.pretty_ty(*e)),
+            Ty::Weak(e) => format!("Weak<{}>", self.pretty_ty(*e)),
+            Ty::Fiber(e) => format!("Fiber<{}>", self.pretty_ty(*e)),
+            Ty::JoinHandle(e) => format!("JoinHandle<{}>", self.pretty_ty(*e)),
+            Ty::Channel(e) => format!("Channel<{}>", self.pretty_ty(*e)),
+            Ty::Mutex => "Mutex".to_string(),
+            Ty::AtomicInt => "AtomicInt".to_string(),
+            Ty::Dyn(n) => format!("dyn {}", n),
+            Ty::Tp(n) => n.clone(),
+        }
+    }
+
     /// diagnostic-friendly surface name: composites spill their element kinds
     pub(crate) fn surface_name(&self, t: &Ty) -> String {
         match t {
