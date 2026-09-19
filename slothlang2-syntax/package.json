@@ -1,0 +1,43 @@
+{
+  "name": "slothlang2-syntax",
+  "displayName": "SlothLang 2 Syntax Highlighting",
+  "description": "Syntax highlighting and language support for the SlothLang 2 programming language (.sl, .slt).",
+  "version": "0.1.0",
+  "publisher": "slothlang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cactusBalll/slothlang2.git",
+    "directory": "slothlang2-syntax"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "slothlang",
+    "sloth",
+    "slt",
+    "syntax",
+    "highlight"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "slothlang2",
+        "aliases": ["SlothLang 2", "slothlang2", "sloth", "slt"],
+        "extensions": [".sl", ".slt"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "slothlang2",
+        "scopeName": "source.slothlang2",
+        "path": "./syntaxes/slothlang2.tmLanguage.json"
+      }
+    ]
+  }
+}
