@@ -217,7 +217,11 @@ pub(crate) fn lambda_caps(me: &ModEmitter, l: &Lambda) -> Vec<String> {
                 | "false"
         ) || me.funcs.contains_key(&u)
             || me.cross_funcs.contains_key(&u)
-            || me.class_defs.contains_key(&u);
+            || me.class_defs.contains_key(&u)
+            // qualified cross-module callees: `event.sleep(...)`, `io.bytes_new(...)`
+            // — the module qualifier is not a captured variable
+            || me.init_mods.contains(&u)
+            || me.mod_alias.contains_key(&u);
         if !decls.contains(&u)
             && !me.globals.contains_key(&u)
             && !callee_like
@@ -312,6 +316,7 @@ fn plain_ty_name(t: &Type) -> String {
             SimpleType::Float => "float".into(),
             SimpleType::Str => "str".into(),
             SimpleType::Range => "range".into(),
+            SimpleType::Any => "any".into(),
             SimpleType::Array(x) => format!("Array<{}>", plain_ty_name(x)),
             SimpleType::Map(k, v) => {
                 format!("Map<{}, {}>", plain_ty_name(k), plain_ty_name(v))

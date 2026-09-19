@@ -1,0 +1,300 @@
+// sloth2 stdlib: net (IO layer, IO-P2).
+//
+// TCP/UDP sockets over the non-blocking sloth-rt primitives plus IPv4/IPv6
+// address handles. All operations are non-blocking: a `-errno` result is
+// tested with `io.would_block` / `io.conn_closed`, and the `event.slt`
+// reactor drives readiness. Blocking-looking helpers live in `event.slt`.
+//
+// `SockAddr` is an opaque `extern type` (not ARC-managed); call `addr_free`.
+
+import "sloth/io.slt";
+
+extern type SockAddr;
+
+extern func sloth_addr_new(): SockAddr;
+extern func sloth_addr_free(a: SockAddr): int;
+extern func sloth_addr_set(a: SockAddr, ip: str, port: int): int;
+extern func sloth_addr_ip(a: SockAddr): str;
+extern func sloth_addr_port(a: SockAddr): int;
+
+extern func sloth_net_socket(domain: int, kind: int, proto: int): int;
+extern func sloth_net_close(fd: int): int;
+extern func sloth_net_shutdown(fd: int, how: int): int;
+extern func sloth_net_set_nonblocking(fd: int): int;
+extern func sloth_net_set_blocking(fd: int): int;
+extern func sloth_net_set_reuseaddr(fd: int): int;
+extern func sloth_net_set_reuseport(fd: int): int;
+extern func sloth_net_set_nodelay(fd: int): int;
+extern func sloth_net_bind(fd: int, ip: str, port: int): int;
+extern func sloth_net_listen(fd: int, backlog: int): int;
+extern func sloth_net_accept(fd: int): int;
+extern func sloth_net_connect(fd: int, ip: str, port: int): int;
+extern func sloth_net_recv(fd: int, b: Bytes, off: int, len: int): int;
+extern func sloth_net_send(fd: int, b: Bytes, off: int, len: int): int;
+extern func sloth_net_send_str(fd: int, s: str): int;
+extern func sloth_net_recvfrom(fd: int, b: Bytes, off: int, len: int, a: SockAddr): int;
+extern func sloth_net_sendto(fd: int, b: Bytes, off: int, len: int, a: SockAddr): int;
+extern func sloth_net_peer_addr(fd: int, a: SockAddr): int;
+extern func sloth_net_local_port(fd: int): int;
+
+// domain / socket kind constants
+pub func af_inet(): int {
+    return 2;
+}
+
+pub func af_inet6(): int {
+    return 10;
+}
+
+pub func sock_stream(): int {
+    return 1;
+}
+
+pub func sock_dgram(): int {
+    return 2;
+}
+
+// ---------------- addresses ----------------
+
+pub func addr_new(): SockAddr {
+    return sloth_addr_new();
+}
+
+pub func addr_free(a: SockAddr): unit {
+    sloth_addr_free(a);
+}
+
+/// parse `ip` + port into the handle; returns 0 or a negative error
+pub func addr_set(a: SockAddr, ip: str, port: int): int {
+    return sloth_addr_set(a, ip, port);
+}
+
+pub func addr_ip(a: SockAddr): str {
+    return sloth_addr_ip(a);
+}
+
+pub func addr_port(a: SockAddr): int {
+    return sloth_addr_port(a);
+}
+
+// ---------------- TCP listener ----------------
+
+pub class TcpListener {
+    var fd: int;
+    var port: int;
+
+    func __init__(fd: int, port: int): unit {
+        this.fd = fd;
+        this.port = port;
+    }
+
+    func raw_fd(): int {
+        return this.fd;
+    }
+
+    /// the bound port (useful when port 0 requested an ephemeral one)
+    func port_num(): int {
+        return this.port;
+    }
+
+    func set_blocking(): unit {
+        sloth_net_set_blocking(this.fd);
+    }
+
+    /// non-blocking accept: a new fd, or a `-errno` (`io.would_block` = none)
+    func try_accept(): int {
+        return sloth_net_accept(this.fd);
+    }
+
+    func close(): unit {
+        if this.fd >= 0 {
+            sloth_net_close(this.fd);
+            this.fd = -1;
+        }
+    }
+}
+
+/// create/bind/listen a TCP listener. `reuseport` allows one listener per
+/// worker thread on the same port. On failure `fd` is negative.
+pub func tcp_listen(host: str, port: int, backlog: int, reuseport: bool): TcpListener {
+    let fd = sloth_net_socket(af_inet(), sock_stream(), 0);
+    if fd < 0 {
+        return TcpListener(fd, 0);
+    }
+    sloth_net_set_reuseaddr(fd);
+    if reuseport {
+        sloth_net_set_reuseport(fd);
+    }
+    if sloth_net_bind(fd, host, port) < 0 {
+        sloth_net_close(fd);
+        return TcpListener(-1, 0);
+    }
+    if sloth_net_listen(fd, backlog) < 0 {
+        sloth_net_close(fd);
+        return TcpListener(-1, 0);
+    }
+    return TcpListener(fd, sloth_net_local_port(fd));
+}
+
+// ---------------- TCP stream ----------------
+
+pub class TcpStream {
+    var fd: int;
+
+    func __init__(fd: int): unit {
+        this.fd = fd;
+    }
+
+    func raw_fd(): int {
+        return this.fd;
+    }
+
+    func set_nodelay(): unit {
+        sloth_net_set_nodelay(this.fd);
+    }
+
+    /// switch to blocking mode (thread-per-connection servers)
+    func set_blocking(): unit {
+        sloth_net_set_blocking(this.fd);
+    }
+
+    func set_nonblocking(): unit {
+        sloth_net_set_nonblocking(this.fd);
+    }
+
+    /// read into `b` at `off`; >0 bytes, 0 = peer closed, <0 = -errno
+    func try_read(b: Bytes, off: int, len: int): int {
+        return sloth_net_recv(this.fd, b, off, len);
+    }
+
+    /// write `[off, off+len)` of `b`; >0 sent, <0 = -errno
+    func try_write(b: Bytes, off: int, len: int): int {
+        return sloth_net_send(this.fd, b, off, len);
+    }
+
+    func write_str(s: str): int {
+        return sloth_net_send_str(this.fd, s);
+    }
+
+    func shutdown_both(): unit {
+        sloth_net_shutdown(this.fd, 2);
+    }
+
+    func close(): unit {
+        if this.fd >= 0 {
+            sloth_net_close(this.fd);
+            this.fd = -1;
+        }
+    }
+}
+
+/// start a non-blocking connect; the stream's fd is usable once the socket is
+/// writable (poll with `io.ev_write()`). `fd < 0` means an immediate error.
+pub func tcp_connect(host: str, port: int): TcpStream {
+    let fd = sloth_net_socket(af_inet(), sock_stream(), 0);
+    if fd < 0 {
+        return TcpStream(fd);
+    }
+    let r = sloth_net_connect(fd, host, port);
+    if r < 0 and not io.would_block(r) {
+        sloth_net_close(fd);
+        return TcpStream(-1);
+    }
+    return TcpStream(fd);
+}
+
+/// wrap an accepted descriptor as a `TcpStream`
+pub func stream_from_fd(fd: int): TcpStream {
+    return TcpStream(fd);
+}
+
+// ---------------- blocking-mode helpers (thread-per-connection) ----------------
+
+/// create/bind/listen a blocking TCP listener
+pub func tcp_listen_blocking(host: str, port: int, backlog: int): TcpListener {
+    let fd = sloth_net_socket(af_inet(), sock_stream(), 0);
+    if fd < 0 {
+        return TcpListener(fd, 0);
+    }
+    sloth_net_set_blocking(fd);
+    sloth_net_set_reuseaddr(fd);
+    if sloth_net_bind(fd, host, port) < 0 {
+        sloth_net_close(fd);
+        return TcpListener(-1, 0);
+    }
+    if sloth_net_listen(fd, backlog) < 0 {
+        sloth_net_close(fd);
+        return TcpListener(-1, 0);
+    }
+    return TcpListener(fd, sloth_net_local_port(fd));
+}
+
+/// connect with a blocking socket (no event loop required)
+pub func tcp_connect_blocking(host: str, port: int): TcpStream {
+    let fd = sloth_net_socket(af_inet(), sock_stream(), 0);
+    if fd < 0 {
+        return TcpStream(fd);
+    }
+    sloth_net_set_blocking(fd);
+    if sloth_net_connect(fd, host, port) < 0 {
+        sloth_net_close(fd);
+        return TcpStream(-1);
+    }
+    return TcpStream(fd);
+}
+
+// ---------------- UDP ----------------
+
+pub class UdpSocket {
+    var fd: int;
+
+    func __init__(fd: int): unit {
+        this.fd = fd;
+    }
+
+    func raw_fd(): int {
+        return this.fd;
+    }
+
+    /// receive a datagram (fills `a` with the sender); >0 bytes, <0 = -errno
+    func try_recv_from(b: Bytes, off: int, len: int, a: SockAddr): int {
+        return sloth_net_recvfrom(this.fd, b, off, len, a);
+    }
+
+    func send_to(a: SockAddr, b: Bytes, off: int, len: int): int {
+        return sloth_net_sendto(this.fd, b, off, len, a);
+    }
+
+    func close(): unit {
+        if this.fd >= 0 {
+            sloth_net_close(this.fd);
+            this.fd = -1;
+        }
+    }
+}
+
+/// bind a UDP socket to `host:port` (port 0 = ephemeral). `fd` is the bound
+/// descriptor; query the chosen port with `udp_local_port`.
+pub func udp_bind(host: str, port: int, reuseport: bool): UdpSocket {
+    let fd = sloth_net_socket(af_inet(), sock_dgram(), 0);
+    if fd < 0 {
+        return UdpSocket(fd);
+    }
+    sloth_net_set_reuseaddr(fd);
+    if reuseport {
+        sloth_net_set_reuseport(fd);
+    }
+    if sloth_net_bind(fd, host, port) < 0 {
+        sloth_net_close(fd);
+        return UdpSocket(-1);
+    }
+    return UdpSocket(fd);
+}
+
+pub func local_port(fd: int): int {
+    return sloth_net_local_port(fd);
+}
+
+pub func peer_addr(fd: int, a: SockAddr): int {
+    return sloth_net_peer_addr(fd, a);
+}

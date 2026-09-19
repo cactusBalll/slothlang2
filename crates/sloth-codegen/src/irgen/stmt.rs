@@ -153,7 +153,9 @@ impl ModEmitter {
                         if df && !vf {
                             // promote the int word to an f64 word
                             (iw_to_f64_word(fw, &v), dt)
-                        } else if !df && vf && self.opt_inner(dt).is_none() {
+                        } else if !df && vf && self.opt_inner(dt).is_none()
+                            && !matches!(self.r.get(dt), Ty::Any)
+                        {
                             self.err_diff(
                                 &s.pos,
                                 "initializer",
@@ -186,8 +188,12 @@ impl ModEmitter {
                 let (v, t) = if ty.is_some() {
                     let dtr42 = ty.clone().unwrap();
                     let dt = self.ty_of(&dtr42);
-                    if self.opt_inner(dt).is_some() || self.weak_inner(dt).is_some() {
-                        // value-optional: box the payload word
+                    if self.opt_inner(dt).is_some()
+                        || self.weak_inner(dt).is_some()
+                        || matches!(self.r.get(dt).clone(), Ty::Any)
+                    {
+                        // value-optional: box the payload word; `any`: box into
+                        // a runtime-typed cell
                         let (vc, _tc2) = self.coerce_word_to(fw, &v, t, dt);
                         (vc, dt)
                     } else if matches!(self.r.get(dt).clone(), Ty::Opt(_)) {
@@ -1151,6 +1157,19 @@ impl ModEmitter {
                             };
                             return ni.map(|t| (x.clone(), self.r.mk(t)));
                         }
+                        // `any` narrowed by a primitive test (walk_narrowed
+                        // materialises the boxed payload)
+                        if matches!(cur, Ty::Any) {
+                            let ni = match cn.as_str() {
+                                "int" | "i64" => Some(Ty::I64),
+                                "float" | "f64" => Some(Ty::F64),
+                                "bool" => Some(Ty::Bool),
+                                "str" => Some(Ty::Str),
+                                "range" => Some(Ty::Range),
+                                _ => None,
+                            };
+                            return ni.map(|t| (x.clone(), self.r.mk(t)));
+                        }
                         let mut wt = cur;
                         let mut had_opt = false;
                         while let Ty::Opt(inner) = wt {
@@ -1230,6 +1249,22 @@ impl ModEmitter {
                 let nty = self.r.mk(Ty::Named(cn.to_string(), Vec::new()));
                 Some((x, nty))
             }
+            (true, ExprNode::Ident(cn)) if Self::is_builtin_type_name(cn) => {
+                // x is not <primitive> is false ⇒ x is that primitive
+                let cur = fw.lookup(&x).map(|(_a, t)| self.r.get(t).clone())?;
+                if !matches!(cur, Ty::Any) {
+                    return None;
+                }
+                let ni = match cn.as_str() {
+                    "int" | "i64" => Some(Ty::I64),
+                    "float" | "f64" => Some(Ty::F64),
+                    "bool" => Some(Ty::Bool),
+                    "str" => Some(Ty::Str),
+                    "range" => Some(Ty::Range),
+                    _ => None,
+                };
+                ni.map(|t| (x.clone(), self.r.mk(t)))
+            }
             _ => None,
         }
     }
@@ -1237,6 +1272,40 @@ impl ModEmitter {
     /// emit `body` with `x` shadow-narrowed to `nty` (value-optional payloads
     /// are unboxed into a fresh scalar shadow slot)
     pub(crate) fn walk_narrowed(&mut self, fw: &mut FnWalk, x: &str, nty: TyId, body: &Stmt) {
+        // `any` source: the box's payload word is the narrowed value (a borrow
+        // of the boxed value — the `any` slot keeps its strong reference)
+        if let Some((a, cur)) = fw.lookup(x).map(|(a, t)| (a, self.r.get(t).clone())) {
+            if matches!(cur, Ty::Any) {
+                let zz = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", zz));
+                let w = fw.v();
+                fw.op(&format!(
+                    "    {} = memref.load {}[{}] : memref<1xi64>",
+                    w, a, zz
+                ));
+                let p = fw.v();
+                fw.op(&format!(
+                    "    {} = call @sloth_any_word({}) : (i64) -> i64",
+                    p, w
+                ));
+                fw.push_scope();
+                let sa = fw.v();
+                fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", sa));
+                let zz2 = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : index", zz2));
+                fw.op(&format!(
+                    "    memref.store {}, {}[{}] : memref<1xi64>",
+                    p, sa, zz2
+                ));
+                fw.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(x.to_string(), (sa, nty));
+                self.walk_body(fw, body);
+                fw.pop_scope();
+                return;
+            }
+        }
         if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) {
             let slot = fw.lookup(x).map(|(a, t)| (a, self.r.get(t).clone()));
             if let Some((a, cur)) = slot {

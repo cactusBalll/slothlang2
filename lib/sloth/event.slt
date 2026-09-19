@@ -1,0 +1,380 @@
+// sloth2 stdlib: event (IO layer, IO-P3).
+//
+// The I/O event queue, written in sloth on top of the `io.slt` backend
+// mechanism. `EventLoop` owns:
+//   * a backend handle (select / poll / epoll / kqueue / io_uring),
+//   * a slot table of `Fiber<Wait>` tasks,
+//   * a ready queue and a timer list.
+//
+// A task fibre runs normal sequential code; when an operation would block it
+// yields a `Wait` describing what it needs (read/write/accept/sleep), the loop
+// registers it and resumes it when the backend reports readiness or a timer
+// expires. This is the classic reactor-on-stackful-coroutines shape: no
+// callback inversion, no async/await, one loop per OS thread.
+//
+// Tokens encode `{slot, generation}` so a recycled slot cannot be woken by a
+// stale event or timer.
+
+import "sloth/io.slt";
+import "sloth/net.slt";
+
+// ---------------- wait request ----------------
+
+// Wait.kind values
+// 0 = yield without waiting (run again immediately)
+// 1 = readable  2 = writable  3 = acceptable  4 = sleep until deadline
+
+pub class Wait {
+    var kind: int;
+    var fd: int;
+    var deadline: int;
+
+    func __init__(kind: int, fd: int, deadline: int): unit {
+        this.kind = kind;
+        this.fd = fd;
+        this.deadline = deadline;
+    }
+}
+
+pub func wait_read(fd: int): Wait {
+    return Wait(1, fd, 0);
+}
+
+pub func wait_write(fd: int): Wait {
+    return Wait(2, fd, 0);
+}
+
+pub func wait_accept(fd: int): Wait {
+    return Wait(3, fd, 0);
+}
+
+/// sleep `ms` milliseconds, then resume
+pub func wait_sleep(ms: int): Wait {
+    return Wait(4, -1, ms);
+}
+
+/// run `entry` forever yielding without blocking until it finishes; exit the
+/// loop. The yielding task still counts as a scheduled event (progress is
+/// made each poll turn) but never blocks the loop.
+pub func wait_yield(): Wait {
+    return Wait(0, -1, 0);
+}
+
+// ---------------- loop ----------------
+
+pub class EventLoop {
+    var ev: EvLoop;
+    var evbuf: EvBuf;
+    var ekind: int;
+    var fibers: Array<Fiber<Wait>>;
+    var live: Array<int>;
+    var slot_gen: Array<int>;
+    var slot_fd: Array<int>;
+    var free_slots: Array<int>;
+    var ready: Array<int>;
+    var timer_at: Array<int>;
+    var timer_tok: Array<int>;
+    var running: int;
+    var active: int;
+
+    func __init__(kind: int): unit {
+        this.ekind = kind;
+        this.ev = io.ev_new(kind);
+        this.evbuf = io.evbuf_new(256);
+        this.fibers = [];
+        this.live = [];
+        this.slot_gen = [];
+        this.slot_fd = [];
+        this.free_slots = [];
+        this.ready = [];
+        this.timer_at = [];
+        this.timer_tok = [];
+        this.running = 1;
+        this.active = 0;
+    }
+
+    func ok(): bool {
+        return io.backend_available(this.ekind);
+    }
+
+    func backend(): int {
+        return this.ekind;
+    }
+
+    func shutdown(): unit {
+        this.running = 0;
+        io.ev_wakeup(this.ev);
+    }
+
+    // ---------------- slots ----------------
+
+    func make_token(slot: int, gen: int): int {
+        return slot * 65536 + (gen % 65536);
+    }
+
+    func token_slot(tok: int): int {
+        return tok / 65536;
+    }
+
+    func token_gen(tok: int): int {
+        return tok % 65536;
+    }
+
+    func alloc_slot(f: Fiber<Wait>): int {
+        this.active = this.active + 1;
+        if this.free_slots.len() > 0 {
+            let t = this.free_slots.pop();
+            this.fibers[t] = f;
+            this.live[t] = 1;
+            this.slot_gen[t] = this.slot_gen[t] + 1;
+            this.slot_fd[t] = -1;
+            return this.make_token(t, this.slot_gen[t]);
+        }
+        this.fibers.push(f);
+        this.live.push(1);
+        this.slot_gen.push(1);
+        this.slot_fd.push(-1);
+        return this.make_token(this.fibers.len() - 1, 1);
+    }
+
+    func free_token(tok: int): unit {
+        let slot = this.token_slot(tok);
+        if slot < 0 or slot >= this.fibers.len() {
+            return;
+        }
+        if this.live[slot] == 0 {
+            return;
+        }
+        this.live[slot] = 0;
+        this.slot_fd[slot] = -1;
+        this.active = this.active - 1;
+        this.free_slots.push(slot);
+    }
+
+    func alive(tok: int): bool {
+        let slot = this.token_slot(tok);
+        if slot < 0 or slot >= this.fibers.len() {
+            return false;
+        }
+        return this.live[slot] == 1 and this.token_gen(tok) == this.slot_gen[slot];
+    }
+
+    /// schedule `entry` on this loop; returns its token
+    func spawn(entry: (Wait) -> unit): int {
+        let f = fiber.create(entry, Wait(0, -1, 0));
+        let tok = this.alloc_slot(f);
+        this.ready.push(tok);
+        return tok;
+    }
+
+    // ---------------- timers ----------------
+
+    func add_timer(ms: int, tok: int): unit {
+        this.timer_at.push(io.now_ms() + ms);
+        this.timer_tok.push(tok);
+    }
+
+    func next_timeout(): int {
+        if this.timer_at.len() == 0 {
+            return -1;
+        }
+        var m = this.timer_at[0];
+        var i = 1;
+        while i < this.timer_at.len() {
+            if this.timer_at[i] < m {
+                m = this.timer_at[i];
+            }
+            i = i + 1;
+        }
+        let d = m - io.now_ms();
+        if d <= 0 {
+            return 0;
+        }
+        return d;
+    }
+
+    func fire_timers(): unit {
+        if this.timer_at.len() == 0 {
+            return;
+        }
+        let now = io.now_ms();
+        var keep_at: Array<int> = [];
+        var keep_tok: Array<int> = [];
+        var i = 0;
+        while i < this.timer_at.len() {
+            if this.timer_at[i] <= now {
+                if this.alive(this.timer_tok[i]) {
+                    this.ready.push(this.timer_tok[i]);
+                }
+            } else {
+                keep_at.push(this.timer_at[i]);
+                keep_tok.push(this.timer_tok[i]);
+            }
+            i = i + 1;
+        }
+        this.timer_at = keep_at;
+        this.timer_tok = keep_tok;
+    }
+
+    // ---------------- dispatch ----------------
+
+    func kind_events(kind: int): int {
+        if kind == 1 {
+            return io.ev_read();
+        }
+        if kind == 3 {
+            return io.ev_read();
+        }
+        if kind == 2 {
+            return io.ev_write();
+        }
+        return 0;
+    }
+
+    func resume_slot(tok: int): unit {
+        if not this.alive(tok) {
+            return;
+        }
+        let slot = this.token_slot(tok);
+        let f = this.fibers[slot];
+        // retire the previous registration for this task before it runs again
+        if this.slot_fd[slot] >= 0 {
+            io.ev_ctl(this.ev, io.ev_del(), this.slot_fd[slot], 0, tok);
+            this.slot_fd[slot] = -1;
+        }
+        if not fiber.resumable(f) {
+            this.free_token(tok);
+            return;
+        }
+        let w = fiber.resume(f, Wait(0, -1, 0));
+        if w is nil {
+            this.free_token(tok);
+            return;
+        }
+        let req: Wait = w ?: Wait(0, -1, 0);
+        if req.kind == 0 {
+            this.ready.push(tok);
+        } else if req.kind == 4 {
+            this.add_timer(req.deadline, tok);
+        } else {
+            let evs = this.kind_events(req.kind);
+            io.ev_ctl(this.ev, io.ev_add(), req.fd, evs, tok);
+            this.slot_fd[slot] = req.fd;
+        }
+    }
+
+    func collect_ready(): unit {
+        var i = 0;
+        let n = io.evbuf_count(this.evbuf);
+        while i < n {
+            let tok = io.evbuf_token(this.evbuf, i);
+            if this.alive(tok) {
+                this.ready.push(tok);
+            }
+            i = i + 1;
+        }
+    }
+
+    /// run the loop until `shutdown()` (or all tasks finish and none can wake)
+    func run(): unit {
+        while this.running == 1 {
+            if this.active == 0 {
+                this.running = 0;
+                return;
+            }
+            if this.ready.len() == 0 {
+                let tmo = this.next_timeout();
+                let n = io.ev_poll(this.ev, tmo, this.evbuf);
+                if n < 0 {
+                    // backend failure: stop rather than spin
+                    this.running = 0;
+                    return;
+                }
+                this.collect_ready();
+                this.fire_timers();
+            }
+            while this.ready.len() > 0 {
+                let tok = this.ready.pop();
+                this.resume_slot(tok);
+            }
+        }
+    }
+
+    func close(): unit {
+        this.shutdown();
+        io.ev_free(this.ev);
+        io.evbuf_free(this.evbuf);
+    }
+}
+
+// ---------------- blocking-looking helpers (fiber-aware) ----------------
+
+/// wait until `fd` is readable
+pub func await_readable(loop: EventLoop, fd: int): unit {
+    let got = fiber.yield(wait_read(fd));
+}
+
+/// wait until `fd` is writable
+pub func await_writable(loop: EventLoop, fd: int): unit {
+    let got = fiber.yield(wait_write(fd));
+}
+
+/// wait until `fd` has an incoming connection
+pub func await_accept(loop: EventLoop, fd: int): unit {
+    let got = fiber.yield(wait_accept(fd));
+}
+
+/// sleep inside a task
+pub func sleep(loop: EventLoop, ms: int): unit {
+    let got = fiber.yield(wait_sleep(ms));
+}
+
+/// read up to `len` bytes at `off`; 0 = peer closed, <0 = error. Yields on
+/// `EAGAIN` so the caller writes plain blocking-style code.
+pub func read_some(loop: EventLoop, s: TcpStream, b: Bytes, off: int, len: int): int {
+    var r = s.try_read(b, off, len);
+    while r < 0 and io.would_block(r) {
+        let got = fiber.yield(wait_read(s.raw_fd()));
+        r = s.try_read(b, off, len);
+    }
+    return r;
+}
+
+/// write all `len` bytes of `b` from `off`; returns bytes written or <0 error
+pub func write_all(loop: EventLoop, s: TcpStream, b: Bytes, off: int, len: int): int {
+    var sent = 0;
+    while sent < len {
+        let w = s.try_write(b, off + sent, len - sent);
+        if w < 0 {
+            if io.would_block(w) {
+                let got = fiber.yield(wait_write(s.raw_fd()));
+                continue;
+            }
+            return w;
+        }
+        if w == 0 {
+            return sent;
+        }
+        sent = sent + w;
+    }
+    return sent;
+}
+
+/// write a whole `str`; returns bytes written or <0 error
+pub func write_str_all(loop: EventLoop, s: TcpStream, text: str): int {
+    let b = io.bytes_new(len(text) + 1);
+    io.bytes_copy_from_str(b, 0, text);
+    let n = write_all(loop, s, b, 0, len(text));
+    io.bytes_free(b);
+    return n;
+}
+
+/// accept a connection, yielding until one is pending; returns fd or <0 error
+pub func accept_blocking(loop: EventLoop, listener: TcpListener): int {
+    var fd = listener.try_accept();
+    while fd < 0 and io.would_block(fd) {
+        let got = fiber.yield(wait_accept(listener.raw_fd()));
+        fd = listener.try_accept();
+    }
+    return fd;
+}

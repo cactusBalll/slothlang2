@@ -166,6 +166,7 @@ pub enum SimpleType {
     Float,
     Str,
     Range,
+    Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
     /// tensor extension TE-P1: `Tensor<T, R>` — element type + static rank

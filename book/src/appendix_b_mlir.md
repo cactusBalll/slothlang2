@@ -28,9 +28,10 @@
 - **ARC**：`sloth_rc_retain` / `sloth_rc_release`（词参返回词）、`sloth_rc_live` /
   `sloth_rc_drops`（零参）；
 - **弱引用**：`sloth_weak_new` / `sloth_weak_upgrade` / `sloth_weak_release`；
-- **值型 optional 盒**：`sloth_box_new` / `sloth_box_get`，以及 nil-aware 的
-  `sloth_rt_print_opt` / `sloth_str_push_opt`；
-- **打印**：`sloth_rt_print_i64` / `_f64` / `_bool` / `_str`；
+- **值型 optional 盒**：`sloth_box_new` / `sloth_box_get`；
+- **`any` 顶层类型**：`sloth_any_from` / `_desc` / `_word` / `_kind` / `_cls_id` /
+  `_ref` / `_retain` / `_is` / `_type_id` / `_type_name`，以及运行时渲染器
+  `sloth_rt_write`（`any` → `str`）与 `sloth_rt_puts`（`str` → stdout + 换行）；
 - **字符串**：`sloth_str_intern`（历史命名，不驻留）/ `_push` / `_finish` /
   `_pushp` / `_push_i|_f|_b` / `_len` / `_clen` / `_char` / `_concat` / `_eq`；
 - **range**：`sloth_range_pack` / `_lo` / `_hi`；

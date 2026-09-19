@@ -74,6 +74,13 @@ impl ModEmitter {
                     // instead of the mangled foreign-call path
                     if f.is_extern {
                         self.funcs.insert(d.name.clone(), (**f).clone());
+                    } else if d.name == "print" {
+                        // the injected `print` prelude resolves as a local
+                        // function inside every module so its `any` param is
+                        // boxed at the call site
+                        self.funcs
+                            .entry("print".to_string())
+                            .or_insert((**f).clone());
                     }
                     let plan = self.plan_func(&d.name, None, f, None);
                     if d.visible {
@@ -207,6 +214,29 @@ impl ModEmitter {
     }
 }
 
+/// stdlib `print` prelude: implemented in Sloth on top of the runtime writer
+/// (`sloth_rt_write` / `sloth_rt_puts`), not a compiler builtin. Injected into
+/// the root and every imported module so bare `print` resolves locally.
+pub(crate) const IO_PRELUDE: &str = "extern func sloth_rt_write(v: any): str;\n\
+     extern func sloth_rt_puts(v: str): unit;\n\
+     pub func print(v: any): unit {\n\
+     sloth_rt_puts(sloth_rt_write(v));\n\
+     }\n";
+
+pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
+    if decls
+        .iter()
+        .any(|d| d.name == "print" && matches!(d.node, DeclNode::Func(_)))
+    {
+        return;
+    }
+    if let Ok(stdp) = sloth_frontend::parser::parse(IO_PRELUDE) {
+        for d in stdp.decls.into_iter().rev() {
+            decls.insert(0, d);
+        }
+    }
+}
+
 pub fn rt_decls() -> String {
     let mut s = String::new();
     // rc core (ARC migration patch B): counting primitives
@@ -227,6 +257,19 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_bool(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_str(i64) -> i64\n");
+    // `any` top type + runtime renderer
+    s.push_str("  func.func private @sloth_any_from(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_desc(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_word(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_kind(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_cls_id(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_ref(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_retain(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_is(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_type_id(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_any_type_name(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_rt_write(i64) -> i64\n");
+    s.push_str("  func.func private @sloth_rt_puts(i64) -> ()\n");
     s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
     s.push_str(
         "  func.func private @sloth_range_pack(i64, i64) -> i64
@@ -476,6 +519,7 @@ impl ModEmitter {
         }
         let stmts2 = prog.stmts.clone();
         let imps2 = prog.imports.clone();
+        inject_print_prelude(&mut decls2);
         let prog = &mut Program {
             decls: decls2,
             stmts: stmts2,
@@ -512,8 +556,8 @@ impl ModEmitter {
             }
             let body = fw.cur.clone();
             self.out.push_str(&format!(
-                "  func.func @sloth_{}__ginit() -> () {{\n{}    return\n  }}\n",
-                self.name, body
+                "  func.func @sloth_{}__ginit() -> () {{\n    call @sloth_{}__anyinit() : () -> ()\n{}    return\n  }}\n",
+                self.name, self.name, body
             ));
         }
         // 1) top-level funcs
@@ -588,6 +632,12 @@ impl ModEmitter {
             for m in &init_mods {
                 fw.op(&format!("    call @sloth_{}__ginit() : () -> ()", m));
             }
+            // script mode skips the local ginit; initialise local descriptors
+            let mname = self.name.clone();
+            fw.op(&format!(
+                "    call @sloth_{}__anyinit() : () -> ()",
+                mname
+            ));
             // top-level var/let decls become prelude statements (script mode
             // keeps the historical local-slot route so container/lambda
             // writeback and declaration checking work unchanged)
@@ -681,6 +731,7 @@ impl ModEmitter {
         let mut m = format!("module @{} {{\n", me.name);
         m.push_str(&emit_str_globals(me));
         m.push_str(&emit_tyname_globals(me));
+        m.push_str(&super::anydesc::emit_any_desc_globals(me));
         m.push_str(&rt_decls());
         m.push_str(&obj_rt_decls());
         for gd in &me.global_decls {
@@ -688,6 +739,12 @@ impl ModEmitter {
         }
         m.push_str("\n");
         m.push_str(&me.out);
+        m.push_str(&super::anydesc::emit_any_disp_wrappers(me));
+        m.push_str(&format!(
+            "  func.func @sloth_{}__anyinit() -> () {{\n{}    return\n  }}\n",
+            me.name,
+            super::anydesc::emit_anyinit(me)
+        ));
         // now the out is func bodies only; globals were prepended
         // (we already integrated globals above; emit closing brace)
         m.push_str("}\n");

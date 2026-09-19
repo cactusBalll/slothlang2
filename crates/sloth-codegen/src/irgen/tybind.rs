@@ -34,6 +34,7 @@ impl ModEmitter {
             SimpleType::Float => self.r.mk(Ty::F64),
             SimpleType::Str => self.r.mk(Ty::Str),
             SimpleType::Range => self.r.mk(Ty::Range),
+            SimpleType::Any => self.r.mk(Ty::Any),
             SimpleType::Array(e) => {
                 let ne = self.ty_of(e);
                 self.r.mk(Ty::Array(ne))
@@ -85,6 +86,7 @@ impl ModEmitter {
             "bool" => self.r.mk(Ty::Bool),
             "str" => self.r.mk(Ty::Str),
             "range" => self.r.mk(Ty::Range),
+            "any" => self.r.mk(Ty::Any),
             "Array" => {
                 let el = match a.into_iter().next() {
                     Some(e) => e,
@@ -258,9 +260,6 @@ impl ModEmitter {
             _ => None,
         }
     }
-    pub(crate) fn is_opt_val(&self, t: TyId) -> bool {
-        self.opt_inner(t).is_some()
-    }
     /// Send marker (design §4.2, first cut): a value is shareable across a
     /// thread boundary unless it contains a thread-confined `Fiber<Y>`.
     /// Shallow structural walk (class internals are not traversed — see
@@ -306,6 +305,7 @@ impl ModEmitter {
                     | Ty::Mutex
                     | Ty::AtomicInt
                     | Ty::Range
+                    | Ty::Any
             ),
         }
     }
@@ -316,7 +316,7 @@ impl ModEmitter {
     /// placeholder is not yet resolved — all stay nil-testable.
     pub(crate) fn nil_capable(&self, t: TyId) -> bool {
         match self.r.get(t) {
-            Ty::Opt(_) | Ty::Unit | Ty::Tp(_) | Ty::Dyn(_) | Ty::Weak(_) => true,
+            Ty::Opt(_) | Ty::Unit | Ty::Tp(_) | Ty::Dyn(_) | Ty::Weak(_) | Ty::Any => true,
             // an unresolved generic type parameter surfaces as a `Named` that
             // is not a declared class/trait/extern type (generic bodies are
             // emitted once as a template before monomorphization)
@@ -500,7 +500,7 @@ impl ModEmitter {
                     }
                     if self.opt_inner(params[i].1).is_some()
                         || self.weak_inner(params[i].1).is_some()
-                        || matches!(self.r.get(params[i].1), Ty::Dyn(_))
+                        || matches!(self.r.get(params[i].1), Ty::Dyn(_) | Ty::Any)
                     {
                         return self
                             .coerce_word_to(fw, &argv[i].0, argv[i].1, params[i].1)
@@ -528,6 +528,10 @@ impl ModEmitter {
                 return (b, to);
             }
             return (v.to_string(), from);
+        }
+        // box into the `any` top-type surface
+        if matches!(self.r.get(to), Ty::Any) {
+            return self.coerce_into_any(fw, v, from);
         }
         if self.opt_inner(to).is_some() {
             return self.coerce_into_opt(fw, v, from, to);
@@ -566,6 +570,29 @@ impl ModEmitter {
         self.dangling_producer(fw, &r, to);
         (r, to)
     }
+
+    /// box a value word into the `any` top type: `nil` (word 0 of a
+    /// nil-capable surface) collapses to `any` nil, everything else becomes a
+    /// runtime-typed rc box carrying the surface's structural descriptor.
+    pub(crate) fn coerce_into_any(
+        &mut self,
+        fw: &mut FnWalk,
+        v: &str,
+        from: TyId,
+    ) -> (String, TyId) {
+        let any = self.r.mk(Ty::Any);
+        if matches!(self.r.get(from), Ty::Any | Ty::Unit) {
+            return (v.to_string(), any);
+        }
+        let d = self.emit_any_desc_ptr(fw, from);
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = call @sloth_any_from({}, {}) : (i64, i64) -> i64",
+            r, d, v
+        ));
+        self.dangling_producer(fw, &r, any);
+        (r, any)
+    }
 }
 
 impl ModEmitter {
@@ -578,6 +605,8 @@ impl ModEmitter {
         }
         match (a, b) {
             (_, Ty::Unit) => true,
+            // `any` is the top type: every source surface coerces into it
+            (Ty::Any, _) => true,
             (Ty::Opt(..), _) => true,
             // value-optional (boxed) and Weak surfaces are coercible store
             // faces (patch 42/43): wrap at bind time
@@ -712,6 +741,7 @@ impl ModEmitter {
             Ty::Channel(e) => format!("Channel<{}>", self.pretty_ty(*e)),
             Ty::Mutex => "Mutex".to_string(),
             Ty::AtomicInt => "AtomicInt".to_string(),
+            Ty::Any => "any".to_string(),
             Ty::Dyn(n) => format!("dyn {}", n),
             Ty::Tp(n) => n.clone(),
         }
@@ -777,7 +807,7 @@ impl ModEmitter {
         let mut vty = vty;
         if self.opt_inner(dt).is_some()
             || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_))
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any)
         {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
@@ -883,7 +913,7 @@ impl ModEmitter {
         let mut vty = vty;
         if self.opt_inner(dt).is_some()
             || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_))
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any)
         {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
@@ -998,24 +1028,6 @@ impl ModEmitter {
             // a `dyn T` value carries exactly trait T's surface
             Ty::Dyn(t) => t == bound,
             _ => false,
-        }
-    }
-}
-
-impl ModEmitter {
-    /// typed-bound lint in builtin positions with a clearer message context
-    pub(crate) fn satisfies_bound_check(&mut self, pos: &Pos, t: &TyId, bound: &str, ctx: &str) {
-        let ok = self.satisfies_bound(*t, bound);
-        if !ok {
-            self.err(
-                pos,
-                format!(
-                    "`{}` requires trait bound `{}` (`{}` does not satisfy it)",
-                    ctx,
-                    bound,
-                    sloth_frontend::ty::ty_name(self.r.get(*t)),
-                ),
-            );
         }
     }
 }

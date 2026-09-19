@@ -76,6 +76,18 @@ pub(crate) fn ext_bool(fw: &mut FnWalk, c: &str) -> String {
     z
 }
 
+/// invert an encoded bool word (0/1) when `neg` is set
+pub(crate) fn neg_bool_word(fw: &mut FnWalk, b: &str, neg: bool) -> String {
+    if !neg {
+        return b.to_string();
+    }
+    let one = fw.v();
+    fw.op(&format!("    {} = arith.constant {} : i64", one, enc_i_lit(1)));
+    let o = fw.v();
+    fw.op(&format!("    {} = arith.xori {}, {} : i64", o, b, one));
+    o
+}
+
 /// convert an int word into an f64 word (decode, promote, re-encode)
 pub(crate) fn iw_to_f64_word(fw: &mut FnWalk, w: &str) -> String {
     let d = emit_dec_int(fw, w);

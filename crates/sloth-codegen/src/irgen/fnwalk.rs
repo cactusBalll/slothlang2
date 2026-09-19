@@ -421,6 +421,14 @@ pub(crate) fn walk_ids_expr(
             walk_ids_expr(rhs, push_use, decls);
         }
         ExprNode::Un { expr, .. } => walk_ids_expr(expr, push_use, decls),
+        ExprNode::Str(sp) => {
+            // interpolation `${expr}` parts are uses of the enclosing scope
+            for p in &sp.parts {
+                if let sloth_frontend::lexer::StrPart::ExprAst(e) = p {
+                    walk_ids_expr(e, push_use, decls);
+                }
+            }
+        }
         ExprNode::List(xs) => {
             for x in xs {
                 walk_ids_expr(x, push_use, decls);
@@ -448,7 +456,6 @@ pub(crate) fn walk_ids_expr(
         ExprNode::Int(_)
         | ExprNode::Float(_)
         | ExprNode::Bool(_)
-        | ExprNode::Str(_)
         | ExprNode::Nil
         | ExprNode::This
         | ExprNode::Super => {}

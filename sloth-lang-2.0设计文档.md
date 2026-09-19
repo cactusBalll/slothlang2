@@ -85,6 +85,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | 弱引用 | `Weak<T>` | ARC 破环用的弱引用盒；`upgrade()` 返回 `T?`（见 §5.1） |
 | 张量 | `Tensor<T, R>` | 元素类型 `T`（`float`/`int`）+ 静态秩 `R`（见 §5.6） |
 | 协程 | `Fiber<Y>` | 有栈协程句柄，载荷类型 `Y`；`fiber.*` 内建模块（见协程扩展设计文档 §3） |
+| 顶层 | `any` | 运行时类型化的盒引用（`0`=`nil`，否则指向 rc 盒 `{TypeDesc*, word}`）；任意值隐式装箱，`x is T` 运行时判定并收窄，`print`/`${}` 经 `sloth_rt_write` 按运行时类型递归渲染 |
 
 关键决策说明：
 
@@ -585,7 +586,8 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 - `Array<T>` / `Map<K, V>` 运行时实现（容量增长、哈希），元素布局由单态化后的具体类型决定（无装箱，直接内联存储）；数组采用**稳定句柄**，增长只替换独立数据缓冲（`crates/sloth-rt/src/arrays.rs`）；`Map` 键的哈希与相等比较经单态化 `__hash__`/`__eq__` 路由；
 - 基础类型方法（如 `arr.len()`、`str.len()`）由编译器**直接发射运行时调用**（`arr.len()` → `@sloth_arr_len` 等），而非生成 stdlib 泛型函数。`【已过时·v1.0】` 原计划“解析为标准库泛型函数”；直接 rt 调用为定案，功能面等价；
-- `Result<T,E>` 与 `Entry<K,V>` 由编译器**自动注入**为标准库类。
+- `Result<T,E>` 与 `Entry<K,V>` 由编译器**自动注入**为标准库类；
+- `print` 亦由编译器自动注入的 Sloth prelude 实现（`sloth_rt_puts(sloth_rt_write(v))`，`v: any`），不再是发射器内建；`${}` 插值统一经 `sloth_rt_write` 渲染（旧 `sloth_str_push_i/_f/_b/_opt` 分派已移除）。运行时面见 `crates/sloth-rt/src/any.rs`、`crates/sloth-codegen/src/irgen/anydesc.rs`。
 
 ### 5.4 FFI 与宿主互操作
 

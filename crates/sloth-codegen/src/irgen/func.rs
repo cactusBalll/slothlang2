@@ -30,6 +30,11 @@ impl ModEmitter {
         if f.is_extern {
             self.stat_extdecls += 1;
             self.emitted_names.push(name.to_string());
+            // runtime symbols are already declared by rt_decls/obj_rt_decls;
+            // re-declaring them is an MLIR redefinition error
+            if self.predeclared.contains(name) {
+                return plan.mangled;
+            }
             self.out.push_str(&format!(
                 "  func.func private @{}({}) -> {}\n",
                 name,
@@ -139,6 +144,11 @@ impl ModEmitter {
         // then the local module's own declared globals
         let entry_text = if entry {
             let mut pre = String::new();
+            // descriptor tables must be filled before any `any` box is built
+            pre.push_str(&format!(
+                "    call @sloth_{}__anyinit() : () -> ()\n",
+                self.name
+            ));
             for m in self.init_mods.clone() {
                 pre.push_str(&format!("    call @sloth_{}__ginit() : () -> ()\n", m));
             }

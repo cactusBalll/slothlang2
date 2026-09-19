@@ -66,6 +66,15 @@ pub extern "C" fn sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
     intern_bytes(w_unref(ptr_w), rc::dec_i(len_w))
 }
 
+/// internal: borrow a `str` payload (0 = nil) for runtime callers
+pub(crate) unsafe fn str_of<'a>(w: i64) -> Option<&'a StrT> {
+    if w == 0 {
+        None
+    } else {
+        Some(&*(w_unref(w) as *const StrT))
+    }
+}
+
 /// raw internal constructor: allocate a `StrT` chunk, copy `len` bytes and
 /// NUL-terminate (returns the tagged handle word; no interning/dedup)
 pub(crate) fn intern_bytes(ptr: usize, len: i64) -> i64 {
@@ -365,6 +374,43 @@ pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
 pub extern "C" fn sloth_str_of_byte(v: i64) -> i64 {
     let b = (v & 0xff) as u8;
     intern_bytes((&b as *const u8) as usize, 1)
+}
+
+/// first occurrence of `needle` in `hay` at or after `from`, or -1 (raw bytes)
+#[no_mangle]
+pub extern "C" fn sloth_str_find(hay_w: i64, needle_w: i64, from: i64) -> i64 {
+    unsafe {
+        let h = w_unref(hay_w) as *const StrT;
+        let n = w_unref(needle_w) as *const StrT;
+        let hb = std::slice::from_raw_parts((*h).data as *const u8, (*h).len);
+        let nb = std::slice::from_raw_parts((*n).data as *const u8, (*n).len);
+        if nb.is_empty() {
+            return from.max(0).min(hb.len() as i64);
+        }
+        let start = from.max(0) as usize;
+        if start >= hb.len() || nb.len() > hb.len() {
+            return -1;
+        }
+        for i in start..=(hb.len() - nb.len()) {
+            if &hb[i..i + nb.len()] == nb {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// does `s` start with `prefix`? (raw bool word)
+#[no_mangle]
+pub extern "C" fn sloth_str_starts_with(s_w: i64, prefix_w: i64) -> i64 {
+    unsafe {
+        let s = w_unref(s_w) as *const StrT;
+        let p = w_unref(prefix_w) as *const StrT;
+        if (*p).len > (*s).len {
+            return 0;
+        }
+        (libc::memcmp((*s).data, (*p).data, (*p).len) == 0) as i64
+    }
 }
 
 /// write a `str`'s bytes to stdout with no trailing newline (generation

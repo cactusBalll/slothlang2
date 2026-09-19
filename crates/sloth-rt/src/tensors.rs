@@ -531,3 +531,25 @@ pub extern "C" fn sloth_tensor_from_f32_ptr(buf: i64, off: i64, n: i64) -> i64 {
         t
     }
 }
+
+/// shape/stride/data view of a tensor for the `any` renderer.
+/// Returns `(is_float, shape, stride, data_ptr)` with the descriptor's own
+/// row-major layout (views keep their own offset/strides).
+pub(crate) unsafe fn tensor_parts(w: i64) -> (bool, Vec<i64>, Vec<i64>, *const u8) {
+    if w == 0 {
+        return (false, Vec::new(), Vec::new(), std::ptr::null());
+    }
+    let d = w_unref(w) as *mut i64;
+    let n = ndim_of(d);
+    let sh = shape_of(d);
+    let st = stride_of(d);
+    let mut shape = Vec::with_capacity(n);
+    let mut stride = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        shape.push(*sh.offset(i as isize));
+        stride.push(*st.offset(i as isize));
+        i += 1;
+    }
+    (kind_of(d) == FLAG_FLOAT, shape, stride, data_of(d))
+}

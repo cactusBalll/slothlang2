@@ -427,3 +427,21 @@ pub extern "C" fn sloth_map_values(m_w: i64) -> i64 {
         arr
     }
 }
+
+/// visit every live `(key, value)` pair (raw words). Used by the `any`
+/// renderer to walk a map without exposing the bucket layout.
+pub(crate) unsafe fn map_foreach(m_w: i64, mut f: impl FnMut(i64, i64)) {
+    if m_w == 0 {
+        return;
+    }
+    let m = w_unref(m_w);
+    let cap = *(m as *mut i64);
+    let mut i = 0i64;
+    while i < cap {
+        let s = map_slot(m, i);
+        if *s == 1 {
+            f(*s.offset(1), *s.offset(2));
+        }
+        i += 1;
+    }
+}

@@ -177,129 +177,24 @@ impl ModEmitter {
                                 }
                             }
                             StrPart::ExprAst(e) => {
+                                // render through the runtime-typed writer so
+                                // containers/objects interpolate uniformly
                                 let (v, t) = self.emit_expr(fw, e);
+                                let (av, _at) = self.coerce_into_any(fw, &v, t);
+                                let sv = fw.v();
+                                fw.op(&format!(
+                                    "    {} = call @sloth_rt_write({}) : (i64) -> i64",
+                                    sv, av
+                                ));
+                                // fresh owned str from the writer: track so the
+                                // temp is released at statement close
+                                let stra = self.r.mk(Ty::Str);
+                                self.dangling_producer(fw, &sv, stra);
                                 let r = fw.v();
-                                if self.is_str(t) {
-                                    fw.op(&format!(
-                                        "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
-                                        r, curw, v
-                                    ));
-                                } else if self.is_float(t) {
-                                    let vf = emit_dec_f(fw, &v);
-                                    fw.op(&format!(
-                                        "    {} = call @sloth_str_push_f({}, {}) : (i64, f64) -> i64",
-                                        r, curw, vf
-                                    ));
-                                } else if self.is_opt_val(t) {
-                                    // patch 42: boxed optional interpolation
-                                    let kind = if self.r.get(t) != &Ty::Unit {
-                                        match self.opt_inner(t) {
-                                            Some((in2, fli)) => {
-                                                if self.r.get(in2) == &Ty::F64 || fli {
-                                                    1
-                                                } else if self.r.get(in2) == &Ty::Bool {
-                                                    2
-                                                } else {
-                                                    0
-                                                }
-                                            }
-                                            _ => 0,
-                                        }
-                                    } else {
-                                        0
-                                    };
-                                    let _ = kind;
-                                    let kc = fw.v();
-                                    fw.op(&format!(
-                                        "    {} = arith.constant {} : i64",
-                                        kc,
-                                        enc_i_lit(kind)
-                                    ));
-                                    fw.op(&format!(
-                                        "    {} = call @sloth_str_push_opt({}, {}, {}) : (i64, i64, i64) -> i64",
-                                        r, curw, v, kc
-                                    ));
-                                } else if self.r.get(t) == &Ty::Bool {
-                                    fw.op(&format!(
-                                        "    {} = call @sloth_str_push_b({}, {}) : (i64, i64) -> i64",
-                                        r, curw, v
-                                    ));
-                                } else if let Ty::Named(ref cls, _) = self.r.get(t).clone() {
-                                    // Display-plumbed interpolation, symmetric with
-                                    // print: user class needs impl Display + to_str()
-                                    self.satisfies_bound_check(
-                                        &e.pos,
-                                        &t,
-                                        "Display",
-                                        "interpolation",
-                                    );
-                                    match self.find_method(cls, "to_str") {
-                                        Some((defcls, fd)) => {
-                                            let (sv, _st) = self.emit_method_call(
-                                                fw,
-                                                &defcls,
-                                                "to_str",
-                                                &fd,
-                                                false,
-                                                &vec![(v.clone(), t)],
-                                                &vec!["i64".to_string()],
-                                                &e.pos,
-                                            );
-                                            fw.op(&format!(
-                                                "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
-                                                r, curw, sv
-                                            ));
-                                        }
-                                        None => {
-                                            self.err(
-                                                &e.pos,
-                                                "`${}` on class requires impl Display with `to_str`".to_string(),
-                                            );
-                                            fw.op(&format!(
-                                                "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
-                                                r, curw, v
-                                            ));
-                                        }
-                                    }
-                                } else if let Ty::Dyn(ref tname) = self.r.get(t).clone() {
-                                    // dyn Display interpolation: vtable to_str
-                                    let tname = tname.clone();
-                                    let has = self
-                                        .traits
-                                        .get(&tname)
-                                        .map(|ms| ms.iter().any(|m| m.name == "to_str"))
-                                        .unwrap_or(false);
-                                    if has {
-                                        let (sv, _st) = self.emit_dyn_call(
-                                            fw,
-                                            &tname,
-                                            "to_str",
-                                            &v,
-                                            &vec![(v.clone(), t)],
-                                            &vec![],
-                                            &e.pos,
-                                        );
-                                        fw.op(&format!(
-                                            "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
-                                            r, curw, sv
-                                        ));
-                                    } else {
-                                        self.err(
-                                            &e.pos,
-                                            "`${}` on dyn requires a Display trait with `to_str`"
-                                                .to_string(),
-                                        );
-                                        fw.op(&format!(
-                                            "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
-                                            r, curw, v
-                                        ));
-                                    }
-                                } else {
-                                    fw.op(&format!(
-                                        "    {} = call @sloth_str_push_i({}, {}) : (i64, i64) -> i64",
-                                        r, curw, v
-                                    ));
-                                }
+                                fw.op(&format!(
+                                    "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
+                                    r, curw, sv
+                                ));
                                 curw = r;
                             }
                             _ => {}
@@ -455,6 +350,97 @@ impl ModEmitter {
                         c1
                     };
                     return (r, self.r.mk(Ty::Bool));
+                }
+                // `any` runtime type tests against primitive kinds and classes
+                if matches!(self.r.get(lt), Ty::Any) {
+                    if let ExprNode::Ident(cn) = &rhs.node {
+                        let akind = match cn.as_str() {
+                            "int" | "i64" => Some(2i64),
+                            "float" | "f64" => Some(3i64),
+                            "bool" => Some(1i64),
+                            "str" => Some(4i64),
+                            "range" => Some(5i64),
+                            _ => None,
+                        };
+                        if let Some(k) = akind {
+                            let kv = fw.v();
+                            fw.op(&format!("    {} = arith.constant {} : i64", kv, k));
+                            let ak = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_any_kind({}) : (i64) -> i64",
+                                ak, lv
+                            ));
+                            let eq = fw.v();
+                            fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", eq, ak, kv));
+                            let b = ext_bool(fw, &eq);
+                            return (neg_bool_word(fw, &b, *negated), self.r.mk(Ty::Bool));
+                        }
+                        if self.class_ids.get(cn).is_some() {
+                            let mut idsv: Vec<i64> = Vec::new();
+                            if let Some(id) = self.class_ids.get(cn) {
+                                idsv.push(*id);
+                            }
+                            for candv in self.class_order.clone() {
+                                let cand = candv.clone();
+                                let mut cur = Some(cand.clone());
+                                while let Some(pn) = cur {
+                                    cur =
+                                        self.classes.get(&pn).and_then(|ci| ci.superclass.clone());
+                                    if cur.as_deref() == Some(cn.as_str()) {
+                                        if let Some(id) = self.class_ids.get(&cand) {
+                                            idsv.push(*id);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            let clsid = fw.v();
+                            fw.op(&format!(
+                                "    {} = call @sloth_any_cls_id({}) : (i64) -> i64",
+                                clsid, lv
+                            ));
+                            let mut acc: Option<String> = None;
+                            for id in &idsv {
+                                let ci = fw.v();
+                                fw.op(&format!(
+                                    "    {} = arith.constant {} : i64",
+                                    ci,
+                                    enc_i_lit(*id)
+                                ));
+                                let eq = fw.v();
+                                fw.op(&format!(
+                                    "    {} = arith.cmpi eq, {}, {} : i64",
+                                    eq, clsid, ci
+                                ));
+                                let eq1 = ext_bool(fw, &eq);
+                                acc = match acc {
+                                    None => Some(eq1),
+                                    Some(a) => {
+                                        let o = fw.v();
+                                        fw.op(&format!(
+                                            "    {} = arith.ori {}, {} : i64",
+                                            o, a, eq1
+                                        ));
+                                        Some(o)
+                                    }
+                                };
+                            }
+                            let base = match acc {
+                                Some(x) => x,
+                                None => {
+                                    let z = fw.v();
+                                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                                    z
+                                }
+                            };
+                            return (neg_bool_word(fw, &base, *negated), self.r.mk(Ty::Bool));
+                        }
+                        self.err(
+                            &e.pos,
+                            format!("`is` type `{}` not a known class or builtin", cn),
+                        );
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
                 }
                 // class membership test via static ancestor chain of cls ids
                 if let ExprNode::Ident(cn) = &rhs.node {
@@ -1428,7 +1414,7 @@ impl ModEmitter {
                     if let Some(he) = hint_el {
                         if self.weak_inner(he).is_some()
                             || self.opt_inner(he).is_some()
-                            || matches!(self.r.get(he), Ty::Dyn(_))
+                            || matches!(self.r.get(he), Ty::Dyn(_) | Ty::Any)
                         {
                             for i in 0..evs.len() {
                                 if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
@@ -1613,7 +1599,7 @@ impl ModEmitter {
                     if let Some(hv) = hint_v {
                         if self.weak_inner(hv).is_some()
                             || self.opt_inner(hv).is_some()
-                            || matches!(self.r.get(hv), Ty::Dyn(_))
+                            || matches!(self.r.get(hv), Ty::Dyn(_) | Ty::Any)
                         {
                             for x in vevs.iter_mut() {
                                 if self.r.get(x.1).clone() != self.r.get(hv).clone() {
@@ -2423,7 +2409,10 @@ impl ModEmitter {
                 argv.iter()
                     .enumerate()
                     .map(|(i, x)| {
-                        if i < plan.params.len() && self.opt_inner(plan.params[i].1).is_some() {
+                        if i < plan.params.len()
+                            && (self.opt_inner(plan.params[i].1).is_some()
+                                || matches!(self.r.get(plan.params[i].1), Ty::Any))
+                        {
                             (vals[i].clone(), plan.params[i].1)
                         } else {
                             (vals[i].clone(), x.1)
@@ -2491,6 +2480,11 @@ impl ModEmitter {
                 }
                 if ret_int {
                     return (emit_enc_int(fw, &rr), plan.ret);
+                }
+                // `sloth_rt_write` returns a fresh owned `str` (unlike the
+                // usual C-ownership extern): track it so the temp is released
+                if sym == "sloth_rt_write" && self.is_ref(plan.ret) {
+                    self.dangling_producer(fw, &rr, plan.ret);
                 }
                 return (rr, plan.ret);
             }
@@ -2632,113 +2626,6 @@ impl ModEmitter {
                 fw.op(&format!("    {} = call @sloth_rc_drops() : () -> i64", r));
                 (r, self.r.mk(Ty::I64))
             }
-            "print" if !argv.is_empty() => {
-                let (v, t) = argv[0].clone();
-                let mty = mlir_word_ty(t, &self.r);
-                match self.r.get(t).clone() {
-                    // Display-plumbed print: user class needs impl Display + to_str()
-                    Ty::Named(ref cls, _) => {
-                        self.satisfies_bound_check(pos, &t, "Display", "print");
-                        let sfd = self.find_method(cls, "to_str").ok_or_else(|| ()).ok();
-                        if let Some((defcls, fd)) = sfd {
-                            let (sv, _st) = self.emit_method_call(
-                                fw,
-                                &defcls,
-                                "to_str",
-                                &fd,
-                                false,
-                                &vec![(v.clone(), t.clone())],
-                                &vec!["i64".to_string()],
-                                pos,
-                            );
-                            let r2 = fw.v();
-                            fw.op(&format!(
-                                "    {} = call @sloth_rt_print_str({}) : (i64) -> i64",
-                                r2, sv
-                            ));
-                            (r2, self.r.mk(Ty::Unit))
-                        } else {
-                            self.err(
-                                pos,
-                                "`print` on class requires impl Display with `to_str`".to_string(),
-                            );
-                            (r, self.r.mk(Ty::Unit))
-                        }
-                    }
-                    Ty::Dyn(ref tname) => {
-                        // dyn Display print: dispatch to_str through the vtable
-                        let tname = tname.clone();
-                        let has = self
-                            .traits
-                            .get(&tname)
-                            .map(|ms| ms.iter().any(|m| m.name == "to_str"))
-                            .unwrap_or(false);
-                        if has {
-                            let (sv, _st) = self.emit_dyn_call(
-                                fw,
-                                &tname,
-                                "to_str",
-                                &v,
-                                &vec![(v.clone(), t.clone())],
-                                &vec![],
-                                pos,
-                            );
-                            let r2 = fw.v();
-                            fw.op(&format!(
-                                "    {} = call @sloth_rt_print_str({}) : (i64) -> i64",
-                                r2, sv
-                            ));
-                            (r2, self.r.mk(Ty::Unit))
-                        } else {
-                            self.err(
-                                pos,
-                                "`print` on dyn requires a Display trait with `to_str`".to_string(),
-                            );
-                            (r, self.r.mk(Ty::Unit))
-                        }
-                    }
-                    _ => {
-                        // patch 42: value-optional boxes print through the
-                        // nil-aware rt face (nil prints "nil")
-                        if let Some((inner, fli)) = self.opt_inner(t) {
-                            let kind = if self.r.get(inner) == &Ty::F64 {
-                                1
-                            } else if self.r.get(inner) == &Ty::Bool {
-                                2
-                            } else {
-                                0
-                            };
-                            let _ = fli;
-                            let kc = fw.v();
-                            fw.op(&format!("    {} = arith.constant {} : i64", kc, kind));
-                            let rv = fw.v();
-                            fw.op(&format!(
-                                "    {} = call @sloth_rt_print_opt({}, {}) : (i64, i64) -> i64",
-                                rv, v, kc
-                            ));
-                            return (rv, self.r.mk(Ty::Unit));
-                        }
-                        // tag migration: the f64 printer keeps its raw C-ABI
-                        // f64 face — decode the word at the call boundary
-                        if self.is_float(t) {
-                            let fv = emit_dec_f(fw, &v);
-                            fw.op(&format!(
-                                "    {} = call @sloth_rt_print_f64({}) : (f64) -> i64",
-                                r, fv
-                            ));
-                            return (r, self.r.mk(Ty::Unit));
-                        }
-                        let sym = match self.r.get(t) {
-                            Ty::Str => "sloth_rt_print_str",
-                            Ty::Bool => "sloth_rt_print_bool",
-                            _ => "sloth_rt_print_i64",
-                        };
-                        let _ = mty;
-                        fw.op(&format!("    {} = call @{}({}) : (i64) -> i64", r, sym, v));
-                        (r, self.r.mk(Ty::Unit))
-                    }
-                }
-            }
             "int" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
                 // patch 42: int(optional box) unwraps the payload (nil -> 0)
@@ -2786,16 +2673,19 @@ impl ModEmitter {
                 (r, self.r.mk(Ty::I64))
             }
             "keys" if !argv.is_empty() => {
-                let (v, _t) = argv[0].clone();
+                let (v, t) = argv[0].clone();
+                let kt = match self.r.get(t).clone() {
+                    Ty::Map(k3, _v3) => k3,
+                    _ => self.r.mk(Ty::I64),
+                };
                 fw.op(&format!(
                     "    {} = call @sloth_map_keys({}) : (i64) -> i64",
                     r, v
                 ));
-                let ei = self.r.mk(Ty::I64);
-                let at = self.r.mk(Ty::Array(ei));
+                let at = self.r.mk(Ty::Array(kt));
                 // rc patch B: fresh keys array (producer)
                 self.dangling_producer(fw, &r, at);
-                (r, self.r.mk(Ty::Array(ei)))
+                (r, at)
             }
             "values" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
@@ -3042,6 +2932,8 @@ impl ModEmitter {
 pub(crate) enum TypeidPlan {
     /// class instance or `dyn` box: resolved at runtime through `ObjInfo`
     Dynamic,
+    /// `any` box: resolved through the runtime type descriptor
+    Any,
     /// monomorphic non-class reference type: compile-time id/name
     Const {
         key: String,
@@ -3086,6 +2978,7 @@ impl ModEmitter {
             // opaque C-ABI handles (`extern type`) carry no ObjInfo: reject
             Ty::Named(n, _) if self.extern_types.contains(&n) => TypeidPlan::Value,
             Ty::Named(..) | Ty::Dyn(_) => TypeidPlan::Dynamic,
+            Ty::Any => TypeidPlan::Any,
             _ => {
                 if self.is_ref(core) {
                     TypeidPlan::Const {
@@ -3149,6 +3042,24 @@ impl ModEmitter {
                     let r = fw.v();
                     fw.op(&format!(
                         "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                        r, v
+                    ));
+                    (r, i64t)
+                }
+            }
+            TypeidPlan::Any => {
+                if want_name {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_any_type_name({}) : (i64) -> i64",
+                        r, v
+                    ));
+                    self.dangling_producer(fw, &r, strt);
+                    (r, strt)
+                } else {
+                    let r = fw.v();
+                    fw.op(&format!(
+                        "    {} = call @sloth_any_type_id({}) : (i64) -> i64",
                         r, v
                     ));
                     (r, i64t)

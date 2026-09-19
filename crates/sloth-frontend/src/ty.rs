@@ -35,6 +35,10 @@ pub enum Ty {
     Mutex,
     /// opaque atomic-int cell (TH; 63-bit word semantics)
     AtomicInt,
+    /// dynamic top type: a runtime-typed boxed value (0 = nil). Carries a
+    /// compiler-emitted structural type descriptor so the runtime can dispatch
+    /// on the concrete shape (including recursive container contents).
+    Any,
     Dyn(String),
     /// type param placeholder (during monomorphization substitution)
     Tp(String),
@@ -189,6 +193,7 @@ fn fmt_ty(t: &Ty) -> String {
         Ty::Channel(e) => format!("channel:{}", e.0),
         Ty::Mutex => "mutex".to_string(),
         Ty::AtomicInt => "atomicint".to_string(),
+        Ty::Any => "any".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("tp:{}", n),
     }
@@ -214,6 +219,7 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Channel(_e) => "Channel".to_string(),
         Ty::Mutex => "Mutex".to_string(),
         Ty::AtomicInt => "AtomicInt".to_string(),
+        Ty::Any => "any".to_string(),
         Ty::Dyn(n) => format!("dyn:{}", n),
         Ty::Tp(n) => format!("?tp:{}", n),
     }

@@ -55,8 +55,9 @@ hello, sloth!
 - 字符串字面量被**内联为 8 字节一组的 `i64` 常量**，经
   `sloth_str_push(builder, word, len)` 拼进字符串构建器，
   最后 `sloth_str_finish` 收口分配出一个 `str` 句柄（不做驻留）。
-- `${name}` 插值被展开成一次 `sloth_str_pushp`（把一个已有 `str` 推进构建器）。
-- 插值结果 `%v1019` 交给 `sloth_rt_print_str` 打印后立即
+- `${name}` 插值把值装箱为 `any`，经 `sloth_rt_write(any)` 渲染成 `str`，
+  再用 `sloth_str_pushp` 推进构建器。
+- 插值结果交给 stdlib `print`，其内部 `sloth_rt_puts(write(v))` 打印后立即
   `sloth_rc_release`——这是 ARC 的**语句级临时量结算**（见 §23）。
 - 局部变量 `name` 存放在 `memref<1xi64>` 的栈槽里；绑定那一刻发出
   `sloth_rc_retain`，作用域退出时 `sloth_rc_release`。

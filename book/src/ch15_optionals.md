@@ -39,8 +39,8 @@ let n = i ?: 7;                 // Elvis：nil 时取 7
 ```
 
 可观察到的运行时面：值型 optional 用 `sloth_box_new`/`sloth_box_get`；
-print/插值对 optional 走 `sloth_rt_print_opt`/`sloth_str_push_opt`（带 kind 标记）；
-`is nil` 是对词面是否为 `0` 的判定。
+print/插值把 optional 装箱为 `any` 后交给 `sloth_rt_write`（nil-aware：`nil`
+打印为 `nil`，盒中的 `0`/`false` 正常显示）；`is nil` 是对词面是否为 `0` 的判定。
 
 ## 15.4 `Weak<T>`
 

@@ -1,0 +1,416 @@
+// sloth2 stdlib: http (IO layer, IO-P4).
+//
+// Minimal HTTP/1.1 server over the `event.slt` fiber reactor and `net.slt`
+// sockets: request line + headers + Content-Length body, a method/path router,
+// keep-alive, and a response builder. No TLS, no chunked encoding, no HTTP/2.
+//
+// All handlers run as fibres on one event loop; `HttpServer.serve` accepts and
+// spawns one connection fibre per request stream. A response handler is a
+// first-class `(Request) -> Response` value.
+
+import "sloth/io.slt";
+import "sloth/net.slt";
+import "sloth/event.slt";
+
+// ---------------- small string helpers ----------------
+
+/// ASCII-lowercase a string (header names)
+pub func lower(s: str): str {
+    var out = "";
+    var i = 0;
+    let n = len(s);
+    while i < n {
+        let c = str_byte(s, i);
+        if c >= 65 and c <= 90 {
+            out = out + str_of_byte(c + 32);
+        } else {
+            out = out + str_of_byte(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// strip leading/trailing spaces, tabs and CR from `s`
+pub func trim(s: str): str {
+    var a = 0;
+    var b = len(s);
+    while a < b {
+        let c = str_byte(s, a);
+        if c == 32 or c == 9 or c == 13 {
+            a = a + 1;
+        } else {
+            break;
+        }
+    }
+    while b > a {
+        let c = str_byte(s, b - 1);
+        if c == 32 or c == 9 or c == 13 {
+            b = b - 1;
+        } else {
+            break;
+        }
+    }
+    return str_slice(s, a, b - a);
+}
+
+/// parse a non-negative decimal integer prefix of `s` (0 on garbage)
+pub func parse_int(s: str): int {
+    var v = 0;
+    var i = 0;
+    let n = len(s);
+    while i < n {
+        let c = str_byte(s, i);
+        if c < 48 or c > 57 {
+            break;
+        }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------- request / response ----------------
+
+pub class Request {
+    var method: str;
+    var path: str;
+    var version: str;
+    var headers: Map<str, str>;
+    var body: str;
+
+    func __init__(method: str, path: str, version: str, h: Map<str, str>, body: str): unit {
+        this.method = method;
+        this.path = path;
+        this.version = version;
+        this.headers = h;
+        this.body = body;
+    }
+
+    /// de-duplicated query string (everything after `?`), or ""
+    func query(): str {
+        let q = str_find(this.path, "?", 0);
+        if q < 0 {
+            return "";
+        }
+        return str_slice(this.path, q + 1, len(this.path) - q - 1);
+    }
+
+    /// route path without the query string
+    func route(): str {
+        let q = str_find(this.path, "?", 0);
+        if q < 0 {
+            return this.path;
+        }
+        return str_slice(this.path, 0, q);
+    }
+
+    /// case-insensitive header lookup (keys are stored lowercased)
+    func header(name: str): str? {
+        let want = lower(name);
+        let ks = keys(this.headers);
+        var i = 0;
+        while i < len(ks) {
+            let k = ks[i];
+            if k == want {
+                return this.headers[k];
+            }
+            i = i + 1;
+        }
+        return nil;
+    }
+}
+
+pub class Response {
+    var status: int;
+    var body: str;
+    var headers: Map<str, str>;
+
+    func __init__(status: int, body: str): unit {
+        this.status = status;
+        this.body = body;
+        this.headers = @();
+    }
+
+    func set_header(k: str, v: str): unit {
+        this.headers[k] = v;
+    }
+
+    func have(k: str): bool {
+        let ks = keys(this.headers);
+        var i = 0;
+        while i < len(ks) {
+            if ks[i] == k {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    func serialize(): str {
+        if not this.have("Content-Length") {
+            this.headers["Content-Length"] = "${len(this.body)}";
+        }
+        if not this.have("Connection") {
+            this.headers["Connection"] = "keep-alive";
+        }
+        var out = "HTTP/1.1 ${this.status} ${reason(this.status)}\r\n";
+        let ks = keys(this.headers);
+        var i = 0;
+        while i < len(ks) {
+            let k = ks[i];
+            out = out + k + ": " + this.headers[k] + "\r\n";
+            i = i + 1;
+        }
+        out = out + "\r\n" + this.body;
+        return out;
+    }
+}
+
+pub func reason(code: int): str {
+    if code == 200 {
+        return "OK";
+    }
+    if code == 201 {
+        return "Created";
+    }
+    if code == 204 {
+        return "No Content";
+    }
+    if code == 301 {
+        return "Moved Permanently";
+    }
+    if code == 400 {
+        return "Bad Request";
+    }
+    if code == 404 {
+        return "Not Found";
+    }
+    if code == 405 {
+        return "Method Not Allowed";
+    }
+    if code == 500 {
+        return "Internal Server Error";
+    }
+    return "OK";
+}
+
+pub func text(status: int, body: str): Response {
+    return Response(status, body);
+}
+
+pub func html(body: str): Response {
+    var r = Response(200, body);
+    r.set_header("Content-Type", "text/html; charset=utf-8");
+    return r;
+}
+
+pub func not_found(): Response {
+    return Response(404, "not found\n");
+}
+
+// ---------------- parser ----------------
+
+/// parse a complete HTTP request (headers + body already received)
+pub func parse_request(raw: str): Request? {
+    let line_end = str_find(raw, "\r\n", 0);
+    if line_end < 0 {
+        return nil;
+    }
+    let line = str_slice(raw, 0, line_end);
+    let s1 = str_find(line, " ", 0);
+    if s1 < 0 {
+        return nil;
+    }
+    let method = str_slice(line, 0, s1);
+    let rest = str_slice(line, s1 + 1, len(line) - s1 - 1);
+    let s2 = str_find(rest, " ", 0);
+    var path = rest;
+    var version = "HTTP/1.0";
+    if s2 >= 0 {
+        path = str_slice(rest, 0, s2);
+        version = str_slice(rest, s2 + 1, len(rest) - s2 - 1);
+    }
+
+    var headers: Map<str, str> = @();
+    var pos = line_end + 2;
+    while true {
+        let he = str_find(raw, "\r\n", pos);
+        if he < 0 or he == pos {
+            pos = he + 2;
+            break;
+        }
+        let hline = str_slice(raw, pos, he - pos);
+        let c = str_find(hline, ":", 0);
+        if c >= 0 {
+            let k = lower(str_slice(hline, 0, c));
+            let v = trim(str_slice(hline, c + 1, len(hline) - c - 1));
+            headers[k] = v;
+        }
+        pos = he + 2;
+    }
+
+    var body = "";
+    if pos < len(raw) {
+        body = str_slice(raw, pos, len(raw) - pos);
+    }
+    return Request(method, path, version, headers, body);
+}
+
+/// content-length declared on a request whose headers end at `hdr_end`
+func content_length(raw: str, hdr_end: int): int {
+    var pos = str_find(raw, "\r\n", 0) + 2;
+    while pos < hdr_end {
+        let he = str_find(raw, "\r\n", pos);
+        if he < 0 or he > hdr_end {
+            break;
+        }
+        let hline = str_slice(raw, pos, he - pos);
+        let c = str_find(hline, ":", 0);
+        if c >= 0 {
+            let k = lower(str_slice(hline, 0, c));
+            if k == "content-length" {
+                return parse_int(trim(str_slice(hline, c + 1, len(hline) - c - 1)));
+            }
+        }
+        pos = he + 2;
+    }
+    return 0;
+}
+
+/// read one complete request from `s`; nil on EOF/error
+func read_request(loop: EventLoop, s: TcpStream, b: Bytes): str? {
+    let cap = 16384;
+    var total = 0;
+    while true {
+        let r = read_some(loop, s, b, total, cap - total);
+        if r <= 0 {
+            return nil;
+        }
+        total = total + r;
+        let raw = io.bytes_to_str(b, 0, total);
+        let he = str_find(raw, "\r\n\r\n", 0);
+        if he >= 0 {
+            let need = he + 4 + content_length(raw, he);
+            if total >= need {
+                return str_slice(raw, 0, need);
+            }
+        }
+        if total >= cap {
+            return raw;
+        }
+    }
+    return nil;
+}
+
+func should_keep_alive(req: Request): bool {
+    if req.version != "HTTP/1.1" {
+        return false;
+    }
+    let c = req.header("connection");
+    if c is nil {
+        return true;
+    }
+    let cv = c ?: "";
+    return lower(cv) != "close";
+}
+
+// ---------------- router ----------------
+
+pub class Router {
+    var routes: Map<str, (Request) -> Response>;
+
+    func __init__(): unit {
+        this.routes = @();
+    }
+
+    func get(path: str, h: (Request) -> Response): unit {
+        this.routes["GET " + path] = h;
+    }
+
+    func post(path: str, h: (Request) -> Response): unit {
+        this.routes["POST " + path] = h;
+    }
+
+    func route(method: str, path: str, h: (Request) -> Response): unit {
+        this.routes[method + " " + path] = h;
+    }
+
+    func dispatch(req: Request): Response {
+        let key = req.method + " " + req.route();
+        let ks = keys(this.routes);
+        var i = 0;
+        while i < len(ks) {
+            let k = ks[i];
+            if k == key {
+                let h = this.routes[k];
+                return h(req);
+            }
+            i = i + 1;
+        }
+        return not_found();
+    }
+}
+
+/// a placeholder request for parse failures (never routed to a real handler)
+pub func blank_request(): Request {
+    var h: Map<str, str> = @();
+    return Request("GET", "/", "HTTP/1.0", h, "");
+}
+
+// ---------------- server ----------------
+
+pub func handle_connection(loop: EventLoop, fd: int, router: Router): unit {
+    let s = stream_from_fd(fd);
+    let b = io.bytes_new(16384);
+    while true {
+        let raw = read_request(loop, s, b);
+        if raw is nil {
+            break;
+        }
+        let rr = raw ?: "";
+        let req0 = parse_request(rr);
+        if req0 is nil {
+            break;
+        }
+        let r: Request = req0 ?: blank_request();
+        let resp = router.dispatch(r);
+        let keep = should_keep_alive(r);
+        if not keep {
+            resp.set_header("Connection", "close");
+        }
+        let text = resp.serialize();
+        let w = write_str_all(loop, s, text);
+        if w < 0 or not keep {
+            break;
+        }
+    }
+    s.close();
+    io.bytes_free(b);
+}
+
+func accept_loop(loop: EventLoop, listener: TcpListener, router: Router, max: int): unit {
+    var count = 0;
+    while max < 0 or count < max {
+        let fd = accept_blocking(loop, listener);
+        if fd < 0 {
+            return;
+        }
+        loop.spawn(|w: Wait| -> unit {
+            handle_connection(loop, fd, router);
+        });
+        count = count + 1;
+    }
+}
+
+/// run the accept loop in the current task until `loop.shutdown()`; each
+/// connection is handled by its own fibre
+pub func serve(loop: EventLoop, listener: TcpListener, router: Router): unit {
+    accept_loop(loop, listener, router, -1);
+}
+
+/// accept at most `max` connections then return (tests / bounded servers)
+pub func serve_n(loop: EventLoop, listener: TcpListener, router: Router, max: int): unit {
+    accept_loop(loop, listener, router, max);
+}

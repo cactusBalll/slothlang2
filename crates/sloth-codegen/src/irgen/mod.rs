@@ -32,6 +32,7 @@ mod expr;
 mod fiber;
 mod fnwalk;
 mod func;
+mod anydesc;
 mod lambda;
 mod module;
 mod state;
@@ -146,8 +147,10 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     let mut done: HashSet<std::path::PathBuf> = HashSet::new();
     let (root, mods) = resolve_program(root_src, base_dir, &mut stack, &mut done)?;
     let mut me = ModEmitter::new("main");
-    for (mname, prog, alias) in &mods {
-        me.register_import(mname, alias.as_deref(), prog);
+    for (mname, mut prog, alias) in mods {
+        // imported modules get the same `print` prelude so bare calls resolve
+        crate::irgen::inject_print_prelude(&mut prog.decls);
+        me.register_import(&mname, alias.as_deref(), &prog);
     }
     // hmm: root module runs under @sloth_main through emit_module
     me.emit_module(&root);

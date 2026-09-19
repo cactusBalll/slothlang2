@@ -114,6 +114,37 @@ pub struct ModEmitter {
     pub(crate) tyname_pool: Vec<String>,
     /// byte blob -> global symbol (dedupe)
     pub(crate) tyname_syms: HashMap<String, String>,
+    /// `any` structural type descriptors, in emission order
+    pub(crate) anydescs: Vec<AnyDesc>,
+    /// structural type key -> descriptor symbol (dedupe)
+    pub(crate) anydesc_syms: HashMap<String, String>,
+    /// runtime symbols already declared by `rt_decls`/`obj_rt_decls`: an
+    /// `extern func` for one of these must not re-emit a declaration
+    pub(crate) predeclared: HashSet<String>,
+}
+
+/// one compiler-emitted `any` type descriptor record
+#[derive(Clone)]
+pub(crate) struct AnyDesc {
+    pub sym: String,
+    pub kind: i64,
+    pub flags: i64,
+    pub type_id: i64,
+    pub name: Option<(String, usize)>,
+    pub elem: Option<String>,
+    pub key: Option<String>,
+    pub val: Option<String>,
+    /// display wrapper spec (resolved to an `llvm.func` at emission)
+    pub disp: Option<DispSpec>,
+    pub cls_id: i64,
+    pub rank: i64,
+}
+
+/// how an object/dyn value renders itself to a `str`
+#[derive(Clone)]
+pub(crate) enum DispSpec {
+    /// trait vtable dispatch: read slot `slot` from the receiver's vtable
+    Dyn { slot: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +166,21 @@ pub(crate) enum IdxKind {
 
 impl ModEmitter {
     pub fn new(name: &str) -> ModEmitter {
+        let mut predeclared: HashSet<String> = HashSet::new();
+        for src in [super::rt_decls(), super::obj_rt_decls()] {
+            for line in src.lines() {
+                if let Some(i) = line.find('@') {
+                    let rest = &line[i + 1..];
+                    let nm: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !nm.is_empty() {
+                        predeclared.insert(nm);
+                    }
+                }
+            }
+        }
         ModEmitter {
             r: Reg::new(),
             name: name.to_string(),
@@ -186,6 +232,9 @@ impl ModEmitter {
             cls_display: HashMap::new(),
             tyname_pool: Vec::new(),
             tyname_syms: HashMap::new(),
+            anydescs: Vec::new(),
+            anydesc_syms: HashMap::new(),
+            predeclared,
         }
     }
 }

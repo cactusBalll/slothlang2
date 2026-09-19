@@ -4,19 +4,32 @@
 
 | 内建 | 签名 | 说明 |
 | --- | --- | --- |
-| `print(x)` | `(T) -> unit` | 按类型分派到 `sloth_rt_print_*`；类需 `impl Display` |
 | `len(x)` | `(str\|Array\|Map) -> int` | `str` 为**字节数** |
 | `int(x)` | `(float\|int?…) -> int` | 向零截断；`int(str)` 不支持（MVP） |
 | `float(x)` | `(int\|float?…) -> float` | `float(str)` 不支持（MVP） |
 | `keys(m)` | `(Map<K,V>) -> Array<K>` | 新数组（owned） |
 | `values(m)` | `(Map<K,V>) -> Array<V>` | 新数组（owned） |
+| `typeid(x)` / `type_name(x)` | `(ref\|any) -> int\|str` | 运行时类型身份 |
 | `sloth_rc_live()` | `() -> int` | ARC 存活计数 |
 | `sloth_rc_drops()` | `() -> int` | ARC 累计析构数 |
 
+`print` **不再是编译器内建**：它由编译器自动注入的 Sloth prelude 实现，基于
+运行时 `any` 写入面：
+
+```sloth
+extern func sloth_rt_write(v: any): str;   // 按运行时类型渲染为 str（递归容器）
+extern func sloth_rt_puts(v: str): unit;   // 仅打印一个 str（追加换行）
+pub func print(v: any): unit { sloth_rt_puts(sloth_rt_write(v)); }
+```
+
+任意值传入 `print`/`${}` 时会隐式装箱为 `any`（见 §5.1、§24.2），因此
+`print` 可打印数组/Map/嵌套容器/类实例，`${}` 插值也统一走
+`sloth_rt_write`（不再有逐类型的 `sloth_str_push_*` 分派）。
+
 方法形式的等价物：`a.len()`、`s.len()`、`m.len()`；`w.upgrade()`（`Weak<T>` → `T?`）。
 
-`print` / `${}` 对值型 optional 走 nil-aware 面（`sloth_rt_print_opt` /
-`sloth_str_push_opt`），因此 `nil` 打印为 `nil`，而盒中的 `0`/`false` 正常显示。
+值型 optional（`int?` 等）经 `any` 装箱后仍是 nil-aware：`nil` 打印为 `nil`，
+盒中的 `0`/`false` 正常显示。
 
 ## 24.1 示例
 
@@ -28,6 +41,11 @@
 {{#include examples/builtins.mlir}}
 ```
 
-`print` 按实参类型选择 `sloth_rt_print_i64` / `_f64` / `_bool` / `_str`；
-`len` 按实参类型选择 `sloth_str_len` / `sloth_arr_len` / `sloth_map_len`；
-`int(float)` 发射 `fptosi`（先解码-截断-再编码），`float(int)` 发射 `sitofp`。
+## 24.2 `any` 与运行时渲染
+
+`any` 是运行时类型化的顶层引用类型：单 word，`0` = `nil`，否则指向一个 rc 盒
+`{ TypeDesc*, word }`。每个静态类型在编译期发射一份结构化 `TypeDesc`
+（含 `Array<T>`/`Map<K,V>`/`T?` 的递归元素描述符），因此 `write` 可以：
+标量按原生格式，`str` 原样，数组 `[a, b]`，Map `{k: v}`，`T?` nil→`nil`，
+类实例有 `impl Display` 时调用 `to_str`，否则回退打印类名。
+

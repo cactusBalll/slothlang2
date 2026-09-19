@@ -1654,9 +1654,9 @@ mod irgen_p18b {
         run_src(src, "main").unwrap();
     }
 
-    /// no Display impl: print refuses diagnostically
+    /// no Display impl: print falls back to the class name (any runtime write)
     #[test]
-    fn print_display_missing_diag() {
+    fn print_display_missing_fallback() {
         let src = r#"
             class Plain {
                 func __init__(): unit { return; }
@@ -1666,15 +1666,7 @@ mod irgen_p18b {
                 print(q);
             }
         "#;
-        let e = match run_src(src, "main") {
-            Ok(()) => panic!("class print without Display accepted"),
-            Err(e) => e,
-        };
-        assert!(
-            e.contains("requires trait bound `Display`"),
-            "unexpected: {}",
-            e
-        );
+        run_src(src, "main").unwrap();
     }
 }
 
@@ -1967,9 +1959,9 @@ mod irgen_p21 {
         run_src(src, "main").unwrap();
     }
 
-    /// no Display impl: interpolation refuses diagnostically
+    /// no Display impl: interpolation falls back to the class name
     #[test]
-    fn interpolation_display_missing_diag() {
+    fn interpolation_display_missing_fallback() {
         let src = r#"
             class Plain {
                 var v: int;
@@ -1980,15 +1972,7 @@ mod irgen_p21 {
                 print("oops ${p}");
             }
         "#;
-        let e = match run_src(src, "main") {
-            Ok(()) => panic!("interpolation of class without Display accepted"),
-            Err(e) => e,
-        };
-        assert!(
-            e.contains("requires trait bound `Display`"),
-            "unexpected: {}",
-            e
-        );
+        run_src(src, "main").unwrap();
     }
 }
 
@@ -4669,3 +4653,5 @@ mod irgen_ce_p1 {
         }
     }
 }
+
+

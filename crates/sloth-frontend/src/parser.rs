@@ -344,6 +344,7 @@ impl Parser {
             "bool" => Type::prim(Prim::Bool),
             "str" => Type::prim(Prim::Str),
             "range" => Type::prim(Prim::Range),
+            "any" => Type::Simple(SimpleType::Any),
             "Array" => {
                 self.expect(Tok::Lt, "'<'")?;
                 let el = self.ty()?;
