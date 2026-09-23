@@ -103,6 +103,17 @@ impl ModEmitter {
                 let t = self.r.mk(Ty::I64);
                 (r, t)
             }
+            ExprNode::UInt(v) => {
+                // unsigned literal: the word is the two's-complement bit pattern
+                let r = fw.v();
+                fw.op(&format!(
+                    "    {} = arith.constant {} : i64",
+                    r,
+                    *v as i64
+                ));
+                let t = self.r.mk(Ty::Int(sloth_frontend::ty::IntKind::U64));
+                (r, t)
+            }
             ExprNode::Float(v) => {
                 // tag migration: the word plane carries the encoded f64 bits
                 let r = fw.v();
@@ -355,12 +366,12 @@ impl ModEmitter {
                 if matches!(self.r.get(lt), Ty::Any) {
                     if let ExprNode::Ident(cn) = &rhs.node {
                         let akind = match cn.as_str() {
-                            "int" | "i64" => Some(2i64),
-                            "float" | "f64" => Some(3i64),
-                            "bool" => Some(1i64),
-                            "str" => Some(4i64),
-                            "range" => Some(5i64),
-                            _ => None,
+                            "int" | "i64" | "int64" => Some(super::anydesc::AK_I64),
+                            "float" | "f64" => Some(super::anydesc::AK_F64),
+                            "bool" => Some(super::anydesc::AK_BOOL),
+                            "str" => Some(super::anydesc::AK_STR),
+                            "range" => Some(super::anydesc::AK_RANGE),
+                            other => super::anydesc::ak_for_int_name(other),
                         };
                         if let Some(k) = akind {
                             let kv = fw.v();
@@ -461,10 +472,14 @@ impl ModEmitter {
                                 cid, lv
                             ));
                             let cls = match cn.as_str() {
-                                "int" | "i64" => Some(Self::value_cls_id(0)),
+                                "int" | "i64" | "int64" => Some(Self::value_cls_id(0)),
                                 "float" | "f64" => Some(Self::value_cls_id(1)),
                                 "bool" => Some(Self::value_cls_id(2)),
-                                _ => None,
+                                other => sloth_frontend::ty::IntKind::from_name(other).map(|k| {
+                                    let t = self.r.mk(Ty::Int(k));
+                                    let vk = self.value_kind(t).unwrap_or(0);
+                                    Self::value_cls_id(vk)
+                                }),
                             };
                             let base = match cls {
                                 Some(c) => {
@@ -503,11 +518,12 @@ impl ModEmitter {
                             return (r, self.r.mk(Ty::Bool));
                         }
                         let matches = match (&wt, cn.as_str()) {
-                            (Ty::I64, "int") | (Ty::I64, "i64") => true,
+                            (Ty::I64, "int") | (Ty::I64, "i64") | (Ty::I64, "int64") => true,
                             (Ty::F64, "float") | (Ty::F64, "f64") => true,
                             (Ty::Str, "str") => true,
                             (Ty::Bool, "bool") => true,
                             (Ty::Range, "range") => true,
+                            (Ty::Int(k), n) => sloth_frontend::ty::IntKind::from_name(n) == Some(*k),
                             _ => false,
                         };
                         // patch 42: an optional word is a runtime box-or-nil —
@@ -695,6 +711,8 @@ impl ModEmitter {
                 (r, ut)
             }
             ExprNode::Arith { op, lhs, rhs } => {
+                let lit_l = matches!(lhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
+                let lit_r = matches!(rhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
                 let (a, at) = self.emit_expr(fw, lhs);
                 let (a, at) = self.unwrap_opt_word(fw, &a, at);
                 let (b, bt) = self.emit_expr(fw, rhs);
@@ -709,11 +727,11 @@ impl ModEmitter {
                         | ArithOp::BitXor
                         | ArithOp::Shl
                         | ArithOp::Shr
-                ) && !(matches!(self.r.get(at), Ty::I64) && matches!(self.r.get(bt), Ty::I64))
+                ) && !(self.is_int_like(at) && self.is_int_like(bt))
                 {
                     self.err(
                         &e.pos,
-                        "bitwise operators require `int` operands".to_string(),
+                        "bitwise operators require integer operands".to_string(),
                     );
                     let z = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : i64", z));
@@ -795,22 +813,59 @@ impl ModEmitter {
                     let r = emit_enc_f(fw, &rf);
                     return (r, self.r.mk(Ty::F64));
                 }
-                // int route: decode both sides, compute raw, encode once
-                // (mul/div/mod must decode; add/sub stay algebraic but we
-                // keep the uniform decode for simpler correctness)
+                // int route: unify the operand integer surfaces (an `int`
+                // literal adopts the other side's fixed width), truncate both
+                // operands to that width, then compute signed/unsigned per the
+                // shared surface and truncate the result back.
+                let rty = if self.is_int_like(at) && self.is_int_like(bt) {
+                    match self.unify_int(at, lit_l, bt, lit_r) {
+                        Some(t) => t,
+                        None => {
+                            let an = sloth_frontend::ty::ty_name(self.r.get(at));
+                            let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+                            self.err_diff(&e.pos, "arithmetic operand", &an, &bn);
+                            let z = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                            return (z, self.r.mk(Ty::I64));
+                        }
+                    }
+                } else {
+                    self.r.mk(Ty::I64)
+                };
+                let a = self.coerce_int_word(fw, &a, rty);
+                let b = self.coerce_int_word(fw, &b, rty);
+                let uns = self.is_unsigned_int(rty);
                 let ad = emit_dec_int(fw, &a);
                 let bd = emit_dec_int(fw, &b);
                 let ao = match op {
                     ArithOp::Add => "arith.addi",
                     ArithOp::Sub => "arith.subi",
                     ArithOp::Mul => "arith.muli",
-                    ArithOp::Div => "arith.divsi",
-                    ArithOp::Mod => "arith.remsi",
+                    ArithOp::Div => {
+                        if uns {
+                            "arith.divui"
+                        } else {
+                            "arith.divsi"
+                        }
+                    }
+                    ArithOp::Mod => {
+                        if uns {
+                            "arith.remui"
+                        } else {
+                            "arith.remsi"
+                        }
+                    }
                     ArithOp::BitAnd => "arith.andi",
                     ArithOp::BitOr => "arith.ori",
                     ArithOp::BitXor => "arith.xori",
                     ArithOp::Shl => "arith.shli",
-                    ArithOp::Shr => "arith.shrsi",
+                    ArithOp::Shr => {
+                        if uns {
+                            "arith.shrui"
+                        } else {
+                            "arith.shrsi"
+                        }
+                    }
                 };
                 if matches!(op, ArithOp::Div | ArithOp::Mod) {
                     // design §5.5: integer divide/modulo by zero is a panic.
@@ -866,12 +921,14 @@ impl ModEmitter {
                         rw, resslot, lz
                     ));
                     let r = emit_enc_int(fw, &rw);
-                    return (r, self.r.mk(Ty::I64));
+                    let r = self.coerce_int_word(fw, &r, rty);
+                    return (r, rty);
                 }
                 let rr = fw.v();
                 fw.op(&format!("    {} = {} {}, {} : i64", rr, ao, ad, bd));
                 let r = emit_enc_int(fw, &rr);
-                (r, self.r.mk(Ty::I64))
+                let r = self.coerce_int_word(fw, &r, rty);
+                (r, rty)
             }
             ExprNode::Pipe { lhs, rhs } => {
                 // x |> f  ≡ f(x); x |> f(a, b) ≡ f(a, b, x) — x goes last
@@ -915,7 +972,9 @@ impl ModEmitter {
                 }
                 let (b, bt) = self.emit_expr(fw, rhs);
                 let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
-                return self.emit_binop(fw, op, a, b, at, bt, &e.pos);
+                let lit_l = matches!(lhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
+                let lit_r = matches!(rhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
+                return self.emit_binop(fw, op, a, b, at, bt, lit_l, lit_r, &e.pos);
             }
             ExprNode::Un { op, expr } => {
                 let (v, t) = self.emit_expr(fw, expr);
@@ -955,7 +1014,9 @@ impl ModEmitter {
                         fw.op(&format!("    {} = arith.constant 0 : i64", zi));
                         let nr = fw.v();
                         fw.op(&format!("    {} = arith.subi {}, {} : i64", nr, zi, vd));
-                        (emit_enc_int(fw, &nr), t)
+                        let r = emit_enc_int(fw, &nr);
+                        let r = self.coerce_int_word(fw, &r, t);
+                        (r, t)
                     }
                     UnOp::Not => {
                         // compute `1 - dec(w)` in raw ints, then encode once:
@@ -969,8 +1030,8 @@ impl ModEmitter {
                     }
                     UnOp::BitNot => {
                         // int-only: `~x` = decode, xor with -1, encode
-                        if !matches!(self.r.get(t), Ty::I64) {
-                            self.err(&e.pos, "`~` requires an `int` operand".to_string());
+                        if !self.is_int_like(t) {
+                            self.err(&e.pos, "`~` requires an integer operand".to_string());
                             let z = fw.v();
                             fw.op(&format!("    {} = arith.constant 0 : i64", z));
                             return (z, self.r.mk(Ty::I64));
@@ -980,7 +1041,9 @@ impl ModEmitter {
                         fw.op(&format!("    {} = arith.constant -1 : i64", m1));
                         let r2 = fw.v();
                         fw.op(&format!("    {} = arith.xori {}, {} : i64", r2, vd, m1));
-                        (emit_enc_int(fw, &r2), t)
+                        let r = emit_enc_int(fw, &r2);
+                        let r = self.coerce_int_word(fw, &r, t);
+                        (r, t)
                     }
                 }
             }
@@ -1072,6 +1135,8 @@ impl ModEmitter {
         b: String,
         at: TyId,
         bt: TyId,
+        lit_l: bool,
+        lit_r: bool,
         pos: &Pos,
     ) -> (String, TyId) {
         let cmp_ty_id = self.r.mk(Ty::Bool);
@@ -1174,13 +1239,57 @@ impl ModEmitter {
             let z = fw.v();
             let mk = fw.v();
             fw.op(&format!("    {} = arith.constant 0 : i64", mk));
+            // unify integer surfaces (an `int` literal adopts the other side's
+            // fixed width) and compare at the shared width with signed vs
+            // unsigned predicates
+            let (a, b, uns) = if self.is_int_like(at) && self.is_int_like(bt) {
+                match self.unify_int(at, lit_l, bt, lit_r) {
+                    Some(t) => (
+                        self.coerce_int_word(fw, &a, t),
+                        self.coerce_int_word(fw, &b, t),
+                        self.is_unsigned_int(t),
+                    ),
+                    None => {
+                        let an = sloth_frontend::ty::ty_name(self.r.get(at));
+                        let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+                        self.err_diff(pos, "comparison operand", &an, &bn);
+                        return (z, cmp_ty_id);
+                    }
+                }
+            } else {
+                (a, b, false)
+            };
             let pr = match op {
                 BinOp::EqEq => "eq",
                 BinOp::NotEq => "ne",
-                BinOp::Lt => "slt",
-                BinOp::Le => "sle",
-                BinOp::Gt => "sgt",
-                BinOp::Ge => "sge",
+                BinOp::Lt => {
+                    if uns {
+                        "ult"
+                    } else {
+                        "slt"
+                    }
+                }
+                BinOp::Le => {
+                    if uns {
+                        "ule"
+                    } else {
+                        "sle"
+                    }
+                }
+                BinOp::Gt => {
+                    if uns {
+                        "ugt"
+                    } else {
+                        "sgt"
+                    }
+                }
+                BinOp::Ge => {
+                    if uns {
+                        "uge"
+                    } else {
+                        "sge"
+                    }
+                }
                 BinOp::And => {
                     let r2 = fw.v();
                     fw.op(&format!("    {} = arith.andi {}, {} : i64", r2, a, b));
@@ -1389,7 +1498,7 @@ impl ModEmitter {
                 if anyf {
                     for (v, t) in evs.iter_mut().zip(ets.iter_mut()) {
                         if !self.is_float(*t) {
-                            *v = iw_to_f64_word(fw, v);
+                            *v = self.int_to_f64_word(fw, v, *t);
                             *t = self.r.mk(Ty::F64);
                         }
                     }
@@ -1426,7 +1535,7 @@ impl ModEmitter {
                     if let Some(he) = hint_el {
                         if self.weak_inner(he).is_some()
                             || self.opt_inner(he).is_some()
-                            || matches!(self.r.get(he), Ty::Dyn(_) | Ty::Any)
+                            || matches!(self.r.get(he), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
                         {
                             for i in 0..evs.len() {
                                 if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
@@ -1596,7 +1705,7 @@ impl ModEmitter {
                 if anyf {
                     for x in vevs.iter_mut() {
                         if !self.is_float(x.1) {
-                            x.0 = iw_to_f64_word(fw, &x.0);
+                            x.0 = self.int_to_f64_word(fw, &x.0, x.1);
                             x.1 = self.r.mk(Ty::F64);
                         }
                     }
@@ -1611,7 +1720,7 @@ impl ModEmitter {
                     if let Some(hv) = hint_v {
                         if self.weak_inner(hv).is_some()
                             || self.opt_inner(hv).is_some()
-                            || matches!(self.r.get(hv), Ty::Dyn(_) | Ty::Any)
+                            || matches!(self.r.get(hv), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
                         {
                             for x in vevs.iter_mut() {
                                 if self.r.get(x.1).clone() != self.r.get(hv).clone() {
@@ -2273,7 +2382,7 @@ impl ModEmitter {
                         if fel && !self.is_float(at) {
                             // design §2.1: no implicit int -> float on push
                             self.err_diff(pos, "push element", "float", "int");
-                            v = iw_to_f64_word(fw, &v);
+                            v = self.int_to_f64_word(fw, &v, at);
                         }
                         // store-face coercion: an Opt/Weak element slot boxes a
                         // bare produced value (matches the `a[i] = v` route);
@@ -2282,6 +2391,9 @@ impl ModEmitter {
                         if self.opt_inner(elid).is_some() || self.weak_inner(elid).is_some() {
                             let (vc, _tc) = self.coerce_word_to(fw, &v, at, elid);
                             v = vc;
+                        }
+                        if self.is_int_like(elid) && self.is_int_like(at) {
+                            v = self.coerce_int_word(fw, &v, elid);
                         }
                         let callv = fw.v();
                         // rc patch C: the array slot owns ref-typed
@@ -2528,7 +2640,7 @@ impl ModEmitter {
                         if fels && !self.is_float(*t) {
                             // design §2.1: no implicit int -> float in variadics
                             self.err_diff(pos, "variadic argument", "float", "int");
-                            pv.push(iw_to_f64_word(fw, v));
+                            pv.push(self.int_to_f64_word(fw, v, *t));
                         } else if !fels && self.is_float(*t) {
                             self.err(
                                 pos,
@@ -2649,6 +2761,22 @@ impl ModEmitter {
                 fw.op(&format!("    {} = func.call @sloth_rc_drops() : () -> i64", r));
                 (r, self.r.mk(Ty::I64))
             }
+            // explicit fixed-width integer conversion: `int8(x)`, `uint32(x)`, …
+            other
+                if !argv.is_empty()
+                    && sloth_frontend::ty::IntKind::from_name(other).is_some() =>
+            {
+                let k = sloth_frontend::ty::IntKind::from_name(other).unwrap();
+                let to = self.r.mk(Ty::Int(k));
+                let (v, t) = argv[0].clone();
+                let (v, t) = self.unwrap_opt_word(fw, &v, t);
+                let ts = self.r.get(t).clone();
+                let w = match ts {
+                    Ty::F64 => f64w_to_iw(fw, &v),
+                    _ => v,
+                };
+                (self.coerce_int_word(fw, &w, to), to)
+            }
             "int" if !argv.is_empty() => {
                 let (v, t) = argv[0].clone();
                 // patch 42: int(optional box) unwraps the payload (nil -> 0)
@@ -2678,8 +2806,8 @@ impl ModEmitter {
                         (v, self.r.mk(Ty::F64))
                     }
                     _ => {
-                        // int word -> f64 word
-                        (iw_to_f64_word(fw, &v), self.r.mk(Ty::F64))
+                        // int word -> f64 word (unsigned promotion for `uint`)
+                        (self.int_to_f64_word(fw, &v, t), self.r.mk(Ty::F64))
                     }
                 }
             }

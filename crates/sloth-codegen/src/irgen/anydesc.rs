@@ -33,11 +33,37 @@ pub(crate) const AK_CHANNEL: i64 = 16;
 pub(crate) const AK_MUTEX: i64 = 17;
 pub(crate) const AK_ATOMICINT: i64 = 18;
 pub(crate) const AK_ANY: i64 = 19;
+pub(crate) const AK_U64: i64 = 20;
+pub(crate) const AK_I8: i64 = 21;
+pub(crate) const AK_U8: i64 = 22;
+pub(crate) const AK_I16: i64 = 23;
+pub(crate) const AK_U16: i64 = 24;
+pub(crate) const AK_I32: i64 = 25;
+pub(crate) const AK_U32: i64 = 26;
 
 pub(crate) const FLAG_REF: i64 = 1;
 pub(crate) const FLAG_NILCAP: i64 = 2;
 
 pub(crate) const DESC_WORDS: usize = 11;
+
+/// `any` descriptor kind for a fixed-width integer surface
+pub(crate) fn ak_for_int(k: sloth_frontend::ty::IntKind) -> i64 {
+    use sloth_frontend::ty::IntKind::*;
+    match k {
+        U64 => AK_U64,
+        I8 => AK_I8,
+        U8 => AK_U8,
+        I16 => AK_I16,
+        U16 => AK_U16,
+        I32 => AK_I32,
+        U32 => AK_U32,
+    }
+}
+
+/// `any` descriptor kind for a fixed-width integer source spelling
+pub(crate) fn ak_for_int_name(n: &str) -> Option<i64> {
+    sloth_frontend::ty::IntKind::from_name(n).map(ak_for_int)
+}
 
 impl ModEmitter {
     fn any_kind_of(&self, t: TyId) -> i64 {
@@ -45,6 +71,7 @@ impl ModEmitter {
             Ty::Unit => AK_UNIT,
             Ty::Bool => AK_BOOL,
             Ty::I64 => AK_I64,
+            Ty::Int(k) => ak_for_int(*k),
             Ty::F64 => AK_F64,
             Ty::Str => AK_STR,
             Ty::Range => AK_RANGE,

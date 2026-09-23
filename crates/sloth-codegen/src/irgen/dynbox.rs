@@ -24,6 +24,20 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// offset of a fixed-width kind beyond `uint` in the dyn builtin-kind space
+fn dyn_int_kind(k: sloth_frontend::ty::IntKind) -> i64 {
+    use sloth_frontend::ty::IntKind::*;
+    match k {
+        U64 => 0,
+        I8 => 1,
+        U8 => 2,
+        I16 => 3,
+        U16 => 4,
+        I32 => 5,
+        U32 => 6,
+    }
+}
+
 /// `Display`-family member?
 fn is_str_method(m: &str) -> bool {
     matches!(
@@ -51,10 +65,12 @@ fn cmp_op(m: &str) -> Option<i64> {
 }
 
 impl ModEmitter {
-    /// word-plane kind of a builtin value type: 0 int, 1 float, 2 bool
+    /// word-plane kind of a builtin value type: 0 int, 1 float, 2 bool,
+    /// 3 uint, 4 int8, 5 uint8, 6 int16, 7 uint16, 8 int32, 9 uint32
     pub(crate) fn value_kind(&self, t: TyId) -> Option<i64> {
         match self.r.get(t) {
             Ty::I64 => Some(0),
+            Ty::Int(k) => Some(3 + dyn_int_kind(*k)),
             Ty::F64 => Some(1),
             Ty::Bool => Some(2),
             _ => None,
@@ -64,9 +80,8 @@ impl ModEmitter {
     /// runtime class id reserved for a builtin kind (mirrors rt/builtins.rs)
     pub(crate) fn value_cls_id(kind: i64) -> i64 {
         match kind {
-            1 => -2,
-            2 => -3,
-            _ => -1,
+            0 => -1,
+            n => -1 - n,
         }
     }
 

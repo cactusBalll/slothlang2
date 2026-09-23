@@ -166,6 +166,8 @@ pub enum SimpleType {
     Float,
     Str,
     Range,
+    /// fixed-width integer (`uint`/`int32`/`uint8`/…)
+    FixedInt(crate::ty::IntKind),
     Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
@@ -233,6 +235,8 @@ pub struct Expr {
 #[derive(Debug, Clone)]
 pub enum ExprNode {
     Int(i64),
+    /// unsigned integer literal (spelled `123u` or a decimal > `i64::MAX`)
+    UInt(u64),
     Float(f64),
     Bool(bool),
     Nil,

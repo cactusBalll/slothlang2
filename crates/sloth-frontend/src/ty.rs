@@ -5,11 +5,64 @@ use std::collections::BTreeMap;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct TyId(pub u32);
 
+/// Fixed-width integer family (beyond the default `int` = signed 64-bit).
+/// `uint` is `U64`; the rest are the explicitly-sized signed/unsigned types.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum IntKind {
+    U64,
+    I32,
+    U32,
+    I16,
+    U16,
+    I8,
+    U8,
+}
+
+impl IntKind {
+    pub fn bits(self) -> u32 {
+        match self {
+            IntKind::U64 => 64,
+            IntKind::I32 | IntKind::U32 => 32,
+            IntKind::I16 | IntKind::U16 => 16,
+            IntKind::I8 | IntKind::U8 => 8,
+        }
+    }
+    pub fn signed(self) -> bool {
+        matches!(self, IntKind::I32 | IntKind::I16 | IntKind::I8)
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            IntKind::U64 => "uint",
+            IntKind::I32 => "int32",
+            IntKind::U32 => "uint32",
+            IntKind::I16 => "int16",
+            IntKind::U16 => "uint16",
+            IntKind::I8 => "int8",
+            IntKind::U8 => "uint8",
+        }
+    }
+    /// look up a fixed-width integer type by source spelling
+    pub fn from_name(n: &str) -> Option<IntKind> {
+        Some(match n {
+            "uint" | "uint64" | "u64" => IntKind::U64,
+            "int32" | "i32" => IntKind::I32,
+            "uint32" | "u32" => IntKind::U32,
+            "int16" | "i16" => IntKind::I16,
+            "uint16" | "u16" => IntKind::U16,
+            "int8" | "i8" => IntKind::I8,
+            "uint8" | "u8" => IntKind::U8,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     Unit,
     Bool,
     I64,
+    /// fixed-width integer (signed/unsigned, width < 64 or unsigned 64)
+    Int(IntKind),
     F64,
     Str,
     Range,
@@ -169,6 +222,7 @@ fn fmt_ty(t: &Ty) -> String {
         Ty::Unit => "unit".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::I64 => "i64".to_string(),
+        Ty::Int(k) => format!("i{}:{}", k.bits(), if k.signed() { "s" } else { "u" }),
         Ty::F64 => "f64".to_string(),
         Ty::Str => "str".to_string(),
         Ty::Range => "range".to_string(),
@@ -199,11 +253,21 @@ fn fmt_ty(t: &Ty) -> String {
     }
 }
 
+/// integer surface info `(bits, signed)`; `None` for non-integer types
+pub fn int_info(t: &Ty) -> Option<(u32, bool)> {
+    match t {
+        Ty::I64 => Some((64, true)),
+        Ty::Int(k) => Some((k.bits(), k.signed())),
+        _ => None,
+    }
+}
+
 pub fn ty_name(t: &Ty) -> String {
     match t {
         Ty::Unit => "unit".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::I64 => "int".to_string(),
+        Ty::Int(k) => k.name().to_string(),
         Ty::F64 => "float".to_string(),
         Ty::Str => "str".to_string(),
         Ty::Range => "range".to_string(),

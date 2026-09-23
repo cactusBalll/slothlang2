@@ -454,6 +454,7 @@ pub(crate) fn walk_ids_expr(
             }
         }
         ExprNode::Int(_)
+        | ExprNode::UInt(_)
         | ExprNode::Float(_)
         | ExprNode::Bool(_)
         | ExprNode::Nil

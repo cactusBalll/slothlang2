@@ -58,6 +58,13 @@ pub const AK_CHANNEL: i64 = 16;
 pub const AK_MUTEX: i64 = 17;
 pub const AK_ATOMICINT: i64 = 18;
 pub const AK_ANY: i64 = 19;
+pub const AK_U64: i64 = 20;
+pub const AK_I8: i64 = 21;
+pub const AK_U8: i64 = 22;
+pub const AK_I16: i64 = 23;
+pub const AK_U16: i64 = 24;
+pub const AK_I32: i64 = 25;
+pub const AK_U32: i64 = 26;
 
 #[inline]
 unsafe fn kind_of(desc: i64) -> i64 {
@@ -341,6 +348,11 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
     match k {
         AK_UNIT => append(p, b"()"),
         AK_I64 => append_i(p, dec_i(word)),
+        AK_I8 | AK_I16 | AK_I32 | AK_U8 | AK_U16 | AK_U32 => append_i(p, dec_i(word)),
+        AK_U64 => {
+            let s = format!("{}", word as u64);
+            strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        }
         AK_F64 => append_f(p, f64::from_bits(word as u64)),
         AK_BOOL => append(p, if word != 0 { b"true" } else { b"false" }),
         AK_STR => {
@@ -363,7 +375,7 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
             let elem = child(desc, D_ELEM);
             if word == 0 {
                 append(p, b"nil");
-            } else if elem != 0 && matches!(kind_of(elem), AK_I64 | AK_F64 | AK_BOOL) {
+            } else if elem != 0 && matches!(kind_of(elem), AK_I64 | AK_U64 | AK_F64 | AK_BOOL) {
                 let payload = sloth_box_get(word);
                 return render(w_ref(p as usize), elem, payload);
             } else {

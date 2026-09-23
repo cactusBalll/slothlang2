@@ -215,6 +215,17 @@ pub extern "C" fn sloth_str_push_i(b_w: i64, v_w: i64) -> i64 {
     }
 }
 
+/// push a u64 rendered in decimal (raw word reinterpreted unsigned)
+#[no_mangle]
+pub extern "C" fn sloth_str_push_u(b_w: i64, v_w: i64) -> i64 {
+    unsafe {
+        let s = format!("{}", v_w as u64);
+        let p = strb_or_new(b_w);
+        strb_append(p, s.as_ptr() as *const libc::c_void, s.len());
+        w_ref(p as usize)
+    }
+}
+
 /// push an f64 rendered with one decimal (raw f64 route: callers decode)
 #[no_mangle]
 pub extern "C" fn sloth_str_push_f(b_w: i64, v: f64) -> i64 {

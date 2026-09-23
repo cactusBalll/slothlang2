@@ -31,6 +31,7 @@ impl ModEmitter {
         match st {
             SimpleType::Bool => self.r.mk(Ty::Bool),
             SimpleType::Int => self.r.mk(Ty::I64),
+            SimpleType::FixedInt(k) => self.r.mk(Ty::Int(*k)),
             SimpleType::Float => self.r.mk(Ty::F64),
             SimpleType::Str => self.r.mk(Ty::Str),
             SimpleType::Range => self.r.mk(Ty::Range),
@@ -81,7 +82,10 @@ impl ModEmitter {
 impl ModEmitter {
     pub(crate) fn ty_named(&mut self, n: &str, a: Vec<TyId>) -> TyId {
         match n {
-            "int" | "i64" => self.r.mk(Ty::I64),
+            "int" | "i64" | "int64" => self.r.mk(Ty::I64),
+            n if sloth_frontend::ty::IntKind::from_name(n).is_some() => {
+                self.r.mk(Ty::Int(sloth_frontend::ty::IntKind::from_name(n).unwrap()))
+            }
             "float" | "f64" => self.r.mk(Ty::F64),
             "bool" => self.r.mk(Ty::Bool),
             "str" => self.r.mk(Ty::Str),
@@ -233,6 +237,71 @@ impl ModEmitter {
     pub fn is_str(&self, t: TyId) -> bool {
         matches!(self.r.get(t), Ty::Str)
     }
+    /// integer surface info `(bits, signed)`; `int` is `(64, true)`
+    pub fn int_info(&self, t: TyId) -> Option<(u32, bool)> {
+        sloth_frontend::ty::int_info(self.r.get(t))
+    }
+    pub fn is_int_like(&self, t: TyId) -> bool {
+        self.int_info(t).is_some()
+    }
+    pub fn is_unsigned_int(&self, t: TyId) -> bool {
+        matches!(self.int_info(t), Some((_, false)))
+    }
+    /// common integer surface for a binary op: equal surfaces unify; an `int`
+    /// literal adopts the other operand's fixed-width surface
+    pub(crate) fn unify_int(&self, at: TyId, lit_a: bool, bt: TyId, lit_b: bool) -> Option<TyId> {
+        if at == bt {
+            return Some(at);
+        }
+        if self.is_int_like(at) && self.is_int_like(bt) {
+            if lit_b && matches!(self.r.get(at), Ty::Int(_)) {
+                return Some(at);
+            }
+            if lit_a && matches!(self.r.get(bt), Ty::Int(_)) {
+                return Some(bt);
+            }
+        }
+        None
+    }
+    /// convert an integer word to an f64 word, choosing unsigned promotion
+    /// for `uint` (whose bit pattern reads negative as i64)
+    pub(crate) fn int_to_f64_word(&mut self, fw: &mut FnWalk, v: &str, src: TyId) -> String {
+        if matches!(self.r.get(src), Ty::Int(sloth_frontend::ty::IntKind::U64)) {
+            iw_to_f64_word_u(fw, v)
+        } else {
+            iw_to_f64_word(fw, v)
+        }
+    }
+    /// truncate/sign-extend an i64 word to a fixed-width integer surface
+    /// (no-op for `int`/`i64`/`uint64` where the full 64 bits are kept)
+    pub(crate) fn coerce_int_word(&mut self, fw: &mut FnWalk, v: &str, to: TyId) -> String {
+        let (bits, signed) = match self.int_info(to) {
+            Some(x) => x,
+            None => return v.to_string(),
+        };
+        if bits >= 64 {
+            return v.to_string();
+        }
+        if signed {
+            // sign-extend the low `bits`: (v << (64-bits)) >>a (64-bits)
+            let sh = (64 - bits) as i64;
+            let a = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", a, sh));
+            let l = fw.v();
+            fw.op(&format!("    {} = arith.shli {}, {} : i64", l, v, a));
+            let r = fw.v();
+            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, l, a));
+            r
+        } else {
+            // zero-extend: mask the low `bits`
+            let mask: i64 = ((1u64 << bits) - 1) as i64;
+            let m = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", m, mask));
+            let r = fw.v();
+            fw.op(&format!("    {} = arith.andi {}, {} : i64", r, v, m));
+            r
+        }
+    }
     pub fn is_unit(&self, t: TyId) -> bool {
         matches!(self.r.get(t), Ty::Unit)
     }
@@ -254,7 +323,7 @@ impl ModEmitter {
         match self.r.get(t).clone() {
             Ty::Opt(e) => match self.r.get(e).clone() {
                 Ty::F64 => Some((e, true)),
-                Ty::I64 | Ty::Bool => Some((e, false)),
+                Ty::I64 | Ty::Bool | Ty::Int(_) => Some((e, false)),
                 _ => None,
             },
             _ => None,
@@ -408,7 +477,7 @@ impl ModEmitter {
         from: TyId,
         to: TyId,
     ) -> (String, TyId) {
-        let (_inner, fli) = match self.opt_inner(to) {
+        let (inner, fli) = match self.opt_inner(to) {
             Some(x) => x,
             None => return (v.to_string(), from),
         };
@@ -416,10 +485,12 @@ impl ModEmitter {
         if matches!(froms, Ty::Unit) || from == to {
             return (v.to_string(), to);
         }
-        if matches!(froms, Ty::I64 | Ty::Bool) {
+        if matches!(froms, Ty::I64 | Ty::Bool | Ty::Int(_)) {
             // int/bool word boxes as-is; into a float? surface promote first
             let payload = if fli {
-                iw_to_f64_word(fw, v)
+                self.int_to_f64_word(fw, v, from)
+            } else if matches!(self.r.get(inner), Ty::Int(_)) {
+                self.coerce_int_word(fw, v, inner)
             } else {
                 v.to_string()
             };
@@ -497,7 +568,7 @@ impl ModEmitter {
                     }
                     if self.opt_inner(params[i].1).is_some()
                         || self.weak_inner(params[i].1).is_some()
-                        || matches!(self.r.get(params[i].1), Ty::Dyn(_) | Ty::Any)
+                        || matches!(self.r.get(params[i].1), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
                     {
                         return self
                             .coerce_word_to(fw, &argv[i].0, argv[i].1, params[i].1)
@@ -518,6 +589,10 @@ impl ModEmitter {
         from: TyId,
         to: TyId,
     ) -> (String, TyId) {
+        // narrow/widen between integer surfaces: truncate at the store face
+        if matches!(self.r.get(to), Ty::Int(_)) && self.is_int_like(from) {
+            return (self.coerce_int_word(fw, v, to), to);
+        }
         // auto-box a builtin value into a `dyn Trait` surface
         if let Ty::Dyn(tname) = self.r.get(to).clone() {
             if self.value_kind(from).is_some() && self.value_impls_trait(&tname) {
@@ -611,9 +686,14 @@ impl ModEmitter {
             (Ty::Dyn(_), Ty::Named(..)) => true,
             // builtin value types auto-box into a dyn surface when the trait
             // is predefined (or has no methods to satisfy)
-            (Ty::Dyn(t), Ty::I64) | (Ty::Dyn(t), Ty::F64) | (Ty::Dyn(t), Ty::Bool) => {
-                self.value_impls_trait(t)
-            }
+            (Ty::Dyn(t), Ty::I64)
+            | (Ty::Dyn(t), Ty::Int(_))
+            | (Ty::Dyn(t), Ty::F64)
+            | (Ty::Dyn(t), Ty::Bool) => self.value_impls_trait(t),
+            // integer surfaces are mutually assignable (widening/truncation is
+            // inserted at the store face by `coerce_int_word`)
+            (Ty::I64, Ty::Int(_)) | (Ty::Int(_), Ty::I64) => true,
+            (Ty::Int(_), Ty::Int(_)) => true,
             // function surfaces compare structurally (lambda metadata — the
             // closure frame symbol — must not defeat compatibility)
             (Ty::Fn(x), Ty::Fn(y)) => {
@@ -713,6 +793,7 @@ impl ModEmitter {
             Ty::Unit => "unit".to_string(),
             Ty::Bool => "bool".to_string(),
             Ty::I64 => "int".to_string(),
+            Ty::Int(k) => k.name().to_string(),
             Ty::F64 => "float".to_string(),
             Ty::Str => "str".to_string(),
             Ty::Range => "range".to_string(),
@@ -804,7 +885,7 @@ impl ModEmitter {
         let mut vty = vty;
         if self.opt_inner(dt).is_some()
             || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any)
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
         {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
@@ -815,7 +896,7 @@ impl ModEmitter {
                 fw.assign(name, &v, true);
             } else {
                 // int word -> f64 word (slot storage is always the word plane)
-                let cv = iw_to_f64_word(fw, &v);
+                let cv = self.int_to_f64_word(fw, &v, vty);
                 fw.assign(name, &cv, true);
             }
             return;
@@ -910,7 +991,7 @@ impl ModEmitter {
         let mut vty = vty;
         if self.opt_inner(dt).is_some()
             || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any)
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
         {
             let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
             v = vc;
@@ -920,7 +1001,7 @@ impl ModEmitter {
             let cv = if self.is_float(vty) {
                 v.clone()
             } else {
-                iw_to_f64_word(fw, &v)
+                self.int_to_f64_word(fw, &v, vty)
             };
             self.store_global(fw, gsym, dt, &cv);
             return;
@@ -988,8 +1069,20 @@ impl ModEmitter {
     pub(crate) fn is_builtin_type_name(n: &str) -> bool {
         matches!(
             n,
-            "int" | "i64" | "float" | "f64" | "str" | "bool" | "range"
-        )
+            "int" | "i64" | "int64" | "float" | "f64" | "str" | "bool" | "range"
+        ) || sloth_frontend::ty::IntKind::from_name(n).is_some()
+    }
+
+    /// resolved `Ty` for a builtin type surface name (used by `is` narrowing)
+    pub(crate) fn builtin_name_ty(n: &str) -> Option<Ty> {
+        Some(match n {
+            "int" | "i64" | "int64" => Ty::I64,
+            "float" | "f64" => Ty::F64,
+            "bool" => Ty::Bool,
+            "str" => Ty::Str,
+            "range" => Ty::Range,
+            other => Ty::Int(sloth_frontend::ty::IntKind::from_name(other)?),
+        })
     }
 
     /// map-key hash method (patch #35): the class chain's `hash()`/`hashKey`/
@@ -1017,9 +1110,14 @@ impl ModEmitter {
     /// traits; user classes need the impl chain; Opt looks through)
     pub(crate) fn satisfies_bound(&self, t: TyId, bound: &str) -> bool {
         match self.r.get(t).clone() {
-            Ty::I64 | Ty::F64 | Ty::Str | Ty::Bool | Ty::Range | Ty::Array(_) | Ty::Map(_, _) => {
-                Self::is_predef_trait(bound)
-            }
+            Ty::I64
+            | Ty::Int(_)
+            | Ty::F64
+            | Ty::Str
+            | Ty::Bool
+            | Ty::Range
+            | Ty::Array(_)
+            | Ty::Map(_, _) => Self::is_predef_trait(bound),
             Ty::Named(cls, _) => self.impl_chain_has(&cls, bound),
             Ty::Opt(e) => self.satisfies_bound(e, bound),
             // a `dyn T` value carries exactly trait T's surface

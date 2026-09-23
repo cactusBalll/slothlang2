@@ -54,6 +54,7 @@ impl StrParts {
 pub enum Tok {
     // literals
     Int(i64),
+    UInt(u64),
     Float(f64),
     True,
     False,
@@ -285,14 +286,31 @@ impl Lexer {
             }
         }
         let s: String = self.chars[start..self.ptr].iter().collect();
+        // `u`/`U` suffix: force an unsigned literal (must not start an ident)
+        let mut unsigned = false;
+        if !is_float && matches!(self.peek(), Some('u') | Some('U')) {
+            if !matches!(self.peekn(1), Some(c) if c.is_alphanumeric() || c == '_') {
+                self.advance();
+                unsigned = true;
+            }
+        }
         if is_float {
             let f: f64 = s.parse().map_err(|_| self.err("invalid float literal"))?;
             Ok(Tok::Float(f))
+        } else if !unsigned {
+            match s.parse::<i64>() {
+                Ok(i) => Ok(Tok::Int(i)),
+                Err(_) => match s.parse::<u64>() {
+                    // a decimal beyond i64::MAX can only be an unsigned word
+                    Ok(u) => Ok(Tok::UInt(u)),
+                    Err(_) => Err(self.err("int literal out of range")),
+                },
+            }
         } else {
-            let i: i64 = s
+            let u: u64 = s
                 .parse()
-                .map_err(|_| self.err("int literal out of range"))?;
-            Ok(Tok::Int(i))
+                .map_err(|_| self.err("unsigned int literal out of range"))?;
+            Ok(Tok::UInt(u))
         }
     }
 

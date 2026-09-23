@@ -339,11 +339,14 @@ impl Parser {
         };
         let t = match name.as_str() {
             "unit" => Type::Unit,
-            "int" | "i64" => Type::prim(Prim::Int),
+            "int" | "i64" | "int64" => Type::prim(Prim::Int),
             "float" | "f64" => Type::prim(Prim::Float),
             "bool" => Type::prim(Prim::Bool),
             "str" => Type::prim(Prim::Str),
             "range" => Type::prim(Prim::Range),
+            other if crate::ty::IntKind::from_name(other).is_some() => {
+                Type::Simple(SimpleType::FixedInt(crate::ty::IntKind::from_name(other).unwrap()))
+            }
             "any" => Type::Simple(SimpleType::Any),
             "Array" => {
                 self.expect(Tok::Lt, "'<'")?;
@@ -1179,6 +1182,13 @@ impl Parser {
                 Ok(Expr {
                     pos,
                     node: ExprNode::Int(v),
+                })
+            }
+            Tok::UInt(v) => {
+                self.ptr += 1;
+                Ok(Expr {
+                    pos,
+                    node: ExprNode::UInt(v),
                 })
             }
             Tok::Float(v) => {

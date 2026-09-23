@@ -47,7 +47,7 @@ impl ModEmitter {
 
     /// value element types ride a boxed optional on `recv` (nil = closed)
     fn chan_boxed(&self, e: TyId) -> bool {
-        matches!(self.r.get(e), Ty::I64 | Ty::F64 | Ty::Bool)
+        matches!(self.r.get(e), Ty::I64 | Ty::Int(_) | Ty::F64 | Ty::Bool)
     }
 
     /// `thread.spawn(f: (T) -> R, arg: T): JoinHandle<R>`

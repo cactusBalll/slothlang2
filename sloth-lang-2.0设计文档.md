@@ -73,6 +73,7 @@ sloth-lang 2.0（下称 sloth2）的总体目标：
 | 单元 | `unit` | 空类型，替代 1.0 中"无返回值函数隐式返回 nil" |
 | 布尔 | `bool` | `true` / `false`，**取消** 1.0 的"任意值隐式转 bool" |
 | 数值 | `int`（64 bit）、`float`（f64） | 新增 `int`。1.0 仅有 f64，但静态语言中数组索引、取余、位语义需要整数。`【已过时·v1.0】` 原为 `int`=i64、`float`=f64，现行实现与其一致（去 tag 后满精度） |
+| 定长整数 | `uint`（u64）、`int8`/`int16`/`int32`/`int64`、`uint8`/`uint16`/`uint32`/`uint64` | 显式位宽/符号的整数；短名 `i8`/`u8`/… 为别名，`int64`=`int`。共用 i64 词面，算术按位宽回绕，无符号类型使用无符号除法/取余/右移/比较；显式转换 `int8(x)` 等，`int` 字面量可自动采用另一操作数的定长类型。无符号字面量写 `5u`，超出 `i64::MAX` 的十进制字面量自动为 `uint`；`is int8`/`is uint` 等按宽度精确判定，`float(uint)` 走无符号提升 |
 | 字符串 | `str` | UTF-8 不可变字符串；**无 string interning**，`==` 按内容比较 |
 | 范围 | `range` | 由 `..`、`..=` 构造，元素类型 `int` |
 | 数组 | `Array<T>` | 同构动态数组，替代 1.0 的异构数组 |
@@ -206,7 +207,7 @@ func announce(s: Speaker): unit { s.say(); }
 | 外部函数/类型 | 无 | 新增 `extern func ...;` / `extern type Foo;`（见 §5.4） |
 | 显式泛型调用 | 无 | 新增 `f<A, B>(args)` |
 | 张量类型 | 无 | 新增 `Tensor<T, R>`、`Weak<T>`（见 §5.6/§5.1） |
-| 关键字 | 19 个 | **25 个保留字**：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`；`int float bool str unit range Array Map Weak Tensor Fiber dyn extern` 为上下文关键字，仅在类型/声明位置有特殊含义（见 §3.9） |
+| 关键字 | 19 个 | **25 个保留字**：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`；`int float bool str unit range int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 i8 i16 i32 i64 u8 u16 u32 u64 Array Map Weak Tensor Fiber dyn extern` 为上下文关键字，仅在类型/声明位置有特殊含义（见 §3.9） |
 
 ### 3.2 变量与常量
 
@@ -372,6 +373,9 @@ trait_method    ::= 'func' IDENT '(' params ')' ':' type ( block | ';' )
 
 type            ::= type_base '?'?                    (* T?? 报错 *)
 type_base       ::= 'unit' | 'int' | 'float' | 'bool' | 'str' | 'range'
+                  | 'uint' | 'int8' | 'int16' | 'int32' | 'int64'
+                  | 'uint8' | 'uint16' | 'uint32' | 'uint64'
+                  | 'i8' | 'i16' | 'i32' | 'i64' | 'u8' | 'u16' | 'u32' | 'u64'
                   | 'Array' '<' type '>'
                   | 'Map' '<' type ',' type '>'
                   | 'Weak' '<' type '>'
@@ -418,7 +422,7 @@ postfix         ::= primary ( '(' args? ')'
                           | '[' expr ']'
                           | '.' IDENT
                           | '<' type ( ',' type )* '>' '(' args? ')' )*
-primary         ::= INT | FLOAT | STRING | 'true' | 'false' | 'nil'
+primary         ::= INT | UINT | FLOAT | STRING | 'true' | 'false' | 'nil'
                   | IDENT | 'this' | 'super'
                   | list | map | lambda | '(' expr ')'
 args            ::= expr ( ',' expr )*
@@ -429,7 +433,7 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 **词法要点**：`||` 空参数 lambda / `||` 逻辑或、`|` lambda 起始 / 位或、`|>` 管道、`?:` Elvis 均为独立 token；`<<`/`>>` 在解析期由相邻的两个 `Lt`/`Gt` 合并，以便 `Map<int, Array<int>>` 的泛型闭合不受影响；`?.` 已被词法识别（`QuestionDot`）但 parser 明确拒绝（可选链推迟）。
 
-关键字全集（**25 个保留字**）：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`。上下文关键字（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit range Array Map Weak Tensor dyn extern`。
+关键字全集（**25 个保留字**）：`and or not true false for var let if else while func nil return class super this break continue is pub trait impl dyn as`。上下文关键字（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit range int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 i8 i16 i32 i64 u8 u16 u32 u64 Array Map Weak Tensor dyn extern`。
 
 ---
 

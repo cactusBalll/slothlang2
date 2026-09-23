@@ -37,7 +37,7 @@ impl ModEmitter {
     /// value payloads ride boxed optionals so a yielded word `0` never reads
     /// as completion nil
     fn fiber_boxed(&self, y: TyId) -> bool {
-        matches!(self.r.get(y), Ty::I64 | Ty::F64 | Ty::Bool)
+        matches!(self.r.get(y), Ty::I64 | Ty::Int(_) | Ty::F64 | Ty::Bool)
     }
 
     fn fiber_bail(&mut self, fw: &mut FnWalk, pos: &Pos, msg: String) -> (String, TyId) {

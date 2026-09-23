@@ -247,6 +247,7 @@ fn syn_ty_of(me: &ModEmitter, t: TyId) -> Option<Type> {
     match me.r.get(t).clone() {
         Ty::Bool => Some(Type::prim(Prim::Bool)),
         Ty::I64 => Some(Type::prim(Prim::Int)),
+        Ty::Int(k) => Some(Type::Simple(SimpleType::FixedInt(k))),
         Ty::F64 => Some(Type::prim(Prim::Float)),
         Ty::Str => Some(Type::prim(Prim::Str)),
         Ty::Range => Some(Type::prim(Prim::Range)),
@@ -334,6 +335,7 @@ fn plain_ty_name(t: &Type) -> String {
         Type::Simple(s) => match s {
             SimpleType::Bool => "bool".into(),
             SimpleType::Int => "int".into(),
+            SimpleType::FixedInt(k) => k.name().into(),
             SimpleType::Float => "float".into(),
             SimpleType::Str => "str".into(),
             SimpleType::Range => "range".into(),

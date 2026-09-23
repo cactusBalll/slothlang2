@@ -152,7 +152,7 @@ impl ModEmitter {
 
                         if df && !vf {
                             // promote the int word to an f64 word
-                            (iw_to_f64_word(fw, &v), dt)
+                            (self.int_to_f64_word(fw, &v, t), dt)
                         } else if !df && vf && self.opt_inner(dt).is_none()
                             && !matches!(self.r.get(dt), Ty::Any)
                         {
@@ -177,7 +177,14 @@ impl ModEmitter {
                                     &self.surface_name(&vts),
                                 );
                             }
-                            (v, t)
+                            // fixed-width integer binding: coerce the word to
+                            // the declared surface (and record it)
+                            if self.is_int_like(dt) && self.is_int_like(t) {
+                                let vc = self.coerce_int_word(fw, &v, dt);
+                                (vc, dt)
+                            } else {
+                                (v, t)
+                            }
                         }
                     }
                     None => (v, t),
@@ -306,7 +313,14 @@ impl ModEmitter {
                                     enc_i_lit(idx as i64)
                                 ));
                                 let fty = self.field_type(&cur, f);
-                                self.check_field_surface(&s.pos, f, fty, vty);
+                                let mut v = v;
+                                let mut vty = vty;
+                                if self.is_int_like(fty) && self.is_int_like(vty) {
+                                    v = self.coerce_int_word(fw, &v, fty);
+                                    vty = fty;
+                                } else {
+                                    self.check_field_surface(&s.pos, f, fty, vty);
+                                }
                                 self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
@@ -347,7 +361,7 @@ impl ModEmitter {
                                 let dfo = !self.is_float(fty)
                                     && matches!(self.opt_inner(fty), Some((_, true)));
                                 if (self.is_float(fty) || dfo) && !self.is_float(vty) {
-                                    vc = iw_to_f64_word(fw, &v);
+                                    vc = self.int_to_f64_word(fw, &v, vty);
                                     vct = self.r.mk(Ty::F64);
                                 } else if !dfo && !self.is_float(fty) && self.is_float(vty) {
                                     self.err_diff(
@@ -357,7 +371,12 @@ impl ModEmitter {
                                         "float",
                                     );
                                 } else if !dfo {
-                                    self.check_field_surface(&s.pos, f, fty, vct);
+                                    if self.is_int_like(fty) && self.is_int_like(vct) {
+                                        vc = self.coerce_int_word(fw, &vc, fty);
+                                        vct = fty;
+                                    } else {
+                                        self.check_field_surface(&s.pos, f, fty, vct);
+                                    }
                                 }
                                 self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
                                 fw.rc_flush();
@@ -477,7 +496,7 @@ impl ModEmitter {
                                         let (vc, _tc) = self.coerce_word_to(fw, &v, vty, el);
                                         v = vc;
                                     } else if self.is_float(el) && !self.is_float(vty) {
-                                        v = iw_to_f64_word(fw, &v);
+                                        v = self.int_to_f64_word(fw, &v, vty);
                                     } else if !self.is_float(el) && self.is_float(vty) {
                                         self.err_diff(
                                             &s.pos,
@@ -498,6 +517,9 @@ impl ModEmitter {
                                                 &vn,
                                             );
                                         }
+                                    }
+                                    if self.is_int_like(el) && self.is_int_like(vty) {
+                                        v = self.coerce_int_word(fw, &v, el);
                                     }
                                     // rc patch B: release the old elem
                                     // (scalar/nil words no-op in rt),
@@ -550,13 +572,13 @@ impl ModEmitter {
                                     }
                                     if self.opt_inner(v2).is_some()
                                         || self.weak_inner(v2).is_some()
-                                        || matches!(self.r.get(v2), Ty::Dyn(_))
+                                        || matches!(self.r.get(v2), Ty::Dyn(_) | Ty::Int(_))
                                     {
                                         let (vc, _tc) = self.coerce_word_to(fw, &v, vty, v2);
                                         v = vc;
                                     } else if vf && !self.is_float(vty) {
                                         // int word -> f64 word
-                                        v = iw_to_f64_word(fw, &v);
+                                        v = self.int_to_f64_word(fw, &v, vty);
                                     } else if !vf && self.is_float(vty) {
                                         self.err_diff(
                                             &s.pos,
@@ -623,7 +645,7 @@ impl ModEmitter {
                                                     .unwrap_or(false)
                                             };
                                             if retf && !self.is_float(vty) {
-                                                vc = iw_to_f64_word(fw, &v);
+                                                vc = self.int_to_f64_word(fw, &v, vty);
                                             }
                                             let oargv = vec![
                                                 (av.clone(), at),
@@ -659,7 +681,7 @@ impl ModEmitter {
                                 // receives an element-wise copy (D1/D2)
                                 Ty::Tensor(elem, rank) if rank == 1 => {
                                     if self.is_float(elem) && !self.is_float(vty) {
-                                        v = iw_to_f64_word(fw, &v);
+                                        v = self.int_to_f64_word(fw, &v, vty);
                                     } else if !self.is_float(elem) && self.is_float(vty) {
                                         self.err_diff(
                                             &s.pos,
@@ -1055,7 +1077,9 @@ impl ModEmitter {
         // word (0) passes through as nil. `dyn T` returns auto-box builtin
         // values the same way.
         let (mut v, mut t) =
-            if self.opt_inner(fw.ret).is_some() || matches!(self.r.get(fw.ret), Ty::Dyn(_)) {
+            if self.opt_inner(fw.ret).is_some()
+                || matches!(self.r.get(fw.ret), Ty::Dyn(_) | Ty::Int(_))
+            {
                 let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
                 (vc, tc)
             } else {
@@ -1070,7 +1094,7 @@ impl ModEmitter {
         {
             if self.is_float(fw.ret) {
                 if !self.is_float(t) && !matches!(self.r.get(t).clone(), Ty::Unit) {
-                    v = iw_to_f64_word(fw, &v);
+                    v = self.int_to_f64_word(fw, &v, t);
                     t = self.r.mk(Ty::F64);
                 }
             } else if self.is_float(t) {
@@ -1149,26 +1173,12 @@ impl ModEmitter {
                         // `dyn T` value narrowed by a builtin test: the branch
                         // sees the value family (walk_narrowed unboxes)
                         if matches!(cur, Ty::Dyn(_)) {
-                            let ni = match cn.as_str() {
-                                "int" | "i64" => Some(Ty::I64),
-                                "float" | "f64" => Some(Ty::F64),
-                                "bool" => Some(Ty::Bool),
-                                _ => None,
-                            };
-                            return ni.map(|t| (x.clone(), self.r.mk(t)));
+                            return Self::builtin_name_ty(cn).map(|t| (x.clone(), self.r.mk(t)));
                         }
                         // `any` narrowed by a primitive test (walk_narrowed
                         // materialises the boxed payload)
                         if matches!(cur, Ty::Any) {
-                            let ni = match cn.as_str() {
-                                "int" | "i64" => Some(Ty::I64),
-                                "float" | "f64" => Some(Ty::F64),
-                                "bool" => Some(Ty::Bool),
-                                "str" => Some(Ty::Str),
-                                "range" => Some(Ty::Range),
-                                _ => None,
-                            };
-                            return ni.map(|t| (x.clone(), self.r.mk(t)));
+                            return Self::builtin_name_ty(cn).map(|t| (x.clone(), self.r.mk(t)));
                         }
                         let mut wt = cur;
                         let mut had_opt = false;
@@ -1179,16 +1189,9 @@ impl ModEmitter {
                         if !had_opt {
                             return None;
                         }
-                        let hit = matches!(
-                            (&wt, cn.as_str()),
-                            (Ty::I64, "int")
-                                | (Ty::I64, "i64")
-                                | (Ty::F64, "float")
-                                | (Ty::F64, "f64")
-                                | (Ty::Str, "str")
-                                | (Ty::Bool, "bool")
-                                | (Ty::Range, "range")
-                        );
+                        let hit = Self::builtin_name_ty(cn)
+                            .map(|t| t == wt)
+                            .unwrap_or(false);
                         if hit {
                             let ni = self.r.mk(wt);
                             Some((x, ni))
@@ -1255,15 +1258,7 @@ impl ModEmitter {
                 if !matches!(cur, Ty::Any) {
                     return None;
                 }
-                let ni = match cn.as_str() {
-                    "int" | "i64" => Some(Ty::I64),
-                    "float" | "f64" => Some(Ty::F64),
-                    "bool" => Some(Ty::Bool),
-                    "str" => Some(Ty::Str),
-                    "range" => Some(Ty::Range),
-                    _ => None,
-                };
-                ni.map(|t| (x.clone(), self.r.mk(t)))
+                return Self::builtin_name_ty(cn).map(|t| (x.clone(), self.r.mk(t)));
             }
             _ => None,
         }
@@ -1306,7 +1301,10 @@ impl ModEmitter {
                 return;
             }
         }
-        if matches!(self.r.get(nty).clone(), Ty::I64 | Ty::F64 | Ty::Bool) {
+        if matches!(
+            self.r.get(nty).clone(),
+            Ty::I64 | Ty::Int(_) | Ty::F64 | Ty::Bool
+        ) {
             let slot = fw.lookup(x).map(|(a, t)| (a, self.r.get(t).clone()));
             if let Some((a, cur)) = slot {
                 let w = {

@@ -96,6 +96,15 @@ pub(crate) fn iw_to_f64_word(fw: &mut FnWalk, w: &str) -> String {
     emit_enc_f(fw, &f)
 }
 
+/// convert an unsigned int word into an f64 word (unsigned promotion: needed
+/// for `uint` values whose bit pattern is negative when read signed)
+pub(crate) fn iw_to_f64_word_u(fw: &mut FnWalk, w: &str) -> String {
+    let d = emit_dec_int(fw, w);
+    let f = fw.v();
+    fw.op(&format!("    {} = arith.uitofp {} : i64 to f64", f, d));
+    emit_enc_f(fw, &f)
+}
+
 /// convert an f64 word into an int word (decode, truncate, encode)
 pub(crate) fn f64w_to_iw(fw: &mut FnWalk, w: &str) -> String {
     let f = emit_dec_f(fw, w);

@@ -52,7 +52,7 @@ impl ModEmitter {
             let bn = sloth_frontend::ty::ty_name(self.r.get(vt));
             self.err_diff(pos, "Result payload", &an, &bn);
             if self.is_float(slot) {
-                v = iw_to_f64_word(fw, &v);
+                v = self.int_to_f64_word(fw, &v, vt);
             }
         }
         // object + default zero fields
@@ -517,7 +517,7 @@ impl ModEmitter {
                         let bn = sloth_frontend::ty::ty_name(self.r.get(iit));
                         self.err_diff(&ix.pos, "field initializer", &an, &bn);
                         if ftf {
-                            iv = iw_to_f64_word(fw, &iv);
+                            iv = self.int_to_f64_word(fw, &iv, iit);
                         }
                     }
                     let zi = fw.v();

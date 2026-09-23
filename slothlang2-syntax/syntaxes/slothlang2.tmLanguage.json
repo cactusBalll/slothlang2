@@ -115,7 +115,7 @@
       "patterns": [
         {
           "name": "storage.type.primitive.slothlang2",
-          "match": "\\b(int|float|bool|str|unit|range|any)\\b"
+          "match": "\\b(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|i8|i16|i32|i64|u8|u16|u32|u64|float|bool|str|unit|range|any)\\b"
         },
         {
           "name": "storage.type.slothlang2",
