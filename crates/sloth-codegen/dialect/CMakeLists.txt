@@ -5,6 +5,44 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Locate MLIR when the caller did not pass -DMLIR_DIR. `build.rs` always passes
+# it (from $MLIR_SYS_210_PREFIX); this fallback keeps a bare/IDE configure
+# working too. A cached *-NOTFOUND counts as unset, so recovery is automatic.
+if(NOT MLIR_DIR OR MLIR_DIR MATCHES "-NOTFOUND$")
+  unset(MLIR_DIR CACHE)
+  # 1) ask llvm-config for its cmake dir and take the MLIR sibling
+  find_program(LLVM_CONFIG_EXE NAMES llvm-config-21 llvm-config)
+  if(LLVM_CONFIG_EXE)
+    execute_process(
+      COMMAND ${LLVM_CONFIG_EXE} --cmakedir
+      OUTPUT_VARIABLE LLVM_CMAKE_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(LLVM_CMAKE_PARENT "${LLVM_CMAKE_DIR}" DIRECTORY)
+    if(EXISTS "${LLVM_CMAKE_PARENT}/mlir/MLIRConfig.cmake")
+      set(MLIR_DIR "${LLVM_CMAKE_PARENT}/mlir")
+    endif()
+  endif()
+  # 2) honour the prefix mlir-sys/cargo use
+  if((NOT MLIR_DIR) AND DEFINED ENV{MLIR_SYS_210_PREFIX}
+     AND EXISTS "$ENV{MLIR_SYS_210_PREFIX}/lib/cmake/mlir/MLIRConfig.cmake")
+    set(MLIR_DIR "$ENV{MLIR_SYS_210_PREFIX}/lib/cmake/mlir")
+  endif()
+  # 3) common distro install prefixes
+  if(NOT MLIR_DIR)
+    foreach(_p /usr/lib/llvm-21 /usr/local/lib/llvm-21 /usr/lib/llvm /usr/local)
+      if(EXISTS "${_p}/lib/cmake/mlir/MLIRConfig.cmake")
+        set(MLIR_DIR "${_p}/lib/cmake/mlir")
+        break()
+      endif()
+    endforeach()
+  endif()
+  if(NOT MLIR_DIR)
+    message(FATAL_ERROR
+      "MLIRConfig.cmake not found. Pass -DMLIR_DIR=<dir with MLIRConfig.cmake> "
+      "(e.g. -DMLIR_DIR=/usr/lib/llvm-21/lib/cmake/mlir) or set MLIR_SYS_210_PREFIX.")
+  endif()
+endif()
+
 find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
