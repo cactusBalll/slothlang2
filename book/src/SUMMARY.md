@@ -44,10 +44,19 @@
 # 张量扩展
 
 - [25. 张量扩展与 llama2.c 推理](ch25_llama.md)
+- [26. Llama 模型架构与算子详解](ch26_llama_arch.md)
 
 # 协程扩展
 
-- [26. 协程（fiber）](ch26_fiber.md)
+- [27. 协程（fiber）](ch27_fiber.md)
+
+# 多线程扩展
+
+- [28. 多线程扩展（thread）](ch28_threads.md)
+
+# I/O 扩展
+
+- [29. I/O 扩展：事件队列与网络](ch29_io.md)
 
 # 附录
 

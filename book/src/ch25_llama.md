@@ -3,7 +3,8 @@
 本章对应张量扩展专项（TE-P4）的验收目标：**在 sloth2 上从 checkpoint 加载到
 文本生成，单机跑通 llama2.c `run.c` 推理**。llama2.c 是一个纯 C 的 Llama-2
 推理实现，本章说明 sloth2 的 `Tensor` 类型、`tensor.*`/`math` 内建、张量标准
-库，以及 `examples/llama/llama.slt` 对 `run.c` 的移植。
+库，以及 `examples/llama/llama.slt` 对 `run.c` 的移植。**Llama 模型本身的架构、
+每个算子的数学定义与实现对照见第 26 章**；本章侧重 sloth2 的语言/运行时机制。
 
 ## 25.1 总览
 

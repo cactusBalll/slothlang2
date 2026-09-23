@@ -49,3 +49,24 @@ pub func print(v: any): unit { sloth_rt_puts(sloth_rt_write(v)); }
 标量按原生格式，`str` 原样，数组 `[a, b]`，Map `{k: v}`，`T?` nil→`nil`，
 类实例有 `impl Display` 时调用 `to_str`，否则回退打印类名。
 
+`x is T` 在 `any` 上做**运行时**判定（标量按 kind、类按运行时 class id 链），
+命中后可在分支内把 `x` 收窄为具体类型。
+
+## 24.3 `typeid` / `type_name` 与引用类型运行时身份
+
+`typeid(x) -> int` 与 `type_name(x) -> str` 覆盖所有**引用类型**，粒度为单态：
+
+- 类实例与 `dyn`：经对象的 `ObjInfo`（构造时由 `@sloth_cls_name` 注册名字）取
+  **最派生**的具体类，`@sloth_obj_cls_id` / `@sloth_obj_type_name` 解析；
+- 其余引用类型（`str`/`Array`/`Map`/`Tensor`/`Fiber`/`Channel`/`Weak`/`range`/
+  闭包/`any` 等）：编译期常量 id 与名字。`TYPEID_BASE = 2^40`，与类 id 空间不
+  相交；
+- 可空的引用类型自动解包，`nil` 的 `type_name` 为 `"nil"`、`typeid` 为 `0`；
+- 裸值类型（`int`/`float`/`bool`）调用是编译期诊断（v1.1 的「值可调用」语义）。
+
+## 24.4 内建模块
+
+除上表调用点内建外，`fiber.*`、`tensor.*`（张量扩展）与 `thread.*` / `channel.*`
+/ `mutex.*` / `atomic.*`（多线程扩展）是发射器识别的**内建模块**，详见 §25、§27、
+§28。
+

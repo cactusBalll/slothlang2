@@ -39,6 +39,9 @@ type_base       ::= 'unit' | 'int' | 'float' | 'bool' | 'str' | 'range'
                   | 'Array' '<' type '>'
                   | 'Map' '<' type ',' type '>'
                   | 'Weak' '<' type '>'
+                  | 'Fiber' '<' type '>'
+                  | 'JoinHandle' '<' type '>'
+                  | 'Channel' '<' type '>'
                   | 'Tensor' '<' ( 'int' | 'float' ) ',' INT '>'
                     (* 秩字面量语法 0..=8，语义限 1..=3 *)
                   | 'dyn' IDENT
@@ -105,7 +108,8 @@ comment ::= '//' ... '\n' | '/*' ... '*/'
 super this break continue is pub trait impl dyn as`。
 
 **上下文关键字**（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit
-range Array Map Weak Tensor dyn extern`。
+range Array Map Weak Fiber JoinHandle Channel Tensor dyn extern`。
+`Mutex` / `AtomicInt` 为内建不透明句柄，由 `mutex.*` / `atomic.*` 内建模块使用。
 
 `&&` / `||` 是 `and` / `or` 的同义 token。范围运算符 `..` / `..=`，管道 `|>`，
 Elvis `?:`，可选链 `?.`（词法识别为 `QuestionDot`，但 parser 明确拒绝，见设计 §3.6）

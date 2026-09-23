@@ -98,3 +98,37 @@
 | §4.4 `fiber.cancel` 用 `setjmp`/`longjmp` 直达入口 | 同左；差别在于出栈前先结算在册局部槽，再 `longjmp`（`longjmp` 会重置栈指针，必须先于其完成释放） | 定案 |
 | §4.1 仅保存 x86_64 的 `rsp/rbp/rbx/r12-r15`、aarch64 的 `x19-x30/sp/lr` | aarch64 额外保存 AAPCS64 被调用者保存的 `d8-d15`（设计稿遗漏） | 修正 |
 | §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline` 为 crate 内 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |
+
+## A.9 多线程扩展（TH-P0–TH-P3）
+
+《多线程扩展设计文档》为草案；实现与设计稿基本一致，主要落点如下：
+
+| 设计 | 实现 | 性质 |
+| --- | --- | --- |
+| §5.1 原子 ARC 无条件启用（`retain` Relaxed / `release` Release+Acquire fence） | 同左；`Weak<T>` 升级用 CAS 循环（对照 `weak_ptr::lock`） | 已对齐 |
+| §4.3 `Mutex`/`AtomicInt` 为 `extern type` | 实现为**内建不透明句柄** `Ty::Mutex`/`Ty::AtomicInt`（`mutex.new`/`atomic.new` 调用点识别），而非经 `.slt` 声明 | 定案（内建模块风格） |
+| §4.1 `JoinHandle<R>` / `Channel<T>` 复用泛型类型语法 | 新增 `Ty::JoinHandle`/`Ty::Channel`；`EBNF type_base` 追加产生式（附录 C） | 已对齐 |
+| §4.2 `Send` 标记 trait | 实现为内建自动满足判定，仅 `Fiber<Y>` 被拒；不可用户 `impl` | 已对齐 |
+| §5.4 Fiber 线程封闭 | `owner_tid` 校验 + 每线程 TLS `CUR`/`MAIN` 哨兵 + 线程退出断言（`abandoned fibers on thread exit`） | 已对齐 |
+| §5.5 trampoline / 转移插桩 | worker 持有句柄自引用；结果以 owned +1 交付 `join`；`spawn` retain 闭包与引用参数 | 已对齐 |
+| §5.3 `Weak` 跨线程 upgrade | 原子 CAS 控制块，`upgrade` 与析构排空弱链配合 | 已对齐 |
+| ~~风险 #7 63-bit int 与 64-bit 原子槽~~ | 去 tag 后 `int` 为原生 i64，缝隙已消除 | 已消除 |
+
+> **弃置纪律**：未 join/detach 的 `JoinHandle` 计数归零时，debug 构建 panic
+> （release 隐式 detach）；与协程弃置纪律一致。
+
+## A.10 I/O 扩展（IO-P0–IO-P6）
+
+《I/O 扩展设计文档》为与实现对齐稿。主要实现落点：
+
+| 设计 | 实现 | 性质 |
+| --- | --- | --- |
+| §3 API 表面选 `extern func` + `.slt` | 全部走 extern；无新内建、前端/`Ty` 零改动 | 已对齐 |
+| §3 事件队列用 sloth 实现 | `lib/sloth/event.slt` 的 `EventLoop` reactor（token 代际、定时器链表） | 已对齐 |
+| §6.5 io_uring 裸 syscall | `io_uring_setup/enter` + 三次 `mmap`；一次性 `POLL_ADD` + gen 重挂；等待用 `poll(ring_fd)` | 已对齐 |
+| §6.6 kqueue 保留 | Linux 上 `available(kqueue)` 恒假，不广告不可用后端 | 已知限制 |
+| §7.7 计算卸载 `run_blocking` | 独立 eventfd（`sloth_async_*`）+ `thread.spawn`；结果经 `JoinHandle` 取回 | IO-P6 增值项 |
+| §11 风险 #5 extern 句柄生命周期 | 非 ARC，显式 `*_free`；漏 free 退化为泄漏不悬垂 | 定案 |
+| §10 无 TLS/HTTP2/chunked、无 DNS | 均为非目标，文档化 | 受限 |
+| 设计 §10 未列的多项 codegen 真 bug | 过程中修掉 8 项（keys 元素类型、lambda 捕获模块限定/插值、内建句柄字段类型、`Ty::Fn` 重建、泛型函数实参推断、`tp_mangled` 泄漏、跨模块泛型单态化），见第 29 章 §29.8 | 修复 |
+| §14 `typeid`/`type_name`（同批） | 覆盖所有引用类型；类取最派生运行时类型（`TYPEID_BASE=2^40`） | 已对齐 |

@@ -17,6 +17,14 @@
 | 接口 | `trait T` | `impl` 多个 |
 | 动态对象 | `dyn Trait` | 运行时多态出口 |
 | 顶层 | `any` | 运行时类型化的盒引用（`0` = `nil`）；任意值可隐式装箱 |
+| 弱引用 | `Weak<T>` | 不增量目标计数；`upgrade()` → `T?`（见 §15） |
+| 协程 | `Fiber<Y>` | 有栈协程，`Y` 为 `resume`/`yield` 共用载荷（见 §27） |
+| 张量 | `Tensor<T,R>` | `T` ∈ {`int`,`float`}，`R` 编译期常量（语义 1..=3，见 §25） |
+| 线程句柄 | `JoinHandle<R>` | OS 线程结果句柄（见 §28） |
+| 通道 | `Channel<T>` | 跨线程 mpmc 队列（见 §28） |
+
+`Mutex` / `AtomicInt` 是不透明内建句柄（`pthread_mutex_t` / `AtomicI64`），随
+§28 的线程扩展引入。
 
 ## 5.2 词面编码（word plane）
 

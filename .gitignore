@@ -5,3 +5,4 @@ examples/fs/fixture.bin
 examples/res/*.bin
 *.vsix
 slothlang2-syntax/node_modules/
+**/sloth_app

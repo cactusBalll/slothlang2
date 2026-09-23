@@ -1,4 +1,4 @@
-# 26. 协程（fiber）
+# 27. 协程（fiber）
 
 sloth 2.0 通过**原生有栈协程**恢复 1.0 的 `fiber` 能力：单线程 1:m、协作式调度、
 无抢占。协程以**编译器内建模块 `fiber.*`** 提供，无新关键字、无新语法；每个协程
@@ -7,7 +7,7 @@ sloth 2.0 通过**原生有栈协程**恢复 1.0 的 `fiber` 能力：单线程 
 
 类型系统新增引用类型 `Fiber<Y>`：`Y` 是 `resume`/`yield` 双向共用的单一载荷类型。
 
-## 26.1 API
+## 27.1 API
 
 | 函数 | 签名 | 语义 |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ sloth 2.0 通过**原生有栈协程**恢复 1.0 的 `fiber` 能力：单线程 
 状态机与 1.0 一致：`New →resume→ Running →yield→ Suspended →resume→ …→ Done`，
 出错走 `Error`。
 
-## 26.2 示例
+## 27.2 示例
 
 ```rust
 func main(): unit {
@@ -51,7 +51,7 @@ func main(): unit {
 `Y` 为值类型（`int`/`float`/`bool`）时，`Y?` 结果走一词 payload 盒，因此「yield 出
 的值 `0`」与「完成 `nil`」不会混淆；`Y` 为引用类型时直接复用句柄词。
 
-## 26.3 载荷与 ARC
+## 27.3 载荷与 ARC
 
 载荷按**普通 borrowed 实参**递交，由运行时 `retain` 接管并在接收侧交付；因此协程
 挂起栈帧中已 `retain` 的引用由计数**自然保活**，无需任何根枚举——这也是 ARC 相对
@@ -75,7 +75,7 @@ func churn(n: int): unit {
 驱动至 `Done` 后，协程对象、入口闭包与所有载荷引用会精确回落到 `sloth_rc_live()`
 基线。
 
-## 26.4 取消与限制
+## 27.4 取消与限制
 
 - `fiber.cancel(f)` 对 Suspended 协程置取消标志并注入哨兵；其下一次 `fiber.yield`
   经 `setjmp`/`longjmp` 回到协程入口，栈被回收。**出栈前会结算所有在册的局部引用槽**
@@ -88,7 +88,7 @@ func churn(n: int): unit {
   `fiber stack overflow` 并终止；深递归用 `fiber.create_with` 调大栈。
 - 仅覆盖 x86_64 SysV 与 aarch64 AAPCS64。
 
-## 26.5 JIT 与 AOT
+## 27.5 JIT 与 AOT
 
 切换发生在原生栈指针层面，与被切换代码的出身（ORC JIT 或 AOT 目标文件）无关，
 两种模式行为一致。示例见 `examples/fiber/`，端到端断言见

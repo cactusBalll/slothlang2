@@ -63,3 +63,12 @@ hello, sloth!
   `sloth_rc_retain`，作用域退出时 `sloth_rc_release`。
 
 完整的（**未剥离前导**）模块见[附录 B](appendix_b_mlir.md)。
+
+## 3.5 编辑器支持
+
+仓库内附带 VS Code 语法高亮扩展 `slothlang2-syntax/`：覆盖关键字与声明
+（`func`/`class`/`trait`/`impl`/`extern`/`is` 等）、上下文类型关键字
+（含 `any`/`Fiber`/`Tensor`/`Weak`）、字面量与 `${expr}` 递归插值、注释与
+运算符。注册 `.sl`（源程序）与 `.slt`（模块 / 标准库）两种文件类型，并提供
+括号匹配、注释切换与缩进规则。在该目录按 `F5` 启动 Extension Development Host
+即可加载。

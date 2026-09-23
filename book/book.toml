@@ -8,7 +8,10 @@ src = "src"
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-smart-punctuation = true
+mathjax-support = true
+# smart punctuation 会把 `--` / `...` / 直引号改写为印刷符号，破坏 MathJax 公式，
+# 因此与 MathJax 同时使用时必须关闭（见 mdBook 文档）。
+smart-punctuation = false
 
 [output.html.fold]
 enable = true
