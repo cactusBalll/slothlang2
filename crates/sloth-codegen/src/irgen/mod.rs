@@ -77,61 +77,6 @@ pub(crate) use tybind::*;
 #[allow(unused_imports)]
 pub(crate) use util::*;
 
-pub fn normalize_indices(src: &str) -> String {
-    // process per-function so that per-fn scoped SSA names don't collide
-    let mut out = String::new();
-    let mut chunk: Vec<String> = Vec::new();
-    for line in src.lines() {
-        let t2 = line.trim_start();
-        let starts_fn = t2.starts_with("func.func") || t2.starts_with("llvm.func");
-        if starts_fn && !chunk.is_empty() {
-            out.push_str(&normalize_chunk(&chunk));
-            chunk = Vec::new();
-        }
-        chunk.push(line.to_string());
-    }
-    if !chunk.is_empty() {
-        out.push_str(&normalize_chunk(&chunk));
-    }
-    out
-}
-fn normalize_chunk(lines: &[String]) -> String {
-    use std::collections::HashSet;
-    let mut idx_tokens: HashSet<String> = HashSet::new();
-    for line in lines {
-        let t = line.trim();
-        if !(t.contains('[') && t.contains(']')) {
-            continue;
-        }
-        let open = t.find('[').unwrap();
-        let close = t.find(']').unwrap();
-        let inner = &t[open + 1..close];
-        for tok in inner.split(',') {
-            let tok = tok.trim();
-            if tok.starts_with('%') {
-                idx_tokens.insert(tok.to_string());
-            }
-        }
-    }
-    let mut out = String::new();
-    for line in lines {
-        let t = line.trim();
-        if let Some(i) = t.find(" = arith.constant ") {
-            let tok = t[..i].trim().to_string();
-            if idx_tokens.contains(&tok) {
-                let after = &t[i + " = arith.constant ".len()..];
-                if after.trim_end() == "0 : i64" {
-                    out.push_str(&line.replace("0 : i64", "0 : index"));
-                    out.push('\n');
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
 pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     let mut me = ModEmitter::new(mod_name);
@@ -139,8 +84,10 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }
-    let ir0 = ModEmitter::take_ir(&mut me);
-    Ok(normalize_indices(&ir0))
+    let ir = ModEmitter::take_ir(&mut me);
+    // lower sloth.* → standard dialects so `slothc ir`/AOT only expose
+    // dialects that external tools (mlir-opt) understand
+    crate::dialect::lower_text(&ir, &format!("{}.mlir", mod_name))
 }
 pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
     let mut stack: Vec<std::path::PathBuf> = Vec::new();
@@ -157,8 +104,8 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }
-    let ir0 = ModEmitter::take_ir(&mut me);
-    Ok(normalize_indices(&ir0))
+    let ir = ModEmitter::take_ir(&mut me);
+    crate::dialect::lower_text(&ir, "main.mlir")
 }
 /// dev-tree stdlib root: `<repo>/lib` (design D5 search order item 4)
 const DEV_LIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../lib");
@@ -260,29 +207,6 @@ fn prog2_of(prog: &Program) -> Program {
 }
 fn visible_of(d: &Decl) -> bool {
     d.visible
-}
-fn rename_plain_calls(t: &str) -> String {
-    let ch: Vec<char> = t.chars().collect();
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < ch.len() {
-        if i + 6 <= ch.len() && ch[i] == 'c' && i >= 5 {
-            let prev: String = ch[i - 5..i].iter().collect();
-            if prev == "llvm." && ch[i..i + 6].iter().collect::<String>() == "call @" {
-                out.push_str("call @");
-                i += 6;
-                continue;
-            }
-        }
-        if i + 6 <= ch.len() && ch[i..i + 6].iter().collect::<String>() == "call @" {
-            out.push_str("func.call @");
-            i += 6;
-            continue;
-        }
-        out.push(ch[i]);
-        i += 1;
-    }
-    out
 }
 
 /// full-compilation diagnostic batch report (patch #41): numbered with

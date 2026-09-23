@@ -95,7 +95,7 @@ fn print_out(args: &Vec<String>) {
 }
 
 fn build_mode_r(_src: &str, ir: &str, out_path: &str) -> Result<String, String> {
-    let wrapper = "  func.func @main() -> i32 attributes {llvm.emit_c_interface} {\n    call @sloth_main() : () -> ()\n    %z = arith.constant 0 : i32\n    return %z : i32\n  }\n";
+    let wrapper = "  func.func @main() -> i32 attributes {llvm.emit_c_interface} {\n    func.call @sloth_main() : () -> ()\n    %z = arith.constant 0 : i32\n    return %z : i32\n  }\n";
     let closed = ir.strip_suffix("}\n").unwrap_or(&ir);
     let full = format!("{}\n{}\n}}\n", closed, wrapper);
     std::fs::write("/tmp/opencode/app.mlir", &full).map_err(|e| e.to_string())?;

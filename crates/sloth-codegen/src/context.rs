@@ -10,10 +10,14 @@ impl Context {
     pub fn new() -> Context {
         unsafe {
             let raw = sys::mlirContextCreate();
-            sys::mlirContextSetAllowUnregisteredDialects(raw, true);
-            assert_eq!(sys::mlirContextGetAllowUnregisteredDialects(raw), true);
+            // scheme A2: the custom `sloth` dialect is registered, so
+            // unregistered dialects are no longer tolerated (typos surface
+            // as parse errors).
+            sys::mlirContextSetAllowUnregisteredDialects(raw, false);
+            assert_eq!(sys::mlirContextGetAllowUnregisteredDialects(raw), false);
             let registry = sys::mlirDialectRegistryCreate();
             sys::mlirRegisterAllDialects(registry);
+            crate::dialect::register_dialect(registry);
             sys::mlirContextAppendDialectRegistry(raw, registry);
             sys::mlirContextLoadAllAvailableDialects(raw);
             sys::mlirRegisterAllLLVMTranslations(raw);

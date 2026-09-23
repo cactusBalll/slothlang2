@@ -29,7 +29,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", cid));
         let ci = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             ci, z, cid
         ));
         // per-frame reference mask: a captured field is a ref exactly when
@@ -56,7 +56,7 @@ impl ModEmitter {
                 enc_i_lit(ncap as i64)
             ));
             fw.op(&format!(
-                "    call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
                 ci, mvc, nvc
             ));
         }
@@ -68,7 +68,7 @@ impl ModEmitter {
         ));
         let frame = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             frame, ci, nf
         ));
         // rc patch B: fresh frame = producer temp (released at stmt close
@@ -87,7 +87,7 @@ impl ModEmitter {
                 Some((a, t)) => {
                     let zz = fw.v();
                     let mty = memref_cell_ty(self, t);
-                    fw.op(&format!("    {} = arith.constant 0 : i64", zz));
+                    fw.op(&format!("    {} = arith.constant 0 : index", zz));
                     let vv = fw.v();
                     fw.op(&format!("    {} = memref.load {}[{}] : {}", vv, a, zz, mty));
                     (vv, t)
@@ -107,12 +107,12 @@ impl ModEmitter {
             if self.is_ref(ct) {
                 let rcv = self.emit_retain(fw, &cv);
                 fw.op(&format!(
-                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                     frame, zi, rcv
                 ));
             } else {
                 fw.op(&format!(
-                    "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                     frame, zi, cv
                 ));
             }

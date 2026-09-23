@@ -96,7 +96,7 @@ impl ModEmitter {
             argtxts.push("i64".to_string());
             let a = fw.v();
             let zi = fw.v();
-            fw.op(&format!("    {} = arith.constant 0 : i64", zi));
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", a));
             fw.op(&format!(
                 "    memref.store {}, {}[{}] : memref<1xi64>",
@@ -146,14 +146,14 @@ impl ModEmitter {
             let mut pre = String::new();
             // descriptor tables must be filled before any `any` box is built
             pre.push_str(&format!(
-                "    call @sloth_{}__anyinit() : () -> ()\n",
+                "    func.call @sloth_{}__anyinit() : () -> ()\n",
                 self.name
             ));
             for m in self.init_mods.clone() {
-                pre.push_str(&format!("    call @sloth_{}__ginit() : () -> ()\n", m));
+                pre.push_str(&format!("    func.call @sloth_{}__ginit() : () -> ()\n", m));
             }
             pre.push_str(&format!(
-                "    call @sloth_{}__ginit() : () -> ()\n",
+                "    func.call @sloth_{}__ginit() : () -> ()\n",
                 self.name
             ));
             format!("{}{}", pre, entry_text)
@@ -181,18 +181,8 @@ impl ModEmitter {
                 mlir_ret_ty(self, plan.ret)
             ));
         }
-        // bare `call` is func-dialect sugar valid only in func.func regions;
-        // inside llvm.func bodies it must be spelled func.call
-        let entry_text = if is_ll {
-            rename_plain_calls(&entry_text)
-        } else {
-            entry_text
-        };
-        let ret_text = if is_ll {
-            rename_plain_calls(&ret_text)
-        } else {
-            ret_text
-        };
+        // calls are always spelled `func.call` (valid in both func.func and
+        // llvm.func bodies); indirect vtable/closure calls use `llvm.call`
         self.out.push_str(&entry_text);
         self.out.push_str(&ret_text);
         self.out.push_str("  }\n");

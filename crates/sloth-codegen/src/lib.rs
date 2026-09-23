@@ -3,6 +3,7 @@
 pub use mlir_sys as sys;
 
 mod context;
+mod dialect;
 pub mod irgen;
 mod jit;
 mod module;

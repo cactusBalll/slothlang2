@@ -44,7 +44,7 @@ impl ModEmitter {
         let rev = self.emit_retain(fw, env);
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_closure_new({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_closure_new({}, {}) : (i64, i64) -> i64",
             obj, fnptr, rev
         ));
         obj
@@ -247,7 +247,7 @@ impl ModEmitter {
         ));
         let fp = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
             fp, clo, f0
         ));
         let f1 = fw.v();
@@ -258,7 +258,7 @@ impl ModEmitter {
         ));
         let env = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
             env, clo, f1
         ));
         let vp = fw.v();

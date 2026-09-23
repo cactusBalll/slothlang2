@@ -333,18 +333,15 @@ impl ModEmitter {
 impl ModEmitter {
     // ---------------- rc machinery (ARC migration, patch B) ----------------
 
-    /// emit `sloth_rc_release(h)` (nil and untracked words are rt no-ops)
+    /// emit `sloth.rc_release(h)` (nil and untracked words are rt no-ops)
     pub(crate) fn emit_release(&mut self, fw: &mut FnWalk, h: &str) {
-        fw.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+        fw.op(&format!("    sloth.rc_release {} : i64", h));
     }
 
-    /// emit `sloth_rc_retain(h)` (value-preserving)
+    /// emit `sloth.rc_retain(h)` (value-preserving)
     pub(crate) fn emit_retain(&mut self, fw: &mut FnWalk, h: &str) -> String {
         let r = fw.v();
-        fw.op(&format!(
-            "    {} = call @sloth_rc_retain({}) : (i64) -> i64",
-            r, h
-        ));
+        fw.op(&format!("    {} = sloth.rc_retain {} : i64", r, h));
         r
     }
 
@@ -428,7 +425,7 @@ impl ModEmitter {
             };
             let r = fw.v();
             fw.op(&format!(
-                "    {} = call @sloth_box_new({}) : (i64) -> i64",
+                "    {} = func.call @sloth_box_new({}) : (i64) -> i64",
                 r, payload
             ));
             self.dangling_producer(fw, &r, to);
@@ -439,7 +436,7 @@ impl ModEmitter {
                 // f64 word boxes as-is (the box holds the encoded word)
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_box_new({}) : (i64) -> i64",
+                    "    {} = func.call @sloth_box_new({}) : (i64) -> i64",
                     r, v
                 ));
                 self.dangling_producer(fw, &r, to);
@@ -470,7 +467,7 @@ impl ModEmitter {
         // tag migration: the box holds one tagged payload word
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_box_get({}) : (i64) -> i64",
+            "    {} = func.call @sloth_box_get({}) : (i64) -> i64",
             r, v
         ));
         (r, inner)
@@ -564,7 +561,7 @@ impl ModEmitter {
         let (targ, _tt) = self.coerce_word_to(fw, v, from, check);
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_weak_new({}) : (i64) -> i64",
+            "    {} = func.call @sloth_weak_new({}) : (i64) -> i64",
             r, targ
         ));
         self.dangling_producer(fw, &r, to);
@@ -587,7 +584,7 @@ impl ModEmitter {
         let d = self.emit_any_desc_ptr(fw, from);
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_any_from({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_any_from({}, {}) : (i64, i64) -> i64",
             r, d, v
         ));
         self.dangling_producer(fw, &r, any);

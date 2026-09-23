@@ -98,7 +98,7 @@ impl ModEmitter {
         ));
         let info = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_builtin_info({}) : (i64) -> i64",
+            "    {} = func.call @sloth_builtin_info({}) : (i64) -> i64",
             info, kw
         ));
         let one = fw.v();
@@ -109,7 +109,7 @@ impl ModEmitter {
         ));
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
             obj, info, one
         ));
         // field 0 = value word; the word is never a reference, so a raw store
@@ -120,14 +120,14 @@ impl ModEmitter {
             enc_i_lit(0)
         ));
         fw.op(&format!(
-            "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
             obj, z, v
         ));
         let builder = self.emit_builtin_vt_builder(kind, tname);
         let vt = fw.v();
-        fw.op(&format!("    {} = call @{}() : () -> i64", vt, builder));
+        fw.op(&format!("    {} = func.call @{}() : () -> i64", vt, builder));
         fw.op(&format!(
-            "    call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
+            "    func.call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt
         ));
         let dt = self.r.mk(Ty::Dyn(tname.to_string()));
@@ -185,7 +185,7 @@ impl ModEmitter {
         ));
         let vt = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_vt_new({}) : (i64) -> i64",
+            "    {} = func.call @sloth_vt_new({}) : (i64) -> i64",
             vt, ncap
         ));
         let methods = self.traits.get(tname).cloned().unwrap_or_default();
@@ -209,7 +209,7 @@ impl ModEmitter {
                 enc_i_lit(slot as i64)
             ));
             fw.op(&format!(
-                "    call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
                 vt, slotc, fp
             ));
         }

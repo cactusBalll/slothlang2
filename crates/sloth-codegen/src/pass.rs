@@ -16,18 +16,64 @@ module @sloth_test {
     }
     return %r : i64
   }
-  %g = "sloth.gc_alloc"() ({}) : () -> i64
+  func.func @rel(%x : i64) -> i64 {
+    %r = sloth.rc_retain %x : i64
+    sloth.rc_release %x : i64
+    return %r : i64
+  }
 }
 "#;
 
 pub fn smoke_all() -> Result<(), String> {
     let ctx = Context::new();
     let op = Op::parse(ctx.raw, SRC, "test.slt.mlir")?;
+    // lower sloth.* ops and require a clean standard-dialect module
+    crate::dialect::lower_parsed(&op)?;
     let printed = op.print();
-    if !printed.contains("arith.addi") || !printed.contains("sloth.gc_alloc") {
+    if !printed.contains("arith.addi") || printed.contains("sloth.") {
         return Err(format!("round-trip content mismatch:\n{}", printed));
     }
+    if !printed.contains("sloth_rc_retain") || !printed.contains("sloth_rc_release") {
+        return Err(format!("lowering missed rt calls:\n{}", printed));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod dialect_migration {
+    use crate::irgen::ModEmitter;
+
+    /// ARC emission must go through the `sloth` dialect and the single-point
+    /// funnel (compile_to_ir) must lower it away before anyone sees the IR.
+    #[test]
+    fn arc_ops_are_sloth_then_lowered() {
+        let src = r#"
+            var a: str = "abc";
+            var b: str = "def";
+            print(a + b);
+        "#;
+        let prog = sloth_frontend::parser::parse(src).unwrap();
+        let mut me = ModEmitter::new("main");
+        me.emit_module(&prog);
+        assert!(me.diags.is_empty(), "diags: {:?}", me.diags);
+        let raw = ModEmitter::take_ir(&mut me);
+        assert!(
+            raw.contains("sloth.rc_release"),
+            "raw emission must use the sloth dialect:\n{}",
+            raw
+        );
+        let lowered = crate::irgen::compile_to_ir(src, "main").unwrap();
+        assert!(
+            !lowered.contains("sloth."),
+            "lowered output leaked sloth dialect:\n{}",
+            lowered
+        );
+        assert!(
+            lowered.contains("@sloth_rc_release"),
+            "lowered output missing rt call:\n{}",
+            lowered
+        );
+    }
 }
 
 // -------- irgen driver: build hello program and run --------
@@ -49,10 +95,10 @@ pub fn sloth_main_hello() -> Result<(), String> {
         return Err(format!("codegen diag {}: {}", d.line, d.msg));
     }
     let ir0 = ModEmitter::take_ir(&mut me);
-    let ir = crate::irgen::normalize_indices(&ir0);
-    eprintln!("--- MLIR ---\n{}", ir);
+    eprintln!("--- MLIR ---\n{}", ir0);
     let ctx = Context::new();
-    let op = Op::parse(ctx.raw, &ir, "hello.mlir")?;
+    let op = Op::parse(ctx.raw, &ir0, "hello.mlir")?;
+    crate::dialect::lower_parsed(&op)?;
     crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let engine = crate::jit::Engine::new(&op, 2, &[lib_path()]);
     engine.invoke("sloth_main", &mut [])?;
@@ -87,8 +133,7 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
     if !errs.is_empty() {
         return Err(format!("codegen diags: {:?}", errs));
     }
-    let ir0 = ModEmitter::take_ir(&mut me);
-    let ir = crate::irgen::normalize_indices(&ir0);
+    let ir = ModEmitter::take_ir(&mut me);
     let ctx = Context::new();
     let op = match Op::parse(ctx.raw, &ir, "prog.mlir") {
         Ok(op2) => op2,
@@ -97,6 +142,7 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
             return Err(format!("MLIR parse: {}", e));
         }
     };
+    crate::dialect::lower_parsed(&op)?;
     crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let e = crate::jit::Engine::new(&op, 2, &[lib_path()]);
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
@@ -120,6 +166,7 @@ pub fn run_src_multimod(src: &str, base: &std::path::Path) -> Result<(), String>
             return Err(format!("MLIR parse: {}", e));
         }
     };
+    crate::dialect::lower_parsed(&op)?;
     crate::jit::run_llvm_pipeline(ctx.raw, op.raw).map_err(|e| format!("pipeline: {}", e))?;
     let e = Engine::new(&op, 2, &[lib_path()]);
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
@@ -4454,7 +4501,7 @@ mod irgen_te_p2_r1 {
         ir.push_str("  func.func @sloth_main() -> () attributes {llvm.emit_c_interface} {\n");
         // array of 6 float words, values 1.0 .. 6.0
         ir.push_str(&format!("    %len6 = arith.constant {} : i64\n", ENC_I(6)));
-        ir.push_str("    %arr = call @sloth_arr_new(%len6) : (i64) -> i64\n");
+        ir.push_str("    %arr = func.call @sloth_arr_new(%len6) : (i64) -> i64\n");
         for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0].iter().enumerate() {
             ir.push_str(&format!(
                 "    %ai{i} = arith.constant {} : i64\n    %av{i} = arith.constant {} : i64\n",
@@ -4462,7 +4509,7 @@ mod irgen_te_p2_r1 {
                 enc_f(*v)
             ));
             ir.push_str(&format!(
-                "    call @sloth_arr_set(%arr, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
+                "    func.call @sloth_arr_set(%arr, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
             ));
         }
         // 2x3 float tensor + copy
@@ -4473,12 +4520,12 @@ mod irgen_te_p2_r1 {
             ENC_I(1)
         ));
         ir.push_str(
-            "    %t = call @sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
+            "    %t = func.call @sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
         );
-        ir.push_str("    call @sloth_tensor_copy_from_array(%t, %arr) : (i64, i64) -> i64\n");
+        ir.push_str("    func.call @sloth_tensor_copy_from_array(%t, %arr) : (i64, i64) -> i64\n");
         // flat basis memref
         ir.push_str(
-            "    %flat = call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
+            "    %flat = func.call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
         );
         // runtime dims/strides from the descriptor (de-tag: raw words -> index)
         for (name, axis) in [("0", 0i64), ("1", 1i64)] {
@@ -4487,13 +4534,13 @@ mod irgen_te_p2_r1 {
                 ENC_I(axis)
             ));
             ir.push_str(&format!(
-                "    %dw{name} = call @sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
+                "    %dw{name} = func.call @sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
                 "    %d{name} = arith.index_cast %dw{name} : i64 to index\n"
             ));
             ir.push_str(&format!(
-                "    %sw{name} = call @sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
+                "    %sw{name} = func.call @sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
                 "    %s{name} = arith.index_cast %sw{name} : i64 to index\n"
@@ -4508,7 +4555,7 @@ mod irgen_te_p2_r1 {
         ir.push_str(
             "    %v = memref.load %r2[%i1, %i2] : memref<?x?xf64, strided<[?, ?], offset: ?>>\n",
         );
-        ir.push_str("    %p = call @sloth_rt_print_f64(%v) : (f64) -> i64\n");
+        ir.push_str("    %p = func.call @sloth_rt_print_f64(%v) : (f64) -> i64\n");
         // write 7 through the memref; read back through the tensor route
         ir.push_str("    %seven = arith.constant 7.0 : f64\n");
         ir.push_str(
@@ -4521,13 +4568,13 @@ mod irgen_te_p2_r1 {
             ENC_I(0)
         ));
         ir.push_str(
-            "    %t1 = call @sloth_tensor_view(%t, %off1, %drop1, %zero) : (i64, i64, i64, i64) -> i64\n",
+            "    %t1 = func.call @sloth_tensor_view(%t, %off1, %drop1, %zero) : (i64, i64, i64, i64) -> i64\n",
         );
         ir.push_str(&format!(
-            "    %g = call @sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
+            "    %g = func.call @sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
         ));
         ir.push_str("    %gv = arith.bitcast %g : i64 to f64\n");
-        ir.push_str("    %p2 = call @sloth_rt_print_f64(%gv) : (f64) -> i64\n");
+        ir.push_str("    %p2 = func.call @sloth_rt_print_f64(%gv) : (f64) -> i64\n");
         ir.push_str("    return\n  }\n}\n");
 
         let ctx = Context::new();
@@ -4653,5 +4700,3 @@ mod irgen_ce_p1 {
         }
     }
 }
-
-

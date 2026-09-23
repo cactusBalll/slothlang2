@@ -70,7 +70,7 @@ impl ModEmitter {
                             enc_i_lit(idx)
                         ));
                         fw.op(&format!(
-                            "    call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                            "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                             rv, zi, handle
                         ));
                     }
@@ -170,7 +170,7 @@ impl ModEmitter {
                                     ));
                                     let r = fw.v();
                                     fw.op(&format!(
-                                        "    {} = call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
+                                        "    {} = func.call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
                                         r, curw, c1, c2
                                     ));
                                     curw = r;
@@ -183,7 +183,7 @@ impl ModEmitter {
                                 let (av, _at) = self.coerce_into_any(fw, &v, t);
                                 let sv = fw.v();
                                 fw.op(&format!(
-                                    "    {} = call @sloth_rt_write({}) : (i64) -> i64",
+                                    "    {} = func.call @sloth_rt_write({}) : (i64) -> i64",
                                     sv, av
                                 ));
                                 // fresh owned str from the writer: track so the
@@ -192,7 +192,7 @@ impl ModEmitter {
                                 self.dangling_producer(fw, &sv, stra);
                                 let r = fw.v();
                                 fw.op(&format!(
-                                    "    {} = call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
+                                    "    {} = func.call @sloth_str_pushp({}, {}) : (i64, i64) -> i64",
                                     r, curw, sv
                                 ));
                                 curw = r;
@@ -202,7 +202,7 @@ impl ModEmitter {
                     }
                     let fin = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_str_finish({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_str_finish({}) : (i64) -> i64",
                         fin, curw
                     ));
                     let t = self.r.mk(Ty::Str);
@@ -237,7 +237,7 @@ impl ModEmitter {
                         ));
                         let r = fw.v();
                         fw.op(&format!(
-                            "    {} = call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
+                            "    {} = func.call @sloth_str_push({}, {}, {}) : (i64, i64, i64) -> i64",
                             r, curw, c1, c2
                         ));
                         curw = r;
@@ -245,7 +245,7 @@ impl ModEmitter {
                 }
                 let fin = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_str_finish({}) : (i64) -> i64",
+                    "    {} = func.call @sloth_str_finish({}) : (i64) -> i64",
                     fin, curw
                 ));
                 let t = self.r.mk(Ty::Str);
@@ -268,7 +268,7 @@ impl ModEmitter {
                 if let Some((a, t)) = fw.lookup(name) {
                     let z = fw.v();
                     let v = fw.v();
-                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    fw.op(&format!("    {} = arith.constant 0 : index", z));
                     fw.op(&format!(
                         "    {} = memref.load {}[{}] : memref<1xi64>",
                         v, a, z
@@ -367,7 +367,7 @@ impl ModEmitter {
                             fw.op(&format!("    {} = arith.constant {} : i64", kv, k));
                             let ak = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_any_kind({}) : (i64) -> i64",
+                                "    {} = func.call @sloth_any_kind({}) : (i64) -> i64",
                                 ak, lv
                             ));
                             let eq = fw.v();
@@ -396,7 +396,7 @@ impl ModEmitter {
                             }
                             let clsid = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_any_cls_id({}) : (i64) -> i64",
+                                "    {} = func.call @sloth_any_cls_id({}) : (i64) -> i64",
                                 clsid, lv
                             ));
                             let mut acc: Option<String> = None;
@@ -457,7 +457,7 @@ impl ModEmitter {
                         if matches!(&wt, Ty::Dyn(_)) {
                             let cid = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                                "    {} = func.call @sloth_obj_cls_id({}) : (i64) -> i64",
                                 cid, lv
                             ));
                             let cls = match cn.as_str() {
@@ -621,7 +621,7 @@ impl ModEmitter {
                         ));
                         let clsid = fw.v();
                         fw.op(&format!(
-                            "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                            "    {} = func.call @sloth_obj_cls_id({}) : (i64) -> i64",
                             clsid, lv
                         ));
                         let eq = fw.v();
@@ -753,7 +753,7 @@ impl ModEmitter {
                 if *op == ArithOp::Add && self.is_str(at) && self.is_str(bt) {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_str_concat({}, {}) : (i64, i64) -> i64",
+                        "    {} = func.call @sloth_str_concat({}, {}) : (i64, i64) -> i64",
                         r, a, b
                     ));
                     let st = self.r.mk(Ty::Str);
@@ -837,7 +837,7 @@ impl ModEmitter {
                     let saved_xfer = std::mem::take(&mut fw.xfer);
                     fw.cjump(&isze, &lbl_panic, &lbl_ok);
                     fw.label(&lbl_panic);
-                    fw.op("    call @sloth_panic_divzero() : () -> i64");
+                    fw.op("    func.call @sloth_panic_divzero() : () -> i64");
                     let pz = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : index", pz));
                     fw.op(&format!(
@@ -1119,7 +1119,7 @@ impl ModEmitter {
         if matches!(op, BinOp::EqEq | BinOp::NotEq) && self.is_str(at) && self.is_str(bt) {
             let r = fw.v();
             fw.op(&format!(
-                "    {} = call @sloth_str_eq({}, {}) : (i64, i64) -> i64",
+                "    {} = func.call @sloth_str_eq({}, {}) : (i64, i64) -> i64",
                 r, a, b
             ));
             let rv = if op == &BinOp::NotEq {
@@ -1256,7 +1256,7 @@ impl ModEmitter {
                         Ty::Str => {
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, self.r.mk(Ty::Str));
@@ -1265,7 +1265,7 @@ impl ModEmitter {
                             // tag migration: f64 words ride the word route
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, fty2);
@@ -1290,7 +1290,7 @@ impl ModEmitter {
                         | Ty::Range => {
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, fty2);
@@ -1299,7 +1299,7 @@ impl ModEmitter {
                         Ty::Opt(_) => {
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, fty2);
@@ -1308,7 +1308,7 @@ impl ModEmitter {
                         Ty::Weak(_) => {
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, fty2);
@@ -1316,7 +1316,7 @@ impl ModEmitter {
                         _ => {
                             let r = fw.v();
                             fw.op(&format!(
-                                "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 r, recv, zi
                             ));
                             return (r, self.r.mk(Ty::I64));
@@ -1362,7 +1362,7 @@ impl ModEmitter {
                 };
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_range_pack({}, {}) : (i64, i64) -> i64",
+                    "    {} = func.call @sloth_range_pack({}, {}) : (i64, i64) -> i64",
                     r, lo, hi2
                 ));
                 let rt = self.r.mk(Ty::Range);
@@ -1460,12 +1460,12 @@ impl ModEmitter {
                         enc_i_lit(1)
                     ));
                     fw.op(&format!(
-                        "    {} = call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
+                        "    {} = func.call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
                         arr, n, k2
                     ));
                 } else {
                     fw.op(&format!(
-                        "    {} = call @sloth_arr_new({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_arr_new({}) : (i64) -> i64",
                         arr, n
                     ));
                 }
@@ -1485,7 +1485,7 @@ impl ModEmitter {
                         vv = self.emit_retain(fw, v);
                     }
                     fw.op(&format!(
-                        "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                        "    func.call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
                         arr, zi, vv
                     ));
                 }
@@ -1679,7 +1679,7 @@ impl ModEmitter {
                 ));
                 let m = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_map_new({}) : (i64) -> i64",
+                    "    {} = func.call @sloth_map_new({}) : (i64) -> i64",
                     m, kv0
                 ));
                 let mt2 = self.r.mk(Ty::Map(kty, vty));
@@ -1729,13 +1729,13 @@ impl ModEmitter {
                     match use_h {
                         Some(h) => {
                             fw.op(&format!(
-                                "    call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                                "    func.call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                                 "sloth_map_set_h", m, kev.0, h, vev.0
                             ));
                         }
                         None => {
                             fw.op(&format!(
-                                "    call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                                "    func.call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
                                 setsym, m, kev.0, vev.0
                             ));
                         }
@@ -1778,7 +1778,7 @@ impl ModEmitter {
                                         let (sym, retty) = ("sloth_map_get_h", "i64");
                                         let r = fw.v();
                                         fw.op(&format!(
-                                            "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
+                                            "    {} = func.call @{}({}, {}, {}) : (i64, i64, i64) -> {}",
                                             r, sym, av, iv, hv, retty
                                         ));
                                         *early.borrow_mut() = Some((r, *v));
@@ -1859,7 +1859,7 @@ impl ModEmitter {
                 }
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}) : (i64, i64) -> {}",
+                    "    {} = func.call @{}({}, {}) : (i64, i64) -> {}",
                     r, getsym, av, iv, retty
                 ));
                 (r, el)
@@ -1873,7 +1873,7 @@ impl ModEmitter {
                 Some((a, t)) => {
                     let z = fw.v();
                     let v = fw.v();
-                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    fw.op(&format!("    {} = arith.constant 0 : index", z));
                     fw.op(&format!(
                         "    {} = memref.load {}[{}] : memref<1xi64>",
                         v, a, z
@@ -2003,7 +2003,7 @@ impl ModEmitter {
                     "fill_zero" if args.len() == 1 => {
                         let (v, _t) = self.emit_expr(fw, &args[0]);
                         fw.op(&format!(
-                            "    call @sloth_tensor_fill_zero({}) : (i64) -> i64",
+                            "    func.call @sloth_tensor_fill_zero({}) : (i64) -> i64",
                             v
                         ));
                         let z = fw.v();
@@ -2115,7 +2115,7 @@ impl ModEmitter {
                     }
                     let af = emit_dec_f(fw, &av);
                     let r = fw.v();
-                    fw.op(&format!("    {} = call @{}({}) : (f64) -> f64", r, sym, af));
+                    fw.op(&format!("    {} = func.call @{}({}) : (f64) -> f64", r, sym, af));
                     return (emit_enc_f(fw, &r), self.r.mk(Ty::F64));
                 }
             }
@@ -2130,7 +2130,7 @@ impl ModEmitter {
                 let bf = emit_dec_f(fw, &bv);
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = call @sloth_rt_pow({}, {}) : (f64, f64) -> f64",
+                    "    {} = func.call @sloth_rt_pow({}, {}) : (f64, f64) -> f64",
                     r, af, bf
                 ));
                 return (emit_enc_f(fw, &r), self.r.mk(Ty::F64));
@@ -2183,7 +2183,7 @@ impl ModEmitter {
                     let rt = mlir_ret_ty(self, fs.1);
                     if self.is_unit(fs.1) {
                         fw.op(&format!(
-                            "    call @{}({}) : ({}) -> ()",
+                            "    func.call @{}({}) : ({}) -> ()",
                             fs.0,
                             vals.join(", "),
                             csig.join(", ")
@@ -2191,7 +2191,7 @@ impl ModEmitter {
                         return (String::new(), fs.1);
                     }
                     fw.op(&format!(
-                        "    {} = call @{}({}) : ({}) -> {}",
+                        "    {} = func.call @{}({}) : ({}) -> {}",
                         r,
                         fs.0,
                         vals.join(", "),
@@ -2246,7 +2246,7 @@ impl ModEmitter {
                 if name == "len" {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_map_len({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_map_len({}) : (i64) -> i64",
                         r, recvv
                     ));
                     return (r, self.r.mk(Ty::I64));
@@ -2291,7 +2291,7 @@ impl ModEmitter {
                             v = rv2;
                         }
                         fw.op(&format!(
-                            "    {} = call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
+                            "    {} = func.call @sloth_arr_push({}, {}) : (i64, i64) -> i64",
                             callv, recvv, v
                         ));
                         // GC growth may relocate the array buffer: the runtime
@@ -2311,7 +2311,7 @@ impl ModEmitter {
                             self.dangling_producer(fw, &r, elid);
                         }
                         fw.op(&format!(
-                            "    {} = call @sloth_arr_pop({}) : (i64) -> i64",
+                            "    {} = func.call @sloth_arr_pop({}) : (i64) -> i64",
                             r, recvv
                         ));
                         return (r, elid);
@@ -2319,7 +2319,7 @@ impl ModEmitter {
                     "len" => {
                         let r = fw.v();
                         fw.op(&format!(
-                            "    {} = call @sloth_arr_len({}) : (i64) -> i64",
+                            "    {} = func.call @sloth_arr_len({}) : (i64) -> i64",
                             r, recvv
                         ));
                         return (r, self.r.mk(Ty::I64));
@@ -2342,7 +2342,7 @@ impl ModEmitter {
                 if let Some(inner) = self.weak_inner(rt) {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_weak_upgrade({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_weak_upgrade({}) : (i64) -> i64",
                         r, recvv
                     ));
                     let ot = self.r.mk(Ty::Opt(inner));
@@ -2412,7 +2412,7 @@ impl ModEmitter {
                     ));
                     let fv = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                        "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
                         fv, recvv, zi
                     ));
                     return self.emit_fn_value_call(fw, &fv, &ft, args, pos);
@@ -2480,7 +2480,7 @@ impl ModEmitter {
                 let sig = tys.join(", ");
                 if self.is_unit(plan.ret) {
                     fw.op(&format!(
-                        "    call @{}({}) : ({}) -> ()",
+                        "    func.call @{}({}) : ({}) -> ()",
                         sym,
                         vals.join(", "),
                         sig
@@ -2491,7 +2491,7 @@ impl ModEmitter {
                 let ret_int = matches!(self.r.get(plan.ret).clone(), Ty::I64 | Ty::Bool);
                 let rr = fw.v();
                 fw.op(&format!(
-                    "    {} = call @{}({}) : ({}) -> {}",
+                    "    {} = func.call @{}({}) : ({}) -> {}",
                     rr,
                     sym,
                     vals.join(", "),
@@ -2553,7 +2553,7 @@ impl ModEmitter {
             let rt = mlir_ret_ty(self, plan.ret);
             if self.is_unit(plan.ret) {
                 fw.op(&format!(
-                    "    call @{}({}) : ({}) -> ()",
+                    "    func.call @{}({}) : ({}) -> ()",
                     sym,
                     vals.join(", "),
                     tys
@@ -2561,7 +2561,7 @@ impl ModEmitter {
                 return (String::new(), plan.ret);
             }
             fw.op(&format!(
-                "    {} = call @{}({}) : ({}) -> {}",
+                "    {} = func.call @{}({}) : ({}) -> {}",
                 r,
                 sym,
                 vals.join(", "),
@@ -2578,7 +2578,7 @@ impl ModEmitter {
         if let Some((slot, lt)) = fw.lookup(&name) {
             if let Ty::Fn(ft) = self.r.get(lt).clone() {
                 let z = fw.v();
-                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                fw.op(&format!("    {} = arith.constant 0 : index", z));
                 let clo = fw.v();
                 fw.op(&format!(
                     "    {} = memref.load {}[{}] : memref<1xi64>",
@@ -2618,7 +2618,7 @@ impl ModEmitter {
             let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();
             if self.is_unit(fs.1) {
                 fw.op(&format!(
-                    "    call @{}({}) : ({}) -> ()",
+                    "    func.call @{}({}) : ({}) -> ()",
                     fs.0,
                     vals.join(", "),
                     sigargs.join(", ")
@@ -2628,7 +2628,7 @@ impl ModEmitter {
             let r = fw.v();
             let rt = mlir_ret_ty(self, fs.1);
             fw.op(&format!(
-                "    {} = call @{}({}) : ({}) -> {}",
+                "    {} = func.call @{}({}) : ({}) -> {}",
                 r,
                 fs.0,
                 vals.join(", "),
@@ -2642,11 +2642,11 @@ impl ModEmitter {
         match name.as_str() {
             // rc diagnostics (SLOTH_STATS surface, predeclared in module.rs)
             "sloth_rc_live" if argv.is_empty() => {
-                fw.op(&format!("    {} = call @sloth_rc_live() : () -> i64", r));
+                fw.op(&format!("    {} = func.call @sloth_rc_live() : () -> i64", r));
                 (r, self.r.mk(Ty::I64))
             }
             "sloth_rc_drops" if argv.is_empty() => {
-                fw.op(&format!("    {} = call @sloth_rc_drops() : () -> i64", r));
+                fw.op(&format!("    {} = func.call @sloth_rc_drops() : () -> i64", r));
                 (r, self.r.mk(Ty::I64))
             }
             "int" if !argv.is_empty() => {
@@ -2692,7 +2692,7 @@ impl ModEmitter {
                     Ty::Map(..) => "sloth_map_len",
                     _ => "sloth_str_len",
                 };
-                fw.op(&format!("    {} = call @{}({}) : (i64) -> i64", r, sym, v));
+                fw.op(&format!("    {} = func.call @{}({}) : (i64) -> i64", r, sym, v));
                 (r, self.r.mk(Ty::I64))
             }
             "keys" if !argv.is_empty() => {
@@ -2702,7 +2702,7 @@ impl ModEmitter {
                     _ => self.r.mk(Ty::I64),
                 };
                 fw.op(&format!(
-                    "    {} = call @sloth_map_keys({}) : (i64) -> i64",
+                    "    {} = func.call @sloth_map_keys({}) : (i64) -> i64",
                     r, v
                 ));
                 let at = self.r.mk(Ty::Array(kt));
@@ -2717,7 +2717,7 @@ impl ModEmitter {
                     _ => self.r.mk(Ty::I64),
                 };
                 fw.op(&format!(
-                    "    {} = call @sloth_map_values({}) : (i64) -> i64",
+                    "    {} = func.call @sloth_map_values({}) : (i64) -> i64",
                     r, v
                 ));
                 let at = self.r.mk(Ty::Array(vt));
@@ -2882,7 +2882,7 @@ impl ModEmitter {
         let rt = mlir_ret_ty(self, plan.ret);
         if self.is_unit(plan.ret) {
             fw.op(&format!(
-                "    call @{}({}) : ({}) -> ()",
+                "    func.call @{}({}) : ({}) -> ()",
                 mangled,
                 vals.join(", "),
                 sigs.join(", ")
@@ -2890,7 +2890,7 @@ impl ModEmitter {
             return (String::new(), plan.ret);
         }
         fw.op(&format!(
-            "    {} = call @{}({}) : ({}) -> {}",
+            "    {} = func.call @{}({}) : ({}) -> {}",
             r,
             mangled,
             vals.join(", "),
@@ -2927,7 +2927,7 @@ impl ModEmitter {
             if self.is_ref(elem) { 1 } else { 0 }
         ));
         fw.op(&format!(
-            "    {} = call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @sloth_arr_new_k({}, {}) : (i64, i64) -> i64",
             arr, n, elref
         ));
         for (i, v) in vals.iter().enumerate() {
@@ -2943,7 +2943,7 @@ impl ModEmitter {
                 vv = self.emit_retain(fw, v);
             }
             fw.op(&format!(
-                "    call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
                 arr, zi, vv
             ));
         }
@@ -3056,7 +3056,7 @@ impl ModEmitter {
                 if want_name {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_obj_type_name({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_obj_type_name({}) : (i64) -> i64",
                         r, v
                     ));
                     self.dangling_producer(fw, &r, strt);
@@ -3064,7 +3064,7 @@ impl ModEmitter {
                 } else {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_obj_cls_id({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_obj_cls_id({}) : (i64) -> i64",
                         r, v
                     ));
                     (r, i64t)
@@ -3074,7 +3074,7 @@ impl ModEmitter {
                 if want_name {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_any_type_name({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_any_type_name({}) : (i64) -> i64",
                         r, v
                     ));
                     self.dangling_producer(fw, &r, strt);
@@ -3082,7 +3082,7 @@ impl ModEmitter {
                 } else {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = call @sloth_any_type_id({}) : (i64) -> i64",
+                        "    {} = func.call @sloth_any_type_id({}) : (i64) -> i64",
                         r, v
                     ));
                     (r, i64t)
@@ -3135,7 +3135,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", c0));
         let fin = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_str_finish({}) : (i64) -> i64",
+            "    {} = func.call @sloth_str_finish({}) : (i64) -> i64",
             fin, c0
         ));
         let t = self.r.mk(Ty::Str);

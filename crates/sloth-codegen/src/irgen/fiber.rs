@@ -83,13 +83,13 @@ impl ModEmitter {
             Some(s) => {
                 let (sv, _st) = self.emit_expr(fw, s);
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                    "    {} = func.call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                     r, sym, fv, iv, sv, eref
                 ));
             }
             None => {
                 fw.op(&format!(
-                    "    {} = call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
+                    "    {} = func.call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
                     r, sym, fv, iv, eref
                 ));
             }
@@ -134,7 +134,7 @@ impl ModEmitter {
         ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_fiber_{}({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @sloth_fiber_{}({}, {}, {}) : (i64, i64, i64) -> i64",
             r, sym, fv, vv, boxf
         ));
         let rt = self.r.mk(Ty::Opt(y));
@@ -173,7 +173,7 @@ impl ModEmitter {
         let (vv, vt) = self.emit_expr(fw, varg);
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_fiber_yield({}) : (i64) -> i64",
+            "    {} = func.call @sloth_fiber_yield({}) : (i64) -> i64",
             r, vv
         ));
         // cooperative cancellation: when the fiber was cancelled while
@@ -181,7 +181,7 @@ impl ModEmitter {
         // longjmping to the entry landing pad
         let c = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_fiber_cancelled() : () -> i64",
+            "    {} = func.call @sloth_fiber_cancelled() : () -> i64",
             c
         ));
         let lbl_abort = fw.newlabel("fx");
@@ -195,8 +195,8 @@ impl ModEmitter {
         fw.rc_flush();
         fw.rc_release_scope_slots();
         // the resume payload returned by this yield is abandoned on cancel
-        fw.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", r));
-        fw.op("    call @sloth_fiber_cancel_abort() : () -> ()");
+        fw.op(&format!("    sloth.rc_release {} : i64", r));
+        fw.op("    func.call @sloth_fiber_cancel_abort() : () -> ()");
         fw.jump(&lbl_cont);
         fw.label(&lbl_cont);
         fw.dangling = saved_dangling;
@@ -221,7 +221,7 @@ impl ModEmitter {
         fw.rc_flush();
         fw.rc_release_scope_slots();
         fw.op(&format!(
-            "    call @sloth_fiber_error({}) : (i64) -> i64",
+            "    func.call @sloth_fiber_error({}) : (i64) -> i64",
             owned
         ));
         let z = fw.v();
@@ -232,7 +232,7 @@ impl ModEmitter {
     fn emit_fiber_pred(&mut self, fw: &mut FnWalk, farg: &Expr, sym: &str) -> (String, TyId) {
         let (fv, _ft) = self.emit_expr(fw, farg);
         let r = fw.v();
-        fw.op(&format!("    {} = call @{}({}) : (i64) -> i64", r, sym, fv));
+        fw.op(&format!("    {} = func.call @{}({}) : (i64) -> i64", r, sym, fv));
         (r, self.r.mk(Ty::Bool))
     }
 
@@ -247,7 +247,7 @@ impl ModEmitter {
     pub(crate) fn emit_fiber_cancel(&mut self, fw: &mut FnWalk, farg: &Expr) -> (String, TyId) {
         let (fv, _ft) = self.emit_expr(fw, farg);
         fw.op(&format!(
-            "    call @sloth_fiber_cancel({}) : (i64) -> i64",
+            "    func.call @sloth_fiber_cancel({}) : (i64) -> i64",
             fv
         ));
         let z = fw.v();

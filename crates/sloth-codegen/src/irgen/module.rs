@@ -474,7 +474,7 @@ impl ModEmitter {
         ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = call @sloth_type_name_or({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @sloth_type_name_or({}, {}, {}) : (i64, i64, i64) -> i64",
             r, v, p, lc
         ));
         let t = self.r.mk(Ty::Str);
@@ -566,7 +566,7 @@ impl ModEmitter {
             }
             let body = fw.cur.clone();
             self.out.push_str(&format!(
-                "  func.func @sloth_{}__ginit() -> () {{\n    call @sloth_{}__anyinit() : () -> ()\n{}    return\n  }}\n",
+                "  func.func @sloth_{}__ginit() -> () {{\n    func.call @sloth_{}__anyinit() : () -> ()\n{}    return\n  }}\n",
                 self.name, self.name, body
             ));
         }
@@ -640,12 +640,12 @@ impl ModEmitter {
             // run imported modules' variable initializers first
             let init_mods = self.init_mods.clone();
             for m in &init_mods {
-                fw.op(&format!("    call @sloth_{}__ginit() : () -> ()", m));
+                fw.op(&format!("    func.call @sloth_{}__ginit() : () -> ()", m));
             }
             // script mode skips the local ginit; initialise local descriptors
             let mname = self.name.clone();
             fw.op(&format!(
-                "    call @sloth_{}__anyinit() : () -> ()",
+                "    func.call @sloth_{}__anyinit() : () -> ()",
                 mname
             ));
             // top-level var/let decls become prelude statements (script mode

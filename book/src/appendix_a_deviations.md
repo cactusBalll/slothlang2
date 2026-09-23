@@ -8,7 +8,7 @@
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
 | §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后由单一发射器**一趟融合**完成符号收集、局部推断、约束检查、单态化与 MLIR 生成 | 定案 |
-| §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | **没有** sloth dialect；直接发射标准 `func`/`arith`/`cf`/`memref`/`llvm`，运行时能力用 `func.func private @sloth_*` C-ABI 调用表达 | 定案 |
+| §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | 仅一个**最小** `sloth` dialect（TableGen/C++，ARC `sloth.rc_retain`/`sloth.rc_release`）；解析后由单点 lowering 全部降为标准方言（`func.call @sloth_*`），对外 IR 仍无 `sloth.*`。完整类型/GC 方言（`!sloth.string`、`sloth.gc_alloc`）不实现 | 部分解冻（2026-09-23，见 `PLAN-sloth-dialect.md`） |
 | §4.1 循环依赖通过依赖图拓扑检测 | `resolve_program` 在按 `import` 递归装配时用 DFS 栈比对规范化路径，命中即报 `circular import`（`crates/sloth-codegen/src/irgen/mod.rs:205`）；`done` 集合去重。无独立依赖图/拓扑排序阶段 | 定案（等价检测，无独立阶段） |
 | §4.2 闭包捕获结构体 + 逃逸性分析 | 闭包统一为 2 词 `{ fnptr, env }` 对象；捕获语义见 §10 | 等价实现 |
 

@@ -83,11 +83,11 @@ impl FnWalk {
         let c1 = self.v();
         let pending = std::mem::take(&mut self.dangling);
         for h in pending {
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+            self.op(&format!("    sloth.rc_release {} : i64", h));
         }
         let pending_x = std::mem::take(&mut self.xfer);
         for h in pending_x {
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+            self.op(&format!("    sloth.rc_release {} : i64", h));
         }
         // tag migration: `c` is an encoded bool word (false=0, true=enc(1)=2);
         // a trunci would read the tag bit and always yield false — compare
@@ -104,11 +104,11 @@ impl FnWalk {
     pub(crate) fn rc_flush(&mut self) {
         let pending = std::mem::take(&mut self.dangling);
         for h in pending {
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+            self.op(&format!("    sloth.rc_release {} : i64", h));
         }
         let pending_x = std::mem::take(&mut self.xfer);
         for h in pending_x {
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", h));
+            self.op(&format!("    sloth.rc_release {} : i64", h));
         }
     }
     /// consume a dangling producer whose ownership TRANSFERS out of the
@@ -161,7 +161,7 @@ impl FnWalk {
                 "    {} = memref.load {}[{}] : memref<1xi64>",
                 w, a, z
             ));
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+            self.op(&format!("    sloth.rc_release {} : i64", w));
             self.untrack_slot(&a);
         }
     }
@@ -185,7 +185,7 @@ impl FnWalk {
                 "    {} = memref.load {}[{}] : memref<1xi64>",
                 w, a, z
             ));
-            self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+            self.op(&format!("    sloth.rc_release {} : i64", w));
             self.untrack_slot(&a);
         }
     }
@@ -230,7 +230,7 @@ impl FnWalk {
                         "    {} = memref.load {}[{}] : memref<1xi64>",
                         w, a, z
                     ));
-                    self.op(&format!("    call @sloth_rc_release({}) : (i64) -> i64", w));
+                    self.op(&format!("    sloth.rc_release {} : i64", w));
                     self.untrack_slot(&a);
                 }
             }
@@ -278,7 +278,7 @@ impl FnWalk {
             pw, pi
         ));
         self.op(&format!(
-            "    call @sloth_fiber_track({}) : (i64) -> i64",
+            "    func.call @sloth_fiber_track({}) : (i64) -> i64",
             pw
         ));
     }
@@ -296,7 +296,7 @@ impl FnWalk {
             pw, pi
         ));
         self.op(&format!(
-            "    call @sloth_fiber_untrack({}) : (i64) -> i64",
+            "    func.call @sloth_fiber_untrack({}) : (i64) -> i64",
             pw
         ));
     }
@@ -304,7 +304,7 @@ impl FnWalk {
     pub(crate) fn assign(&mut self, name: &str, val: &str, _fl: bool) {
         if let Some((a, _t)) = self.lookup(name) {
             let z = self.v();
-            self.op(&format!("    {} = arith.constant 0 : i64", z));
+            self.op(&format!("    {} = arith.constant 0 : index", z));
             self.op(&format!(
                 "    memref.store {}, {}[{}] : memref<1xi64>",
                 val, a, z
