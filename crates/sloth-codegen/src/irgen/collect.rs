@@ -81,6 +81,7 @@ impl ModEmitter {
                             impls: c.impls.clone(),
                         },
                     );
+                    self.register_class_vt_surface(&d.name);
                 }
                 DeclNode::Trait(t) => {
                     let _ = t;
@@ -137,6 +138,136 @@ impl ModEmitter {
                             .replace("{}", &d.name),
                     );
                 }
+            }
+        }
+        // design §2.4: a subclass method that shadows an ancestor declaration
+        // must keep an ABI-compatible signature (base-typed virtual dispatch
+        // calls the override through the ancestor's call-site ABI)
+        self.check_override_sigs(prog);
+    }
+
+    /// a subclass method shadowing an ancestor method must match arity and
+    /// word kinds: base-typed dispatch reuses the ancestor's call-site ABI.
+    /// `__init__` is exempt (each class declares its own ctor signature).
+    /// Generic classes/defs are skipped (unresolved `T` is not a word kind).
+    pub(crate) fn check_override_sigs(&mut self, prog: &Program) {
+        for d in &prog.decls {
+            let c = match &d.node {
+                DeclNode::Class(c) => c,
+                _ => continue,
+            };
+            if !c.type_params.is_empty() {
+                continue;
+            }
+            let sup = match &c.superclass {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            for m in &c.methods {
+                if m.name == "__init__" {
+                    continue;
+                }
+                let (defcls, base) = match self.find_method(&sup, &m.name) {
+                    Some(x) => x,
+                    None => continue,
+                };
+                if self
+                    .class_defs
+                    .get(&defcls)
+                    .map(|(_, cd)| !cd.type_params.is_empty())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let fd = &m.fd;
+                if fd.params.len() != base.params.len() {
+                    self.err(
+                        &d.pos,
+                        format!(
+                            "override `{}.{}` of `{}.{}`: arity want {}, got {}",
+                            d.name,
+                            m.name,
+                            defcls,
+                            m.name,
+                            base.params.len(),
+                            fd.params.len()
+                        ),
+                    );
+                    continue;
+                }
+                let mut bad: Option<String> = None;
+                for (i, bp) in base.params.iter().enumerate() {
+                    let bfl = self.sig_word_float(bp.ty.clone());
+                    let dfl = match fd.params.get(i).and_then(|p| p.ty.as_ref()) {
+                        Some(t) => {
+                            let it = self.ty_of(t);
+                            self.is_float(it)
+                        }
+                        None => false,
+                    };
+                    if bfl != dfl {
+                        bad = Some(format!("param {}: ABI word mismatch", i + 1));
+                        break;
+                    }
+                }
+                if bad.is_none() {
+                    let bret = self.sig_word_float(base.ret.clone());
+                    let dret = match fd.ret.as_ref() {
+                        Some(t) => {
+                            let it = self.ty_of(t);
+                            self.is_float(it)
+                        }
+                        None => false,
+                    };
+                    if bret != dret {
+                        bad = Some("return: ABI word mismatch".to_string());
+                    }
+                }
+                if let Some(msg) = bad {
+                    self.err(
+                        &d.pos,
+                        format!(
+                            "override `{}.{}` of `{}.{}`: {}",
+                            d.name, m.name, defcls, m.name, msg
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl ModEmitter {
+    /// Pre-scan every module's class hierarchy and record the method names
+    /// that are overridden somewhere in the program. Devirtualization keys off
+    /// this set, so it must be computed before ANY method body is emitted:
+    /// imports emit before root classes register, yet a root subclass can
+    /// still override an imported method.
+    pub(crate) fn register_override_index(&mut self, progs: &[&Program]) {
+        let mut sup: HashMap<String, Option<String>> = HashMap::new();
+        let mut decl: HashMap<String, Vec<String>> = HashMap::new();
+        for p in progs {
+            for d in &p.decls {
+                if let DeclNode::Class(c) = &d.node {
+                    sup.insert(d.name.clone(), c.superclass.clone());
+                    decl.insert(
+                        d.name.clone(),
+                        c.methods.iter().map(|m| m.name.clone()).collect(),
+                    );
+                }
+            }
+        }
+        for (cls, ms) in &decl {
+            let mut cur = sup.get(cls).cloned().flatten();
+            while let Some(a) = cur {
+                if let Some(ams) = decl.get(&a) {
+                    for m in ms {
+                        if ams.iter().any(|x| x == m) {
+                            self.known_override_methods.insert(m.clone());
+                        }
+                    }
+                }
+                cur = sup.get(&a).cloned().flatten();
             }
         }
     }
@@ -317,6 +448,10 @@ impl ModEmitter {
         };
         let mangled = if let Some(m) = self.tp_mangled.last() {
             m.clone()
+        } else if self.fixed_syms.contains(name) {
+            // self-hosted container prelude: keep the raw ABI symbol so the
+            // hardcoded @sloth_arr_*/@sloth_map_* call sites resolve
+            name.to_string()
         } else {
             mangle(&self.cur_mod.clone(), cls, name)
         };

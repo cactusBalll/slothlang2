@@ -35,16 +35,25 @@
 - **字符串**：`sloth_str_intern`（历史命名，不驻留）/ `_push` / `_finish` /
   `_pushp` / `_push_i|_f|_b` / `_len` / `_clen` / `_char` / `_concat` / `_eq`；
 - **range**：`sloth_range_pack` / `_lo` / `_hi`；
-- **数组**：`sloth_arr_new` / `_new_k` / `_len` / `_get` / `_set` / `_push` / `_pop`；
-- **Map**：`sloth_map_new` / `_len` / `_get` / `_set` / `_get_h` / `_set_h` /
-  `_str_get` / `_str_set` / `_keys` / `_values`；
-- **对象/虚表**：`sloth_obj_new` / `_field` / `_set_field` / `_cls_id` / `_vtable` /
-  `_set_vtable`、`sloth_cls_info` / `_refmask`、`sloth_closure_new`、
-  `sloth_vt_new` / `_set` / `_get`；
+- **裸内存/rc 分配**（自举容器实现的下层接口）：`sloth_rt_alloc` / `sloth_free`、
+  `sloth_mem_load` / `_store` / `_copy`、`sloth_rc_new`（带 `__dispose__` 析构钩子）；
+- **数组 / Map**：`sloth_arr_new` / `_new_k` / `_len` / `_get` / `_set` / `_push` / `_pop`；
+  `sloth_map_new` / `_len` / `_get` / `_set` / `_get_h` / `_set_h` / `_str_get` /
+  `_str_set` / `_keys` / `_values`。**这些符号不再由 `libsloth_rt.so` 导出**：
+  它们由注入的 `lib/prelude/containers.slt` 以 sloth 自身实现并定义在生成的模块里，
+  所以调用点仍写作裸符号 `@sloth_arr_*` / `@sloth_map_*`；
+- **对象/虚表**：`sloth_obj_new`（第三参为类的死亡级联地址）/ `_field` / `_set_field` /
+  `_cls_id` / `_vtable` / `_set_vtable`、`sloth_cls_info` / `_name`、
+  `sloth_closure_new`、`sloth_vt_new` / `_set` / `_get`；
 - **panic**：`sloth_panic_noimpl` / `sloth_panic_divzero` / `sloth_panic_unwrap`
-  （后者仅在使用 Result 时出现）。
+  （后者仅在使用 Result 时出现），以及容器使用的 `sloth_panic_oob` / `_nokey` / `_pop`。
 
-这些符号由 `libsloth_rt.so` 导出，程序在 JIT/链接期解析。
+**容器自举**：Array/Map 的算法（扩容、线性探测、FNV/mix64 哈希、`keys()`/`values()`、
+以及强计数归零时的 death cascade）全部写在 `lib/prelude/containers.slt`，编译期注入根
+模块一次。容器析构经通用可重载的 `__dispose__` 钩子（`sloth_arr_dispose` /
+`sloth_map_dispose`）注册到 rc 头；`libsloth_rt.so` 只保留裸分配、字级内存与 rc 机制。
+
+其余符号由 `libsloth_rt.so` 导出，程序在 JIT/链接期解析。
 
 ## B.3 完整示例（未剥离前导）
 

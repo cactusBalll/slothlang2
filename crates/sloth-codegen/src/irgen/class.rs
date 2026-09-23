@@ -11,6 +11,31 @@ use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 
+/// reserved vtable namespace for plain (non-trait) class methods. Traits are
+/// identifiers, so an empty trait name can never collide with a real trait.
+pub(crate) const VT_METHOD_NS: &str = "";
+
+impl ModEmitter {
+    /// register a class's virtual surface: allocate a global method-name slot
+    /// for every method that can participate in base-typed virtual dispatch
+    /// (all but ctor/dtor) and mark them llvm.func so the address is
+    /// vtable-addressable. Called at every class registration point (root
+    /// collect, import register, generic instance declaration).
+    pub(crate) fn register_class_vt_surface(&mut self, cls: &str) {
+        let meths: Vec<String> = match self.classes.get(cls) {
+            Some(ci) => ci.methods.iter().map(|(n, _)| n.clone()).collect(),
+            None => return,
+        };
+        for name in meths {
+            if name == "__init__" || name == "__dispose__" {
+                continue;
+            }
+            self.vt_slot(VT_METHOD_NS, &name);
+            self.llvm_method.insert((cls.to_string(), name));
+        }
+    }
+}
+
 impl ModEmitter {
     /// Result ctor synth for `let r: Result<T,E> = ok(v) / err(e)`
     pub(crate) fn emit_result_ctor(
@@ -184,50 +209,44 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    /// is `sub` the same class as `sup` or a (transitive) descendant of it?
-    pub(crate) fn is_descendant_of(&self, sup: &str, sub: &str) -> bool {
-        let mut cur = Some(sub.to_string());
-        while let Some(c) = cur {
-            if c == sup {
-                return true;
-            }
-            cur = self.classes.get(&c).and_then(|ci| ci.superclass.clone());
+    /// design §2.4: is this class method virtually dispatched? True when the
+    /// method name is overridden somewhere in the whole program (see
+    /// `known_override_methods`, pre-computed order-independently) and the
+    /// static type actually declares it. Ctors/dtors never participate.
+    pub(crate) fn has_virtual_override(&self, base_cls: &str, mname: &str) -> bool {
+        if mname == "__init__" || mname == "__dispose__" {
+            return false;
         }
-        false
+        if !self.known_override_methods.contains(mname) {
+            return false;
+        }
+        self.find_method(base_cls, mname).is_some()
     }
 
-    /// design §2.4: calling a method through a base-class reference must
-    /// dispatch on the runtime class. Emits a class-id switch over every
-    /// loaded concrete subclass that overrides `mname`. Returns None when no
-    /// subclass overrides it (the caller keeps the direct call).
-    pub(crate) fn emit_class_virtual_call(
+    /// design §2.4: base-typed call to an overridden class method dispatches
+    /// on the runtime class through the object-header vtable (slot keyed by
+    /// method name, filled by each concrete class's builder). The call-site
+    /// ABI follows the static type's (base) plan; no class-id chain. Returns
+    /// None only if the method/plan can't be resolved (caller falls back).
+    pub(crate) fn emit_class_vt_call(
         &mut self,
         fw: &mut FnWalk,
         base_cls: &str,
         mname: &str,
         recv: &str,
         argv: &Vec<(String, TyId)>,
-        sigargs: &Vec<String>,
         pos: &Pos,
     ) -> Option<(String, TyId)> {
+        self.stat_cvcalls += 1;
         let (basedefcls, basedef) = self.find_method(base_cls, mname)?;
-        let mut branches: Vec<(String, String, FuncDef)> = Vec::new();
-        let names: Vec<String> = self.classes.keys().cloned().collect();
-        for cname in names {
-            if !self.is_descendant_of(base_cls, &cname) {
-                continue;
-            }
-            if let Some((dc, fd)) = self.find_method(&cname, mname) {
-                if dc != basedefcls {
-                    branches.push((cname, dc, fd));
-                }
-            }
-        }
-        if branches.is_empty() {
-            return None;
-        }
-        let ret = self.plan_for_class(mname, &basedefcls, &basedef).ret;
+        let plan = self.plan_for_class(mname, &basedefcls, &basedef);
+        let ret = plan.ret;
         let unit = self.is_unit(ret);
+        // caller-side coercion against the STATIC type's parameter surface
+        // (patch 42: Opt/dyn boxing must match the direct-call path)
+        let vals = self.coerce_args_to_params(fw, argv, &plan.params, pos);
+        let slot = self.vt_slot(VT_METHOD_NS, mname);
+        // result slot: keeps SSA dominance across the call/panic branches
         let resslot: Option<String> = if unit {
             None
         } else {
@@ -235,80 +254,110 @@ impl ModEmitter {
             fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", a));
             Some(a)
         };
-        let cid = fw.v();
+        // object header word 1 -> class vtable; slot -> raw fn pointer
+        let vt = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_cls_id({}) : (i64) -> i64",
-            cid, recv
+            "    {} = func.call @sloth_obj_vtable({}) : (i64) -> i64",
+            vt, recv
         ));
-        let lbl_def = fw.newlabel("cv");
-        let lbl_end = fw.newlabel("cv");
-        let labels: Vec<String> = branches.iter().map(|_| fw.newlabel("cv")).collect();
-        // class-id switch splits the CFG mid-expression: preserve owned temps
+        let slotc = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            slotc,
+            enc_i_lit(slot as i64)
+        ));
+        let fp = fw.v();
+        fw.op(&format!(
+            "    {} = func.call @sloth_vt_get({}, {}) : (i64, i64) -> i64",
+            fp, vt, slotc
+        ));
+        let zero = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", zero));
+        let cc = fw.v();
+        fw.op(&format!(
+            "    {} = arith.cmpi ne, {}, {} : i64",
+            cc, fp, zero
+        ));
+        let ce = fw.v();
+        fw.op(&format!("    {} = arith.extui {} : i1 to i64", ce, cc));
+        let lbl_call = fw.newlabel("cv");
+        let lbl_panic = fw.newlabel("cp");
+        let lbl_end = fw.newlabel("ce");
+        // vtable dispatch splits the CFG mid-expression: preserve owned temps
         // (producers + transferred call results) of the enclosing expression
-        // across the merge
+        // across the merge (§5.1.1 rule 5)
         let saved_dangling = std::mem::take(&mut fw.dangling);
         let saved_xfer = std::mem::take(&mut fw.xfer);
-        for (i, (cname, _, _)) in branches.iter().enumerate() {
-            let idw = fw.v();
-            let cidn = *self.class_ids.get(cname).unwrap_or(&0);
+        fw.cjump(&ce, &lbl_call, &lbl_panic);
+        fw.label(&lbl_call);
+        let vp = fw.v();
+        fw.op(&format!(
+            "    {} = llvm.inttoptr {} : i64 to !llvm.ptr",
+            vp, fp
+        ));
+        let tys: Vec<String> = plan
+            .params
+            .iter()
+            .take(vals.len())
+            .map(|_| "i64".to_string())
+            .collect();
+        let sig = tys.join(", ");
+        if unit {
             fw.op(&format!(
-                "    {} = arith.constant {} : i64",
-                idw,
-                enc_i_lit(cidn)
+                "    llvm.call {}({}) : !llvm.ptr, ({}) -> ()",
+                vp,
+                vals.join(", "),
+                sig
             ));
-            let c = fw.v();
+        } else {
+            let rv = fw.v();
             fw.op(&format!(
-                "    {} = arith.cmpi eq, {}, {} : i64",
-                c, cid, idw
+                "    {} = llvm.call {}({}) : !llvm.ptr, ({}) -> i64",
+                rv,
+                vp,
+                vals.join(", "),
+                sig
             ));
-            let ce = fw.v();
-            fw.op(&format!("    {} = arith.extui {} : i1 to i64", ce, c));
-            let nxt = if i + 1 < branches.len() {
-                fw.newlabel("cv")
-            } else {
-                lbl_def.clone()
-            };
-            fw.cjump(&ce, &labels[i], &nxt);
-            if i + 1 < branches.len() {
-                fw.label(&nxt);
-            }
-        }
-        // default: the base implementation
-        fw.label(&lbl_def);
-        let (rv, _) =
-            self.emit_method_call(fw, &basedefcls, mname, &basedef, false, argv, sigargs, pos);
-        if let Some(slot) = &resslot {
-            let zi = fw.v();
-            fw.op(&format!("    {} = arith.constant 0 : index", zi));
-            fw.op(&format!(
-                "    memref.store {}, {}[{}] : memref<1xi64>",
-                rv, slot, zi
-            ));
-        }
-        fw.jump(&lbl_end);
-        for (i, (_, dc, fd)) in branches.iter().enumerate() {
-            fw.label(&labels[i]);
-            let (rv, _) = self.emit_method_call(fw, dc, mname, fd, false, argv, sigargs, pos);
-            if let Some(slot) = &resslot {
+            if let Some(slot2) = &resslot {
                 let zi = fw.v();
                 fw.op(&format!("    {} = arith.constant 0 : index", zi));
                 fw.op(&format!(
                     "    memref.store {}, {}[{}] : memref<1xi64>",
-                    rv, slot, zi
+                    rv, slot2, zi
                 ));
             }
-            fw.jump(&lbl_end);
         }
+        fw.jump(&lbl_end);
+        // empty slot = internal bug (must never be read by a well-typed call)
+        fw.label(&lbl_panic);
+        let pv = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", pv));
+        let pz = fw.v();
+        fw.op(&format!(
+            "    {} = func.call @sloth_panic_noimpl({}) : (i64) -> i64",
+            pz, pv
+        ));
+        if let Some(slot2) = &resslot {
+            let zi = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : index", zi));
+            let z2 = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z2));
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                z2, slot2, zi
+            ));
+        }
+        fw.jump(&lbl_end);
         fw.label(&lbl_end);
         fw.dangling = saved_dangling;
         fw.xfer = saved_xfer;
-        if let Some(slot) = resslot {
+        if let Some(slot2) = resslot {
             let zi = fw.v();
             let v = fw.v();
             fw.op(&format!("    {} = arith.constant 0 : index", zi));
             fw.op(&format!(
                 "    {} = memref.load {}[{}] : memref<1xi64>",
-                v, slot, zi
+                v, slot2, zi
             ));
             // §5.1.1 rule 5: the merged dispatch result is an owned temp
             if self.is_ref(ret) {
@@ -341,6 +390,109 @@ impl ModEmitter {
     }
 }
 
+/// sanitize a class display name into a symbol fragment
+fn sym_frag(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// per-class death-cascade symbol
+fn cascade_sym(owner_mod: &str, clsname: &str) -> String {
+    format!("sloth_{}_{}__cascade", owner_mod, sym_frag(clsname))
+}
+
+impl ModEmitter {
+    /// emit (once) a death cascade `(payload, aux) -> i64` that runs the user
+    /// `__dispose__` (if any; `dispose` = its symbol) and then releases each
+    /// reference field at the flat indices `refs`. The routine is registered
+    /// as the instance header's `sdtor`.
+    pub(crate) fn emit_cascade_fn(
+        &mut self,
+        tsym: &str,
+        refs: &[i64],
+        dispose: Option<(&str, bool)>,
+    ) {
+        if self.emitted_names.iter().any(|n| n == tsym) {
+            return;
+        }
+        self.emitted_names.push(tsym.to_string());
+        let mut body = String::new();
+        if let Some((msym, unit)) = dispose {
+            if unit {
+                body.push_str(&format!("    func.call @{msym}(%arg0) : (i64) -> ()\n"));
+            } else {
+                body.push_str(&format!(
+                    "    %dr = func.call @{msym}(%arg0) : (i64) -> i64\n"
+                ));
+            }
+        }
+        for i in refs {
+            body.push_str(&format!("    %ci{i} = arith.constant {i} : i64\n"));
+            body.push_str(&format!(
+                "    %cf{i} = func.call @sloth_obj_field(%arg0, %ci{i}) : (i64, i64) -> i64\n"
+            ));
+            body.push_str(&format!(
+                "    func.call @sloth_rc_release(%cf{i}) : (i64) -> i64\n"
+            ));
+        }
+        self.out.push_str(&format!(
+            "  llvm.func @{tsym}(%arg0: i64, %arg1: i64) -> i64 {{\n"
+        ));
+        self.out.push_str(&body);
+        self.out.push_str("    %cz = arith.constant 0 : i64\n");
+        self.out.push_str("    llvm.return %cz : i64\n  }\n");
+    }
+
+    /// resolve the emitted symbol of the user `__dispose__` method for
+    /// `clsname` (possibly inherited), plus whether it returns unit. Generic
+    /// instances emit their monomorphized methods in the root module.
+    pub(crate) fn dispose_method_sym(&mut self, clsname: &str) -> Option<(String, bool)> {
+        let (defcls, fd) = self.find_method(clsname, "__dispose__")?;
+        let owner = if self.class_frames.contains_key(clsname) {
+            self.name.clone()
+        } else {
+            self.cls_mod
+                .get(&defcls)
+                .cloned()
+                .unwrap_or_else(|| self.name.clone())
+        };
+        let ret_unit = match &fd.ret {
+            None => true,
+            Some(t) => {
+                let tt = self.ty_of(t);
+                self.is_unit(tt)
+            }
+        };
+        Some((mangle(&owner, Some(&defcls), "__dispose__"), ret_unit))
+    }
+
+    /// ensure the per-class death cascade exists and return its symbol, or
+    /// `None` when the class has no reference fields and no `__dispose__`.
+    pub(crate) fn ensure_cascade(&mut self, clsname: &str) -> Option<String> {
+        let refs = self.class_ref_fields(clsname);
+        let dispose = self.dispose_method_sym(clsname);
+        if refs.is_empty() && dispose.is_none() {
+            return None;
+        }
+        let owner = self
+            .cls_mod
+            .get(clsname)
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
+        let tsym = cascade_sym(&owner, clsname);
+        let dispose_ref = dispose.as_ref().map(|(s, u)| (s.as_str(), *u));
+        self.emit_cascade_fn(&tsym, &refs, dispose_ref);
+        Some(tsym)
+    }
+}
+
 pub(crate) fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
     let mut n = 0usize;
     let mut cur = Some(clsname.to_string());
@@ -358,9 +510,9 @@ pub(crate) fn words_for_cls(me: &ModEmitter, clsname: &str) -> usize {
 }
 
 impl ModEmitter {
-    /// per-class rc field mask: bit i (base-class-first layout) = field i is
-    /// a reference word; fields are the flat chain of the superclass chain
-    pub(crate) fn class_refmask(&self, clsname: &str) -> (i64, i64) {
+    /// flat indices (base-class-first layout) of a class's reference fields;
+    /// the emitted death cascade releases exactly these
+    pub(crate) fn class_ref_fields(&self, clsname: &str) -> Vec<i64> {
         let mut chain: Vec<String> = Vec::new();
         let mut cur = Some(clsname.to_string());
         while let Some(c) = cur {
@@ -373,7 +525,8 @@ impl ModEmitter {
             }
         }
         chain.reverse();
-        let (mut mask, mut bit, mut nf) = (0i64, 0i64, 0i64);
+        let mut idx = 0i64;
+        let mut out = Vec::new();
         for c in chain {
             let ci = match self.classes.get(&c) {
                 Some(c2) => c2,
@@ -381,13 +534,12 @@ impl ModEmitter {
             };
             for (_fn2, ft, _mv) in &ci.fields {
                 if !self.is_float(*ft) && self.is_ref(*ft) {
-                    mask |= 1 << bit;
+                    out.push(idx);
                 }
-                bit += 1;
-                nf += 1;
+                idx += 1;
             }
         }
-        (mask, nf)
+        out
     }
 }
 
@@ -441,27 +593,26 @@ impl ModEmitter {
                 cid, p, lc
             ));
         }
-        // crate the class's reference-field mask so the rt death cascade
-        // releases exactly the ref fields on instance death
-        {
-            let (mask, nft) = self.class_refmask(clsname);
-            let mv = fw.v();
+        // emit the per-class death cascade (user `__dispose__` then reference
+        // field releases) and register its address as the allocation's sdtor;
+        // `None` (no ref fields, no hook) leaves the runtime with nothing to do
+        let cascade = if let Some(tsym) = self.ensure_cascade(clsname) {
+            let fp = fw.v();
             fw.op(&format!(
-                "    {} = arith.constant {} : i64",
-                mv,
-                enc_i_lit(mask)
+                "    {} = llvm.mlir.addressof @{} : !llvm.ptr",
+                fp, tsym
             ));
-            let nfv = fw.v();
+            let fpw = fw.v();
             fw.op(&format!(
-                "    {} = arith.constant {} : i64",
-                nfv,
-                enc_i_lit(nft)
+                "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
+                fpw, fp
             ));
-            fw.op(&format!(
-                "    func.call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
-                cid, mv, nfv
-            ));
-        }
+            fpw
+        } else {
+            let zero = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", zero));
+            zero
+        };
         let nfw = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
@@ -470,8 +621,8 @@ impl ModEmitter {
         ));
         let r2 = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
-            r2, cid, nfw
+            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            r2, cid, nfw, cascade
         ));
         // rc patch B: fresh instance = producer temp
         let ot2 = self.r.mk(Ty::Named(clsname.to_string(), vec![]));
@@ -701,9 +852,15 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
-    /// resolve a method plan against a class, honoring its owning module
+    /// resolve a method plan against a class, honoring its owning module and
+    /// its generic-instance type frame (a generic instance's method defs still
+    /// spell `T`; without the frame a plan would resolve bogus instances)
     pub(crate) fn plan_for_class(&mut self, mname: &str, cls: &str, m: &FuncDef) -> FuncPlan {
         let saved_mod = self.cur_mod.clone();
+        let instf = self.class_frames.get(cls).cloned();
+        if let Some(fr) = instf.clone() {
+            self.tp_subst.push(fr);
+        }
         self.cur_mod = self
             .cls_mod
             .get(&cls.to_string())
@@ -711,6 +868,9 @@ impl ModEmitter {
             .unwrap_or_else(|| self.name.clone());
         let plan = self.plan_mangled(mname, Some(cls), m, None);
         self.cur_mod = saved_mod;
+        if instf.is_some() {
+            self.tp_subst.pop();
+        }
         plan
     }
 }
@@ -755,12 +915,15 @@ impl ModEmitter {
                 None => break,
             }
         }
-        if impls.is_empty() || self.vt_cap == 0 {
+        if self.vt_cap == 0 {
             return;
         }
         let builder = self.emit_vt_builder(clsname, &impls);
         let vt = fw.v();
-        fw.op(&format!("    {} = func.call @{}() : () -> i64", vt, builder));
+        fw.op(&format!(
+            "    {} = func.call @{}() : () -> i64",
+            vt, builder
+        ));
         fw.op(&format!(
             "    func.call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt
@@ -826,7 +989,9 @@ impl ModEmitter {
             .collect();
         slots.sort_by_key(|x| x.0);
         for (slot, tr, m) in slots {
-            if !impls.contains(&tr) {
+            // trait slots: only when the class chain impls that trait.
+            // method slots (VT_METHOD_NS): always, resolved up the chain.
+            if !tr.is_empty() && !impls.contains(&tr) {
                 continue;
             }
             let (defcls, fd) = match self.find_method(clsname, &m) {

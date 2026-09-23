@@ -913,6 +913,51 @@ mod irgen_p3d {
             "expected a diagnostic for unknown trait"
         );
     }
+
+    /// base-typed virtual dispatch reuses the ancestor ABI: a subclass override
+    /// with a different arity must be diagnosed (VD prerequisite)
+    #[test]
+    fn override_arity_diag() {
+        let src = r#"
+            class Base {
+                func f(x: int): int { return x; }
+            }
+            class Sub: Base {
+                func f(x: int, y: int): int { return x; }
+            }
+            func main(): unit {
+                let b: Base = Sub();
+                print(b.f(1));
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("override with wrong arity accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("arity want 1, got 2"), "unexpected: {}", e);
+    }
+
+    /// override with a mismatched param word kind (float vs int) is diagnosed
+    #[test]
+    fn override_abi_diag() {
+        let src = r#"
+            class Base {
+                func g(x: float): float { return x; }
+            }
+            class Sub: Base {
+                func g(x: int): int { return x; }
+            }
+            func main(): unit {
+                let b: Base = Sub();
+                print(b.g(1.0));
+            }
+        "#;
+        let e = match run_src(src, "main") {
+            Ok(()) => panic!("override with wrong ABI accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("ABI word mismatch"), "unexpected: {}", e);
+    }
 }
 
 // patch #9: array push/pop, let immutability, declared-kind coercion
@@ -3789,6 +3834,64 @@ mod irgen_regress {
                 print(b.via_this());    // b
             }
         "#;
+        let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
+        // VD-P1: an overridden class method dispatches through the object
+        // vtable, not the old class-id cmpi chain
+        assert!(
+            ir.contains("sloth_obj_vtable") && ir.contains("sloth_vt_get"),
+            "plain class virtual call must route through the vtable"
+        );
+        assert!(
+            !ir.contains("call @sloth_obj_cls_id"),
+            "class-id cmpi chain must be gone from class virtual dispatch"
+        );
+        run_src(src, "main").unwrap();
+    }
+
+    /// VD-P1: a generic-class instance overridden method dispatches through
+    /// the vtable on a base-typed reference (instance frame resolved)
+    #[test]
+    fn generic_class_virtual_dispatch_works() {
+        let src = r#"
+            class Base {
+                func __init__() { return; }
+                func tag(): str { return "base"; }
+                func via_this(): str { return this.tag(); }
+            }
+            class G<T>: Base {
+                var v: T;
+                func __init__(x: T) { super.__init__(); this.v = x; }
+                func tag(): str { return "g"; }
+            }
+            func pick(b: Base): str { return b.tag(); }
+            func main(): unit {
+                var b: Base = G<int>(5);
+                print(pick(b));          // g
+                print(b.via_this());     // g
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// VD-P1: no descendant override -> devirtualized direct call (no vtable)
+    #[test]
+    fn final_class_method_devirtualized() {
+        let src = r#"
+            class A { func k(): str { return "a"; } }
+            func pick(x: A): str { return x.k(); }
+            func main(): unit {
+                print(pick(A()));        // a
+            }
+        "#;
+        let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
+        // scope to `pick`: `print`'s `any` path legitimately uses vt_get
+        let after = ir.split("@sloth_main__pick").nth(1).expect("pick emitted");
+        let body = after.split("\n  func.").next().unwrap_or(after);
+        assert!(
+            !body.contains("sloth_vt_get"),
+            "un-overridden method must devirtualize to a direct call: {}",
+            body
+        );
         run_src(src, "main").unwrap();
     }
 
@@ -4061,7 +4164,7 @@ mod irgen_te_p0 {
         match run_src(src, "main") {
             Ok(_) => panic!("expected bitwise operand diag"),
             Err(e) => assert!(
-                e.contains("bitwise operators require `int` operands"),
+                e.contains("bitwise operators require integer operands"),
                 "unexpected: {}",
                 e
             ),
@@ -4077,7 +4180,11 @@ mod irgen_te_p0 {
         "#;
         match run_src(src, "main") {
             Ok(_) => panic!("expected `~` operand diag"),
-            Err(e) => assert!(e.contains("requires an `int` operand"), "unexpected: {}", e),
+            Err(e) => assert!(
+                e.contains("requires an integer operand"),
+                "unexpected: {}",
+                e
+            ),
         }
     }
 
@@ -4486,10 +4593,10 @@ mod irgen_te_p2_r1 {
         // [[1,2,3],[4,5,6]] built through the rt, addressed as a rank-2
         // memref via basis + reinterpret_cast using runtime dim/stride.
         let mut ir = String::from("module @r1probe {\n");
-        ir.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_new_1(i64, i64) -> i64\n");
         ir.push_str("  func.func private @sloth_tensor_new_2(i64, i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_copy_from_array(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_set1(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @sloth_tensor_copy_into(i64, i64) -> i64\n");
         ir.push_str(
             "  func.func private @sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
         );
@@ -4499,9 +4606,16 @@ mod irgen_te_p2_r1 {
         ir.push_str("  func.func private @sloth_tensor_get1(i64, i64) -> i64\n");
         ir.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
         ir.push_str("  func.func @sloth_main() -> () attributes {llvm.emit_c_interface} {\n");
-        // array of 6 float words, values 1.0 .. 6.0
+        // 2x3 float tensor [[1,2,3],[4,5,6]]: fill a rank-1 source 1.0 .. 6.0
+        // then element-wise copy into the rank-2 descriptor.
+        ir.push_str(&format!(
+            "    %d2 = arith.constant {} : i64\n    %d3 = arith.constant {} : i64\n    %kind = arith.constant {} : i64\n",
+            ENC_I(2),
+            ENC_I(3),
+            ENC_I(1)
+        ));
         ir.push_str(&format!("    %len6 = arith.constant {} : i64\n", ENC_I(6)));
-        ir.push_str("    %arr = func.call @sloth_arr_new(%len6) : (i64) -> i64\n");
+        ir.push_str("    %src = func.call @sloth_tensor_new_1(%len6, %kind) : (i64, i64) -> i64\n");
         for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0].iter().enumerate() {
             ir.push_str(&format!(
                 "    %ai{i} = arith.constant {} : i64\n    %av{i} = arith.constant {} : i64\n",
@@ -4509,20 +4623,13 @@ mod irgen_te_p2_r1 {
                 enc_f(*v)
             ));
             ir.push_str(&format!(
-                "    func.call @sloth_arr_set(%arr, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
+                "    func.call @sloth_tensor_set1(%src, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
             ));
         }
-        // 2x3 float tensor + copy
-        ir.push_str(&format!(
-            "    %d2 = arith.constant {} : i64\n    %d3 = arith.constant {} : i64\n    %kind = arith.constant {} : i64\n",
-            ENC_I(2),
-            ENC_I(3),
-            ENC_I(1)
-        ));
         ir.push_str(
             "    %t = func.call @sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
         );
-        ir.push_str("    func.call @sloth_tensor_copy_from_array(%t, %arr) : (i64, i64) -> i64\n");
+        ir.push_str("    func.call @sloth_tensor_copy_into(%t, %src) : (i64, i64) -> i64\n");
         // flat basis memref
         ir.push_str(
             "    %flat = func.call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",

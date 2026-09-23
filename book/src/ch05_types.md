@@ -29,9 +29,10 @@
 ## 5.2 词面编码（word plane）
 
 **所有** SSA 值、局部槽、字段、容器元素都是一个 **i64 词**。词面无 tag：引用是
-裸 payload 指针（`0` = nil），值是其原生位模式。运行期不再靠 LSB 自描述，而是由
-编译期已知的引用位掩码/标志驱动 ARC 级联（对象 `refmask`、数组 `elref`、Map
-`vref`、通道/协程 `eref`）。
+裸 payload 指针（`0` = nil），值是其原生位模式。运行期不再靠 LSB 自描述；对象的
+ARC 级联策略由 codegen 发射**每类一个 `(payload, aux) -> i64` 级联例程**（登记为
+header `sdtor`），其余种类各带编译期标志（数组 `elref`、Map `kflag`、通道/协程
+`eref`）。
 
 | 面 | 编码 | 解码 |
 | --- | --- | --- |

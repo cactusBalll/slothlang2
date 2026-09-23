@@ -1,5 +1,10 @@
 //! rt smoke suite (in-process; tagged-word header rc core).
-use sloth_rt::{arrays, builtins, maps, mmap, objects, rc, strings, tensors};
+//!
+//! Container (Array/Map) algorithms are self-hosted in
+//! `lib/prelude/containers.slt` and covered by the language-level suites
+//! (`sloth-codegen` / `slothc` spec). This file covers the bare runtime
+//! substrate they build on: allocation, word memory and the rc core.
+use sloth_rt::{alloc, builtins, mem, mmap, objects, rc, strings, tensors};
 use std::sync::Mutex;
 
 /// Live rc accounting (`sloth_rc_live`) is process-global, so tests in this
@@ -66,27 +71,30 @@ impl Drop for TempFile {
 fn rt_smoke() {
     let _serial = serial();
     unsafe {
-        // ---- arrays: churn fires the rc path when counts reach zero ----
+        // ---- bare memory substrate: rc_new chunks + untracked buffers ----
         let before = rc::dec_i(rc::sloth_rc_live());
         let drops0 = rc::sloth_rc_drops();
         for _ in 0..64 {
-            let dead = arrays::sloth_arr_new(wi(8192));
-            arrays::sloth_arr_set(dead, wi(0), wi(1));
-            rc::sloth_rc_release(dead);
+            // 3-word tracked payload, no __dispose__ hook
+            let h = rc::sloth_rc_new(24, 0, 0);
+            mem::sloth_mem_store(h, 0, wi(1));
+            assert_eq!(rc::dec_i(mem::sloth_mem_load(h, 0)), 1, "word store/load");
+            rc::sloth_rc_release(h);
         }
         assert!(rc::sloth_rc_drops() - drops0 >= 64, "churn dropped");
         assert_eq!(rc::sloth_rc_live(), before, "churn fully drained");
 
-        // reallocation on push growth keeps contents (header relocation)
-        let mut a = arrays::sloth_arr_new(wi(8));
-        arrays::sloth_arr_set(a, wi(0), wi(7));
-        for i in 8..64 {
-            a = arrays::sloth_arr_push(a, wi(i));
-        }
-        assert_eq!(rc::dec_i(arrays::sloth_arr_len(a)), 64, "push growth len");
-        assert_eq!(rc::dec_i(arrays::sloth_arr_get(a, wi(0))), 7, "word 0");
-        assert_eq!(rc::dec_i(arrays::sloth_arr_get(a, wi(63))), 63, "last");
-        rc::sloth_rc_release(a);
+        // untracked alloc + word memory + copy + free round-trip
+        let buf = alloc::sloth_rt_alloc(64) as i64;
+        mem::sloth_mem_store(buf, 0, wi(7));
+        mem::sloth_mem_store(buf, 7, wi(9));
+        assert_eq!(rc::dec_i(mem::sloth_mem_load(buf, 0)), 7, "buf[0]");
+        assert_eq!(rc::dec_i(mem::sloth_mem_load(buf, 7)), 9, "buf[7]");
+        let dst = alloc::sloth_rt_alloc(64) as i64;
+        mem::sloth_mem_copy(dst, buf, 8);
+        assert_eq!(rc::dec_i(mem::sloth_mem_load(dst, 7)), 9, "copied word");
+        mem::sloth_free(buf);
+        mem::sloth_free(dst);
 
         // ---- int roundtrip: full 64-bit width, identity codec ----
         assert_eq!(rc::dec_i(rc::enc_i(-1)), -1, "neg int roundtrip");
@@ -109,33 +117,6 @@ fn rt_smoke() {
         let eq = strings::sloth_str_eq(s, inter("ab"));
         assert_eq!(rc::dec_i(eq), 1, "str content eq");
         rc::sloth_rc_release(s);
-
-        // ---- maps ----
-        let m = maps::sloth_map_new(wi(0));
-        for i in 0..40 {
-            let _ = maps::sloth_map_set(m, wi(i), wi(i * 2));
-        }
-        assert_eq!(rc::dec_i(maps::sloth_map_len(m)), 40, "map len growth");
-        for i in 0..40 {
-            assert_eq!(
-                rc::dec_i(maps::sloth_map_get(m, wi(i))),
-                i * 2,
-                "map key {}",
-                i
-            );
-        }
-        let ks = maps::sloth_map_keys(m);
-        assert_eq!(rc::dec_i(arrays::sloth_arr_len(ks)), 40, "keys arr len");
-        rc::sloth_rc_release(ks);
-        rc::sloth_rc_release(m);
-
-        // overwrite path: same key updates the value slot
-        let m2 = maps::sloth_map_new(wi(0));
-        let _ = maps::sloth_map_set(m2, wi(5), wi(50));
-        let _ = maps::sloth_map_set(m2, wi(5), wi(99));
-        assert_eq!(rc::dec_i(maps::sloth_map_len(m2)), 1);
-        assert_eq!(rc::dec_i(maps::sloth_map_get(m2, wi(5))), 99);
-        rc::sloth_rc_release(m2);
 
         // ---- tensors (TE-P1): shape/stride, shared-storage views, copy ----
         let tbefore = rc::dec_i(rc::sloth_rc_live());
@@ -194,27 +175,25 @@ fn rt_smoke() {
             22,
             "copy b"
         );
-        // copy_from_array (int array into f64 tensor? same kind here: float)
-        let arr = arrays::sloth_arr_new(wi(3));
-        arrays::sloth_arr_set(arr, wi(0), rc::enc_f_bits(1.5f64.to_bits()));
-        arrays::sloth_arr_set(arr, wi(1), rc::enc_f_bits(2.5f64.to_bits()));
-        arrays::sloth_arr_set(arr, wi(2), rc::enc_f_bits(3.5f64.to_bits()));
+        // rank-1 float tensor filled element-wise
         let ft = tensors::sloth_tensor_new_1(wi(3), wi(1));
-        tensors::sloth_tensor_copy_from_array(ft, arr);
+        tensors::sloth_tensor_set1(ft, wi(0), rc::enc_f_bits(1.5f64.to_bits()));
+        tensors::sloth_tensor_set1(ft, wi(1), rc::enc_f_bits(2.5f64.to_bits()));
+        tensors::sloth_tensor_set1(ft, wi(2), rc::enc_f_bits(3.5f64.to_bits()));
         assert_eq!(
             rc::dec_f_bits(tensors::sloth_tensor_get1(ft, wi(2))),
             3.5f64.to_bits(),
             "from array"
         );
         // release chain drains fully (views retain their owner)
-        for w in [ft, arr, it, sl, src, row0, row1, row1b, t] {
+        for w in [ft, it, sl, src, row0, row1, row1b, t] {
             rc::sloth_rc_release(w);
         }
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), tbefore, "tensors drained");
 
         // ---- rc core + weak boxes ----
         let before = rc::dec_i(rc::sloth_rc_live());
-        let o = objects::sloth_obj_new(0, wi(4));
+        let o = objects::sloth_obj_new(0, wi(4), 0);
         assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 1, "obj tracked");
         let w = rc::sloth_weak_new(o);
         // TH: upgrade returns an owned +1 (CAS retain) — release each result
@@ -235,17 +214,15 @@ fn rt_smoke() {
             "table fully drained"
         );
 
-        // TH: a weak box follows its target across a relocating growth
-        let mut ga = arrays::sloth_arr_new(wi(2));
+        // TH: a weak box follows its target across a relocating realloc
+        let ga = rc::sloth_rc_new(24, 0, 0);
         let gwa = rc::sloth_weak_new(ga);
-        for i in 0..64 {
-            ga = arrays::sloth_arr_push(ga, wi(i));
-        }
+        let ga2 = alloc::sloth_rt_realloc(ga, 48);
         let gu = rc::sloth_weak_upgrade(gwa);
-        assert_eq!(gu, ga, "weak resolves after relocation");
+        assert_eq!(gu, ga2, "weak resolves after relocation");
         rc::sloth_rc_release(gu);
         rc::sloth_rc_release(gwa);
-        rc::sloth_rc_release(ga);
+        rc::sloth_rc_release(ga2);
         assert_eq!(
             rc::dec_i(rc::sloth_rc_live()),
             before,
@@ -374,17 +351,27 @@ fn string_intern_alignment() {
     assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "intern drained");
 }
 
+/// test-only death cascade: release field 1 (payload word 3 = field offset 2
+/// + index 1), exercising the `sdtor` slot that codegen fills in real output.
+unsafe extern "C" fn rel_field1(p: i64, _aux: i64) -> i64 {
+    let w = mem::sloth_mem_load(p, wi(3));
+    if w != 0 {
+        rc::sloth_rc_release(w);
+    }
+    0
+}
+
 /// Class metadata + instance fields: class-id round-trip, int/nil field
-/// access, and the mask-driven death cascade releasing an owned reference
-/// field (the `Hdr.aux`-counted walk + `ObjInfo.refmask`).
+/// access, and a generated-code death cascade (registered as the header
+/// `sdtor`) releasing an owned reference field.
 #[test]
 fn object_fields_and_cascade() {
     let _serial = serial();
     let before = rc::dec_i(rc::sloth_rc_live());
     let ci = objects::sloth_cls_info(0, wi(7));
-    // field 1 is a reference; fields 0/2 are values
-    objects::sloth_cls_refmask(ci, 1 << 1, 3);
-    let o = objects::sloth_obj_new(ci, wi(3));
+    // field 1 is a reference; the cascade releases it
+    let cascade: unsafe extern "C" fn(i64, i64) -> i64 = rel_field1;
+    let o = objects::sloth_obj_new(ci, wi(3), cascade as usize as i64);
     assert_eq!(rc::dec_i(objects::sloth_obj_cls_id(o)), 7, "cls id");
     assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 1, "one instance");
 
@@ -423,7 +410,7 @@ fn builtin_dyn_boxes() {
     let before = rc::dec_i(rc::sloth_rc_live());
     // int box holding tagged 41
     let info = builtins::sloth_builtin_info(wi(0));
-    let o = objects::sloth_obj_new(info, wi(1));
+    let o = objects::sloth_obj_new(info, wi(1), 0);
     objects::sloth_obj_set_field(o, wi(0), wi(41));
     assert_eq!(rc::dec_i(builtins::sloth_dyn_unbox(o)), 41, "int unbox");
     assert_eq!(
@@ -437,14 +424,14 @@ fn builtin_dyn_boxes() {
     rc::sloth_rc_release(s);
     rc::sloth_rc_release(want);
     // comparison family (equal / less-than)
-    let p = objects::sloth_obj_new(info, wi(1));
+    let p = objects::sloth_obj_new(info, wi(1), 0);
     objects::sloth_obj_set_field(p, wi(0), wi(41));
     assert_eq!(
         rc::dec_i(builtins::sloth_dyn_binop(o, p, wi(0), wi(0))),
         1,
         "eq"
     );
-    let q = objects::sloth_obj_new(info, wi(1));
+    let q = objects::sloth_obj_new(info, wi(1), 0);
     objects::sloth_obj_set_field(q, wi(0), wi(9));
     assert_eq!(
         rc::dec_i(builtins::sloth_dyn_binop(q, o, wi(0), wi(2))),
@@ -458,7 +445,7 @@ fn builtin_dyn_boxes() {
     );
     // float box keeps the encoded word; unbox/compare decode it
     let finfo = builtins::sloth_builtin_info(wi(1));
-    let fw = objects::sloth_obj_new(finfo, wi(1));
+    let fw = objects::sloth_obj_new(finfo, wi(1), 0);
     objects::sloth_obj_set_field(fw, wi(0), rc::enc_f_bits(2.5f64.to_bits()));
     assert_eq!(
         rc::dec_f_bits(builtins::sloth_dyn_unbox(fw)),
@@ -473,31 +460,16 @@ fn builtin_dyn_boxes() {
     assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "dyn boxes drained");
 }
 
-/// Content-hashed string keys: equal-content handles from distinct
-/// allocations hit the same slot, and overwrite releases the replaced pair.
+/// The self-hosted container ABI symbols must NOT be exported by the runtime:
+/// Array/Map algorithms live in `lib/prelude/containers.slt` and are provided
+/// by the compiled module, not `libsloth_rt.so`.
 #[test]
-fn map_string_keys() {
+fn container_symbols_not_exported() {
     let _serial = serial();
-    let before = rc::dec_i(rc::sloth_rc_live());
-    let m = maps::sloth_map_new(wi(1) | 4); // kkind 1 = str keys, vref = 1
-    let _ = maps::sloth_map_str_set(m, inter("alpha"), inter("one"));
-    let probe = inter("alpha");
-    let v = maps::sloth_map_str_get(m, probe);
-    rc::sloth_rc_release(probe);
-    let want = inter("one");
-    assert_eq!(rc::dec_i(strings::sloth_str_eq(v, want)), 1, "str key get");
-    rc::sloth_rc_release(want);
-
-    // overwrite: a fresh equal key/value pair replaces the slot's pair
-    let _ = maps::sloth_map_str_set(m, inter("alpha"), inter("two"));
-    assert_eq!(rc::dec_i(maps::sloth_map_len(m)), 1, "one slot");
-    let probe = inter("alpha");
-    let v = maps::sloth_map_str_get(m, probe);
-    rc::sloth_rc_release(probe);
-    let want2 = inter("two");
-    assert_eq!(rc::dec_i(strings::sloth_str_eq(v, want2)), 1, "overwrite");
-    rc::sloth_rc_release(want2);
-
-    rc::sloth_rc_release(m);
-    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "str map drained");
+    // `sloth_rc_new` / `sloth_mem_load` are the bare substrate and remain.
+    let h = rc::sloth_rc_new(8, 0, 0);
+    assert_ne!(h, 0, "rc_new is exported");
+    mem::sloth_mem_store(h, 0, wi(5));
+    assert_eq!(rc::dec_i(mem::sloth_mem_load(h, 0)), 5);
+    rc::sloth_rc_release(h);
 }

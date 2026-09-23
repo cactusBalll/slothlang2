@@ -275,7 +275,10 @@ pub(crate) fn emit_anyinit(me: &ModEmitter) -> String {
         body.push_str(&format!("    {} = arith.constant {} : i64\n", fl, d.flags));
         store(&mut body, &g, 1, &fl, &mut c);
         let ti = nv!("adt");
-        body.push_str(&format!("    {} = arith.constant {} : i64\n", ti, d.type_id));
+        body.push_str(&format!(
+            "    {} = arith.constant {} : i64\n",
+            ti, d.type_id
+        ));
         store(&mut body, &g, 2, &ti, &mut c);
         // word 3/4: name pointer + length
         if let Some((nm, nlen)) = &d.name {
@@ -332,7 +335,10 @@ pub(crate) fn emit_anyinit(me: &ModEmitter) -> String {
         }
         // word 9: cls_id
         let cid = nv!("adc");
-        body.push_str(&format!("    {} = arith.constant {} : i64\n", cid, d.cls_id));
+        body.push_str(&format!(
+            "    {} = arith.constant {} : i64\n",
+            cid, d.cls_id
+        ));
         store(&mut body, &g, 9, &cid, &mut c);
         // word 10: rank
         let rk = nv!("adr");
@@ -343,8 +349,5 @@ pub(crate) fn emit_anyinit(me: &ModEmitter) -> String {
 }
 
 fn index_of(me: &ModEmitter, sym: &str) -> usize {
-    me.anydescs
-        .iter()
-        .position(|d| d.sym == sym)
-        .unwrap_or(0)
+    me.anydescs.iter().position(|d| d.sym == sym).unwrap_or(0)
 }

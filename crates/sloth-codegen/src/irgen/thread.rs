@@ -161,7 +161,10 @@ impl ModEmitter {
 
     pub(crate) fn emit_mutex_new(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let r = fw.v();
-        fw.op(&format!("    {} = func.call @sloth_mutex_new() : () -> i64", r));
+        fw.op(&format!(
+            "    {} = func.call @sloth_mutex_new() : () -> i64",
+            r
+        ));
         let rt = self.r.mk(Ty::Mutex);
         self.dangling_producer(fw, &r, rt);
         (r, rt)

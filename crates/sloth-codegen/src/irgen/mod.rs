@@ -24,6 +24,7 @@ use sloth_frontend::ty::{Reg, Ty, TyId};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 
+mod anydesc;
 mod class;
 mod closure;
 mod collect;
@@ -32,7 +33,6 @@ mod expr;
 mod fiber;
 mod fnwalk;
 mod func;
-mod anydesc;
 mod lambda;
 mod module;
 mod state;
@@ -94,6 +94,13 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     let mut done: HashSet<std::path::PathBuf> = HashSet::new();
     let (root, mods) = resolve_program(root_src, base_dir, &mut stack, &mut done)?;
     let mut me = ModEmitter::new("main");
+    // order-independent devirtualization: index overrides across every module
+    // (imports emit method bodies before root classes are registered)
+    {
+        let mut progs: Vec<&Program> = mods.iter().map(|(_, p, _)| p).collect();
+        progs.push(&root);
+        me.register_override_index(&progs);
+    }
     for (mname, mut prog, alias) in mods {
         // imported modules get the same `print` prelude so bare calls resolve
         crate::irgen::inject_print_prelude(&mut prog.decls);

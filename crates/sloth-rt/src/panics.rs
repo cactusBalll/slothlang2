@@ -59,3 +59,16 @@ pub fn panic_oob(kind: &str, i: i64, len: i64) -> ! {
     );
     std::process::exit(1);
 }
+
+/// C-ABI out-of-bounds entry for the self-hosted container prelude (array
+/// indexing / pop). `i` is the offending index, `len` the container length.
+#[no_mangle]
+pub extern "C" fn sloth_panic_oob(i: i64, len: i64) -> i64 {
+    panic_oob("array", i, len)
+}
+
+/// C-ABI pop-from-empty entry for the self-hosted container prelude.
+#[no_mangle]
+pub extern "C" fn sloth_panic_pop(i: i64, len: i64) -> i64 {
+    panic_oob("pop", i, len)
+}

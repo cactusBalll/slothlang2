@@ -76,6 +76,8 @@ pub struct ModEmitter {
     /// devirt/inline observation counters (patch #18c; SLOTH_STATS=1 prints)
     pub stat_dcalls: usize,
     pub stat_dyncalls: usize,
+    /// class-method virtual calls (class-id chain pre-VD-P1; vtable after)
+    pub stat_cvcalls: usize,
     pub stat_ginsts: usize,
     /// expected-type hint stack for return-driven inference (patch #38):
     /// let/var annotation & assignment target surface pushed around emitting
@@ -91,6 +93,10 @@ pub struct ModEmitter {
     pub vt_built: std::collections::HashSet<String>,
     /// methods emitted inside llvm.func (vtable-addressable)
     pub llvm_method: std::collections::HashSet<(String, String)>,
+    /// method names overridden somewhere in the whole program (all modules).
+    /// Pre-computed before emission so the devirtualization decision does not
+    /// depend on emission order (root subclasses are registered after imports).
+    pub(crate) known_override_methods: HashSet<String>,
     /// object bodies carry a fixed vtable capacity (total slots)
     pub vt_cap: usize,
     /// active type-param substitution for the generic instance being emitted
@@ -124,6 +130,13 @@ pub struct ModEmitter {
     /// runtime symbols already declared by `rt_decls`/`obj_rt_decls`: an
     /// `extern func` for one of these must not re-emit a declaration
     pub(crate) predeclared: HashSet<String>,
+    /// self-hosted container prelude functions: emitted under their raw name
+    /// (no module mangling) so the hardcoded `@sloth_arr_*`/`@sloth_map_*`
+    /// call sites in this emitter resolve to them
+    pub(crate) fixed_syms: HashSet<String>,
+    /// top-level functions whose address is taken (`fn_addr`): emitted as
+    /// `llvm.func` so `llvm.mlir.addressof` is legal
+    pub(crate) addressable: HashSet<String>,
 }
 
 /// one compiler-emitted `any` type descriptor record
@@ -212,6 +225,7 @@ impl ModEmitter {
             lamcount: 0,
             stat_dcalls: 0,
             stat_dyncalls: 0,
+            stat_cvcalls: 0,
             stat_ginsts: 0,
             exp_ret: Vec::new(),
             stat_extdecls: 0,
@@ -225,6 +239,7 @@ impl ModEmitter {
             vt_slots: HashMap::new(),
             vt_built: std::collections::HashSet::new(),
             llvm_method: std::collections::HashSet::new(),
+            known_override_methods: std::collections::HashSet::new(),
             vt_cap: 0,
             tp_subst: Vec::new(),
             tp_mangled: Vec::new(),
@@ -239,6 +254,8 @@ impl ModEmitter {
             anydescs: Vec::new(),
             anydesc_syms: HashMap::new(),
             predeclared,
+            fixed_syms: HashSet::new(),
+            addressable: HashSet::new(),
         }
     }
 }

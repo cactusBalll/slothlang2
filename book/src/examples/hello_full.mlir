@@ -33,8 +33,6 @@ module @main {
   func.func private @sloth_range_lo(i64) -> i64
   func.func private @sloth_range_hi(i64) -> i64
   func.func private @sloth_str_push(i64, i64, i64) -> i64
-  func.func private @sloth_arr_push(i64, i64) -> i64
-  func.func private @sloth_arr_pop(i64) -> i64
   func.func private @sloth_str_finish(i64) -> i64
   func.func private @sloth_str_pushp(i64, i64) -> i64
   func.func private @sloth_str_push_i(i64, i64) -> i64
@@ -45,20 +43,6 @@ module @main {
   func.func private @sloth_str_char(i64, i64) -> i64
   func.func private @sloth_str_concat(i64, i64) -> i64
   func.func private @sloth_str_eq(i64, i64) -> i64
-  func.func private @sloth_arr_new(i64) -> i64
-  func.func private @sloth_arr_len(i64) -> i64
-  func.func private @sloth_arr_get(i64, i64) -> i64
-  func.func private @sloth_arr_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_new(i64) -> i64
-  func.func private @sloth_map_len(i64) -> i64
-  func.func private @sloth_map_get(i64, i64) -> i64
-  func.func private @sloth_map_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_get_h(i64, i64, i64) -> i64
-  func.func private @sloth_map_set_h(i64, i64, i64, i64) -> i64
-  func.func private @sloth_map_str_get(i64, i64) -> i64
-  func.func private @sloth_map_str_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_keys(i64) -> i64
-  func.func private @sloth_map_values(i64) -> i64
   func.func private @sloth_rt_sqrt(f64) -> f64
   func.func private @sloth_rt_exp(f64) -> f64
   func.func private @sloth_rt_sin(f64) -> f64
@@ -115,16 +99,14 @@ module @main {
   func.func private @sloth_atomic_add(i64, i64) -> i64
   func.func private @sloth_atomic_sub(i64, i64) -> i64
   func.func private @sloth_atomic_cas(i64, i64, i64) -> i64
-  func.func private @sloth_obj_new(i64, i64) -> i64
+  func.func private @sloth_obj_new(i64, i64, i64) -> i64
   func.func private @sloth_closure_new(i64, i64) -> i64
   func.func private @sloth_obj_field(i64, i64) -> i64
   func.func private @sloth_obj_set_field(i64, i64, i64) -> i64
   func.func private @sloth_cls_info(i64, i64) -> i64
-  func.func private @sloth_cls_refmask(i64, i64, i64) -> i64
   func.func private @sloth_cls_name(i64, i64, i64) -> i64
   func.func private @sloth_obj_type_name(i64) -> i64
   func.func private @sloth_type_name_or(i64, i64, i64) -> i64
-  func.func private @sloth_arr_new_k(i64, i64) -> i64
   func.func private @sloth_obj_cls_id(i64) -> i64
   func.func private @sloth_vt_new(i64) -> i64
   func.func private @sloth_vt_set(i64, i64, i64) -> i64
@@ -142,6 +124,16 @@ module @main {
     call @sloth_main__anyinit() : () -> ()
     return
   }
+  func.func private @sloth_rt_alloc(i64) -> i64
+  func.func private @sloth_free(i64)
+  func.func private @sloth_mem_load(i64, i64) -> i64
+  func.func private @sloth_mem_store(i64, i64, i64)
+  func.func private @sloth_mem_copy(i64, i64, i64)
+  func.func private @sloth_rc_new(i64, i64, i64) -> i64
+  func.func private @sloth_str_byte(i64, i64) -> i64
+  func.func private @sloth_panic_nokey(i64) -> i64
+  func.func private @sloth_panic_oob(i64, i64) -> i64
+  func.func private @sloth_panic_pop(i64, i64) -> i64
   func.func @sloth_main__print(%arg0: i64) {
     %c0 = arith.constant 0 : index
     %alloca = memref.alloca() : memref<1xi64>

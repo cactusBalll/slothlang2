@@ -1,11 +1,13 @@
 //! sloth-rt: the sloth2 runtime library (libsloth_rt).
 //! Modules by functionality: alloc (deterministic chunks behind the rc
-//! core), panics, console, strings, arrays, maps, objects, vtables,
-//! externs. All exported symbols keep their C-ABI names.
+//! core), panics, console, strings, objects, vtables, externs.
+//! Container (Array/Map) algorithms live in the self-hosted sloth prelude
+//! (`lib/prelude/containers.slt`); the runtime only exposes bare allocation,
+//! word memory and the rc core for them.
+//! All exported symbols keep their C-ABI names.
 
 pub mod alloc;
 pub mod any;
-pub mod arrays;
 pub mod boxopt;
 pub mod builtins;
 pub mod bytes;
@@ -14,8 +16,8 @@ pub mod console;
 pub mod event;
 pub mod externs;
 pub mod fiber;
-pub mod maps;
 pub mod math;
+pub mod mem;
 pub mod mmap;
 pub mod net;
 pub mod objects;

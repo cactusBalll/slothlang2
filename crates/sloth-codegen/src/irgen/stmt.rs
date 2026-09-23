@@ -153,7 +153,9 @@ impl ModEmitter {
                         if df && !vf {
                             // promote the int word to an f64 word
                             (self.int_to_f64_word(fw, &v, t), dt)
-                        } else if !df && vf && self.opt_inner(dt).is_none()
+                        } else if !df
+                            && vf
+                            && self.opt_inner(dt).is_none()
                             && !matches!(self.r.get(dt), Ty::Any)
                         {
                             self.err_diff(
@@ -1076,15 +1078,14 @@ impl ModEmitter {
         // patch 42: value-optional return surfaces box bare scalars; nil
         // word (0) passes through as nil. `dyn T` returns auto-box builtin
         // values the same way.
-        let (mut v, mut t) =
-            if self.opt_inner(fw.ret).is_some()
-                || matches!(self.r.get(fw.ret), Ty::Dyn(_) | Ty::Int(_))
-            {
-                let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
-                (vc, tc)
-            } else {
-                (v, t)
-            };
+        let (mut v, mut t) = if self.opt_inner(fw.ret).is_some()
+            || matches!(self.r.get(fw.ret), Ty::Dyn(_) | Ty::Int(_))
+        {
+            let (vc, tc) = self.coerce_word_to(fw, &v, t, fw.ret);
+            (vc, tc)
+        } else {
+            (v, t)
+        };
         // declared-return surface check (design §2.2 static typing): int
         // words promote into float returns; word-family conflicts diagnose.
         // Unit returns and unannotated bodies stay lenient.
@@ -1189,9 +1190,7 @@ impl ModEmitter {
                         if !had_opt {
                             return None;
                         }
-                        let hit = Self::builtin_name_ty(cn)
-                            .map(|t| t == wt)
-                            .unwrap_or(false);
+                        let hit = Self::builtin_name_ty(cn).map(|t| t == wt).unwrap_or(false);
                         if hit {
                             let ni = self.r.mk(wt);
                             Some((x, ni))

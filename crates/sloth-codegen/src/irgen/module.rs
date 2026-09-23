@@ -140,10 +140,13 @@ impl ModEmitter {
                             impls: c.impls.clone(),
                         },
                     );
+                    self.register_class_vt_surface(&d.name);
                 }
                 _ => {}
             }
         }
+        // pass 2a': override signature discipline (mirrors root `collect`)
+        self.check_override_sigs(prog);
         // pass 2b: effective trait surfaces (incl. inherited) -> vtable slots
         for d in &prog.decls {
             if let DeclNode::Class(_c) = &d.node {
@@ -165,6 +168,9 @@ impl ModEmitter {
                 self.check_impls(&d.name, &eff, &d.pos);
             }
         }
+        // vt_cap must be settled before any method body is emitted: bodies can
+        // construct instances, whose vtable builders bake in the capacity
+        self.finalize_vt();
         // pass 2c: emit method bodies (llvm.func decision now settled)
         for d in &prog.decls {
             match &d.node {
@@ -247,6 +253,60 @@ pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
     }
 }
 
+/// Self-hosted Array/Map runtime, embedded from `lib/prelude/containers.slt`.
+/// Injected once into the root module; the container ABI symbols below are
+/// emitted under their raw names (no mangling) so the hardcoded
+/// `@sloth_arr_*`/`@sloth_map_*` call sites in the emitter resolve here.
+pub(crate) const CONTAINER_PRELUDE: &str = include_str!("../../../../lib/prelude/containers.slt");
+
+/// container ABI symbols defined by the prelude (fixed, unmangled)
+pub(crate) const CONTAINER_SYMS: &[&str] = &[
+    "sloth_arr_new",
+    "sloth_arr_new_k",
+    "sloth_arr_len",
+    "sloth_arr_get",
+    "sloth_arr_set",
+    "sloth_arr_push",
+    "sloth_arr_pop",
+    "sloth_map_new",
+    "sloth_map_len",
+    "sloth_map_get",
+    "sloth_map_set",
+    "sloth_map_get_h",
+    "sloth_map_set_h",
+    "sloth_map_str_get",
+    "sloth_map_str_set",
+    "sloth_map_keys",
+    "sloth_map_values",
+];
+
+/// prelude `__dispose__` routines whose address is taken (`fn_addr`): emitted
+/// as `llvm.func` so `llvm.mlir.addressof` is legal
+pub(crate) const CONTAINER_DISPOSERS: &[&str] = &["sloth_arr_dispose", "sloth_map_dispose"];
+
+impl ModEmitter {
+    /// inject the container prelude into the root module (once) and register
+    /// its fixed symbols / addressable disposers
+    pub(crate) fn inject_container_prelude(&mut self, decls: &mut Vec<Decl>) {
+        if decls.iter().any(|d| {
+            matches!(d.node, DeclNode::Func(_)) && CONTAINER_SYMS.contains(&d.name.as_str())
+        }) {
+            return;
+        }
+        if let Ok(stdp) = sloth_frontend::parser::parse(CONTAINER_PRELUDE) {
+            for s in CONTAINER_SYMS {
+                self.fixed_syms.insert((*s).to_string());
+            }
+            for s in CONTAINER_DISPOSERS {
+                self.addressable.insert((*s).to_string());
+            }
+            for d in stdp.decls.into_iter().rev() {
+                decls.insert(0, d);
+            }
+        }
+    }
+}
+
 pub fn rt_decls() -> String {
     let mut s = String::new();
     // rc core (ARC migration patch B): counting primitives
@@ -288,9 +348,7 @@ pub fn rt_decls() -> String {
     );
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
     s.push_str(
-        "  func.func private @sloth_arr_push(i64, i64) -> i64
-  func.func private @sloth_arr_pop(i64) -> i64
-  func.func private @sloth_str_finish(i64) -> i64
+        "  func.func private @sloth_str_finish(i64) -> i64
   func.func private @sloth_str_pushp(i64, i64) -> i64
   func.func private @sloth_str_push_i(i64, i64) -> i64
   func.func private @sloth_str_push_f(i64, f64) -> i64
@@ -301,22 +359,9 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_str_char(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_eq(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_new(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_len(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_get(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_set(i64, i64, i64) -> i64\n");
-    s.push_str(
-        "  func.func private @sloth_map_new(i64) -> i64
-  func.func private @sloth_map_len(i64) -> i64
-  func.func private @sloth_map_get(i64, i64) -> i64
-  func.func private @sloth_map_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_get_h(i64, i64, i64) -> i64
-  func.func private @sloth_map_set_h(i64, i64, i64, i64) -> i64
-  func.func private @sloth_map_str_get(i64, i64) -> i64
-  func.func private @sloth_map_str_set(i64, i64, i64) -> i64
-  func.func private @sloth_map_keys(i64) -> i64
-  func.func private @sloth_map_values(i64) -> i64\n",
-    );
+    // Array/Map ABI is defined by the self-hosted container prelude
+    // (`lib/prelude/containers.slt`, injected in emit_module): no runtime
+    // declarations here, so the prelude definitions are the single source.
     // scalar math faces (design D6): libm wrappers for sloth source calls
     s.push_str(
         "  func.func private @sloth_rt_sqrt(f64) -> f64
@@ -530,11 +575,13 @@ impl ModEmitter {
         let stmts2 = prog.stmts.clone();
         let imps2 = prog.imports.clone();
         inject_print_prelude(&mut decls2);
+        self.inject_container_prelude(&mut decls2);
         let prog = &mut Program {
             decls: decls2,
             stmts: stmts2,
             imports: imps2,
         };
+        self.register_override_index(&[&*prog]);
         self.collect(prog);
         self.finalize_vt();
         // 0) local module init: store top-level var initializers into the
@@ -734,8 +781,8 @@ impl ModEmitter {
     pub fn take_ir(me: &mut ModEmitter) -> String {
         if std::env::var("SLOTH_STATS").as_deref() == Ok("1") {
             eprintln!(
-                "sloth-stats: module={} direct-method-calls={} dyn-calls={} generic-instances={} extern-decls={} per-cls-vtables={}",
-                me.name, me.stat_dcalls, me.stat_dyncalls, me.stat_ginsts, me.stat_extdecls, me.stat_vtbuilds
+                "sloth-stats: module={} direct-method-calls={} dyn-calls={} class-vt-calls={} generic-instances={} extern-decls={} per-cls-vtables={}",
+                me.name, me.stat_dcalls, me.stat_dyncalls, me.stat_cvcalls, me.stat_ginsts, me.stat_extdecls, me.stat_vtbuilds
             );
         }
         let mut m = format!("module @{} {{\n", me.name);
@@ -764,16 +811,14 @@ impl ModEmitter {
 
 pub fn obj_rt_decls() -> String {
     let mut s = String::new();
-    s.push_str("  func.func private @sloth_obj_new(i64, i64) -> i64\n");
+    s.push_str("  func.func private @sloth_obj_new(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_closure_new(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_field(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_cls_refmask(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_cls_name(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_type_name(i64) -> i64\n");
     s.push_str("  func.func private @sloth_type_name_or(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_arr_new_k(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_obj_cls_id(i64) -> i64\n");
     s.push_str("  func.func private @sloth_vt_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_vt_set(i64, i64, i64) -> i64\n");

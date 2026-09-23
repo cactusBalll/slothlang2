@@ -44,3 +44,7 @@ a.pop();        // 尾部弹出（返回被移除元素）
 元素的级联释放）、`sloth_arr_push`/`sloth_arr_pop`/`sloth_arr_get`/`sloth_arr_set`/
 `sloth_arr_len`。字面量 `[1,2,3]` 发射为 `sloth_arr_new_k` + 逐元素 `sloth_arr_set`。
 `sloth_rc_retain`/`sloth_rc_release` 出现在把引用元素写入/别名绑定时。
+
+> 自举：这些符号由注入的 `lib/prelude/containers.slt` 用 sloth 自身实现
+> （`libsloth_rt.so` 只提供裸分配/字级内存/rc）。数组头 `[len,cap,buf]` 与
+> 稳定句柄语义见附录 B.2。

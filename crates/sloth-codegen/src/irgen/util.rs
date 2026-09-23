@@ -82,7 +82,11 @@ pub(crate) fn neg_bool_word(fw: &mut FnWalk, b: &str, neg: bool) -> String {
         return b.to_string();
     }
     let one = fw.v();
-    fw.op(&format!("    {} = arith.constant {} : i64", one, enc_i_lit(1)));
+    fw.op(&format!(
+        "    {} = arith.constant {} : i64",
+        one,
+        enc_i_lit(1)
+    ));
     let o = fw.v();
     fw.op(&format!("    {} = arith.xori {}, {} : i64", o, b, one));
     o

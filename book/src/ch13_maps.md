@@ -47,3 +47,6 @@ Entry 对象，因此是"活"的键值对视图。
 `sloth_map_str_set`/`sloth_map_set`/`sloth_map_set_h`、`sloth_map_len`、以及
 `sloth_map_keys`/`sloth_map_values`。注意 `keys()`/`values()` 返回的是**新数组**
 （owned 生产者），调用者负责结算。
+
+> 自举：开放寻址 + 线性探测 + FNV/mix64 哈希与扩容逻辑同样在注入的
+> `lib/prelude/containers.slt` 中以 sloth 实现；析构经 `__dispose__` 钩子注册。

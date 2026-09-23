@@ -62,8 +62,9 @@ LLVM IR ──► JIT（`run`）或 目标文件（`build`，经 mlir-opt/mlir-t
 
 注意：**所有** SSA 值、局部槽（`memref<1xi64>`）、对象字段、容器元素都是这一套
 词面；`mlir_ret_ty` / `mlir_word_ty` 恒为 `i64`。数值只在标量域转换：`float`
-用 `llvm.bitcast`；`int` 直接就是 `i64`。引用/值的区分由编译期掩码在 ARC
-级联处完成（不再有运行期 `arith.shli/shrsi` tag 编解码）。
+用 `llvm.bitcast`；`int` 直接就是 `i64`。引用/值的区分由编译期信息在 ARC
+级联处完成（对象走 codegen 发射的 `@...__cascade`，其余走种类标志；不再有运行期
+`arith.shli/shrsi` tag 编解码）。
 
 ## 2.4 运行时符号面
 

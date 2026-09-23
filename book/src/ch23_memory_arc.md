@@ -43,6 +43,30 @@
 采样点应放在 **caller 侧**（helper 内采样会把 `str` 实参字面量的 owned +1 误读为
 泄漏）。
 
+## 23.2b `__dispose__` 析构钩子（容器自举 + 用户类）
+
+强计数归零时的 death cascade 统一为「header `sdtor` 指向一个编译期例程
+`(payload, aux) -> i64`」，运行时不读取任何对象布局信息：
+
+- **用户类（含对象级联）**：codegen 为每个对象的类发射一个 `@...__cascade` 例程，
+  内容 =（若有）调用用户 `func __dispose__(): unit` + 逐个 `sloth_rc_release` 引用
+  字段。该地址在 `sloth_obj_new(cls_id, n_fields, cascade)` 时登记为 `sdtor`。
+  继承链上的 `__dispose__` 按普通方法解析；泛型实例同样支持。**运行时不再有
+  `ObjInfo.refmask` 或 `sloth_cls_refmask`**——布局活在生成代码里。
+- **自举容器**：`lib/prelude/containers.slt` 的 `sloth_arr_dispose` / `sloth_map_dispose`
+  完成「按 `elref`/`kflag` 释放引用元素 + free 缓冲」。容器的 rc 分配经
+
+```sloth
+extern func sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
+```
+
+完成，`dtor` 是 `fn_addr(sloth_arr_dispose / sloth_map_dispose)` 给出的原始函数地址
+（`fn_addr(f)` 返回编译期函数的裸地址词）。`aux` 承载编译期引用性标志：数组的
+`elref`、Map 的 `kflag`。
+
+这样「释放哪些引用元素 / 如何 free 缓冲 / 用户收尾」的策略都在 sloth，而
+`libsloth_rt.so` 只保留裸分配、字级内存与 rc 机制。
+
 ## 23.3 示例
 
 ```sloth

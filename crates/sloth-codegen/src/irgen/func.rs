@@ -29,11 +29,16 @@ impl ModEmitter {
         // extern func: body-less declaration kept under its raw C-ABI name
         if f.is_extern {
             self.stat_extdecls += 1;
+            // a C symbol is globally unique: the same extern declared by
+            // several modules (or the container prelude) must be emitted once
+            if self.emitted_names.iter().any(|n| n == name) {
+                return name.to_string();
+            }
             self.emitted_names.push(name.to_string());
             // runtime symbols are already declared by rt_decls/obj_rt_decls;
             // re-declaring them is an MLIR redefinition error
             if self.predeclared.contains(name) {
-                return plan.mangled;
+                return name.to_string();
             }
             self.out.push_str(&format!(
                 "  func.func private @{}({}) -> {}\n",
@@ -51,7 +56,7 @@ impl ModEmitter {
                     "i64"
                 },
             ));
-            return plan.mangled;
+            return name.to_string();
         }
         // methods addressable by vtable slots are emitted as llvm.func
         let is_ll = cls
@@ -59,7 +64,8 @@ impl ModEmitter {
                 self.llvm_method
                     .contains(&(c.to_string(), name.to_string()))
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || (cls.is_none() && self.addressable.contains(name));
         self.emitted_names.push(plan.mangled.clone());
         let mut fw = FnWalk {
             cur: String::new(),

@@ -10,7 +10,7 @@ const fn wi(v: i64) -> i64 {
 #[test]
 fn arc_stress_mt() {
     let base = rc::dec_i(rc::sloth_rc_live());
-    let o = objects::sloth_obj_new(0, wi(1));
+    let o = objects::sloth_obj_new(0, wi(1), 0);
     let mut hs = Vec::new();
     for _ in 0..8 {
         let w = rc::sloth_rc_retain(o);

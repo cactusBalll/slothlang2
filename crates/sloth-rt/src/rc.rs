@@ -4,9 +4,11 @@
 //! nil) and a value is its native word (int = i64, float = f64 bits,
 //! bool = 0/1). Because a word no longer carries its own kind, the runtime
 //! never guesses: every `retain`/`release` call is emitted by the compiler on
-//! a statically-ref-typed word, and death cascades read the compile-time
-//! refness masks/flags recorded on the object header (obj `refmask`, arr
-//! `aux` elref, map kflag vref, channel/fiber `eref`). A `release(0)` (nil)
+//! a statically-ref-typed word, and death cascades live in the compile-time
+//! kind dtor: for objects and self-hosted containers it is a generated
+//! `(payload, aux) -> i64` routine registered as the header `sdtor`; for the
+//! remaining Rust-built kinds the header `dtor` reads their flags (arr `aux`
+//! elref, closure env slot, channel/fiber `eref`). A `release(0)` (nil)
 //! is the only inert input.
 //!
 //! Every rc-managed handle (object, array, map, string, lambda frame,
@@ -71,11 +73,18 @@ pub(crate) struct Hdr {
     cnt: AtomicU64,
     /// payload size in bytes (drives the relocating realloc copy)
     size: usize,
-    /// death hook executed when the count reaches zero (cascade releases
-    /// via the kind's compile-time refness mask)
+    /// death hook executed when the count reaches zero; Rust-built kinds only
+    /// (their cascade reads the kind's compile-time flags)
     dtor: Option<fn(usize, u64)>,
-    /// per-kind auxiliary word: object field count, array element-ref flag
-    /// (`elref`); interpreted by each kind's destructor
+    /// generated-code death cascade: a raw C-ABI pointer to a routine
+    /// `(payload, aux) -> i64`. Installed for objects (codegen emits one
+    /// `@...__cascade` per class: user `__dispose__` + reference-field
+    /// releases) and for self-hosted containers via `sloth_rc_new`; takes
+    /// precedence over `dtor` when set.
+    sdtor: Option<unsafe extern "C" fn(i64, i64) -> i64>,
+    /// per-kind auxiliary word: object/cascade payload word (field count for
+    /// objects), array element-ref flag (`elref`); interpreted by the kind's
+    /// cascade/destructor
     aux: u64,
     /// intrusive chain of weak boxes targeting this payload
     weak_head: *mut WeakBox,
@@ -84,7 +93,7 @@ pub(crate) struct Hdr {
     weak_cnt: AtomicU64,
 }
 
-const HDR_WORDS: usize = 6;
+const HDR_WORDS: usize = 7;
 const HDR_BYTES: usize = HDR_WORDS * 8;
 
 /// weak box payload: `{target, hdr, next}` intrusive into the target header;
@@ -251,13 +260,38 @@ static DROPS: AtomicU64 = AtomicU64::new(0);
 /// allocate a tracked chunk: header + zeroed payload; returns the raw
 /// handle word. Payload zeroing keeps the rt contract (fresh slots are nil).
 pub(crate) unsafe fn rc_addr(n: usize, dtor: Option<fn(usize, u64)>) -> usize {
+    rc_addr_full(n, dtor, None, 0)
+}
+
+/// allocate a tracked chunk whose death cascade is generated code: `sdtor`
+/// is a raw C-ABI pointer `(payload, aux) -> i64` (0 = none). Used for objects
+/// (per-class `@...__cascade`) and self-hosted containers.
+pub(crate) unsafe fn rc_addr_sloth(n: usize, aux: u64, sdtor: usize) -> usize {
+    let s = if sdtor == 0 {
+        None
+    } else {
+        Some(std::mem::transmute::<
+            usize,
+            unsafe extern "C" fn(i64, i64) -> i64,
+        >(sdtor))
+    };
+    rc_addr_full(n, None, s, aux)
+}
+
+unsafe fn rc_addr_full(
+    n: usize,
+    dtor: Option<fn(usize, u64)>,
+    sdtor: Option<unsafe extern "C" fn(i64, i64) -> i64>,
+    aux: u64,
+) -> usize {
     let raw = libc::malloc(n + HDR_BYTES) as *mut u8;
     let hdr = raw as *mut Hdr;
     *hdr = Hdr {
         cnt: AtomicU64::new(1),
         size: n,
         dtor,
-        aux: 0,
+        sdtor,
+        aux,
         weak_head: std::ptr::null_mut(),
         weak_cnt: AtomicU64::new(0),
     };
@@ -267,17 +301,21 @@ pub(crate) unsafe fn rc_addr(n: usize, dtor: Option<fn(usize, u64)>) -> usize {
     payload as usize
 }
 
+/// `sloth_rc_new(nbytes, aux, dtor)` — bare tracked allocation for the
+/// self-hosted container prelude. `dtor` is the raw address of a compiled
+/// sloth `__dispose__` routine `(payload, aux) -> i64` (0 = none).
+#[no_mangle]
+pub extern "C" fn sloth_rc_new(nbytes: i64, aux: i64, dtor: i64) -> i64 {
+    if nbytes < 0 {
+        crate::panics::panic_msg("rc_new: negative payload size");
+    }
+    unsafe { w_ref(rc_addr_sloth(nbytes as usize, aux as u64, dtor as usize)) }
+}
+
 /// header pointer of a raw payload
 #[inline]
 pub(crate) unsafe fn hdr_of(payload: usize) -> *mut Hdr {
     (payload - HDR_BYTES) as *mut Hdr
-}
-
-/// record a payload's auxiliary header word (object field count for the
-/// death cascade; 0 for kinds that do not use it)
-#[inline]
-pub(crate) unsafe fn set_aux(payload: usize, aux: u64) {
-    (*hdr_of(payload)).aux = aux;
 }
 
 /// retain: bump the count of a tracked handle (nil is inert)
@@ -310,6 +348,7 @@ pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
         // last strong reference: acquire the dtor's reads/writes
         fence(Ordering::Acquire);
         let dtor = (*hdr).dtor.take();
+        let sdtor = (*hdr).sdtor.take();
         let aux = (*hdr).aux;
         // invalidate every weak box (their own rc keeps the boxes alive).
         // The header chunk itself is retained while weak boxes exist.
@@ -322,7 +361,10 @@ pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
             }
         }
         RC_LIVE.fetch_sub(1, Ordering::Relaxed);
-        if let Some(dtor) = dtor {
+        if let Some(sd) = sdtor {
+            // self-hosted `__dispose__`: (payload, aux)
+            sd(p as i64, aux as i64);
+        } else if let Some(dtor) = dtor {
             dtor(p, aux);
         }
         if (*hdr).weak_cnt.load(Ordering::Acquire) == 0 {
@@ -350,6 +392,7 @@ pub(crate) unsafe fn relocate(old_w: i64, n: usize) -> i64 {
         .store((*old_hdr).cnt.load(Ordering::Relaxed), Ordering::Relaxed);
     (*new_hdr).size = n;
     (*new_hdr).dtor = (*old_hdr).dtor;
+    (*new_hdr).sdtor = (*old_hdr).sdtor;
     (*new_hdr).aux = (*old_hdr).aux;
     (*new_hdr).weak_head = (*old_hdr).weak_head;
     (*new_hdr).weak_cnt.store(

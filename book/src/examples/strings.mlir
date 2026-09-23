@@ -222,14 +222,14 @@ module @main {
     %126 = call @sloth_rc_release(%115) : (i64) -> i64
     %127 = call @sloth_rc_release(%117) : (i64) -> i64
     %128 = call @sloth_rc_release(%120) : (i64) -> i64
-    %129 = memref.load %alloca[%c0] : memref<1xi64>
+    %129 = memref.load %alloca_9[%c0] : memref<1xi64>
     %130 = call @sloth_rc_release(%129) : (i64) -> i64
-    %intptr_17 = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
+    %intptr_17 = memref.extract_aligned_pointer_as_index %alloca_9 : memref<1xi64> -> index
     %131 = arith.index_cast %intptr_17 : index to i64
     %132 = call @sloth_fiber_untrack(%131) : (i64) -> i64
-    %133 = memref.load %alloca_9[%c0] : memref<1xi64>
+    %133 = memref.load %alloca[%c0] : memref<1xi64>
     %134 = call @sloth_rc_release(%133) : (i64) -> i64
-    %intptr_18 = memref.extract_aligned_pointer_as_index %alloca_9 : memref<1xi64> -> index
+    %intptr_18 = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
     %135 = arith.index_cast %intptr_18 : index to i64
     %136 = call @sloth_fiber_untrack(%135) : (i64) -> i64
     cf.br ^bb5

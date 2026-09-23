@@ -189,24 +189,24 @@ module @main {
     %106 = call @sloth_any_from(%105, %103) : (i64, i64) -> i64
     call @sloth_main__print(%106) : (i64) -> ()
     %107 = call @sloth_rc_release(%106) : (i64) -> i64
-    %108 = memref.load %alloca_15[%c0] : memref<1xi64>
+    %108 = memref.load %alloca_8[%c0] : memref<1xi64>
     %109 = call @sloth_rc_release(%108) : (i64) -> i64
-    %intptr_18 = memref.extract_aligned_pointer_as_index %alloca_15 : memref<1xi64> -> index
+    %intptr_18 = memref.extract_aligned_pointer_as_index %alloca_8 : memref<1xi64> -> index
     %110 = arith.index_cast %intptr_18 : index to i64
     %111 = call @sloth_fiber_untrack(%110) : (i64) -> i64
-    %112 = memref.load %alloca_8[%c0] : memref<1xi64>
+    %112 = memref.load %alloca_12[%c0] : memref<1xi64>
     %113 = call @sloth_rc_release(%112) : (i64) -> i64
-    %intptr_19 = memref.extract_aligned_pointer_as_index %alloca_8 : memref<1xi64> -> index
+    %intptr_19 = memref.extract_aligned_pointer_as_index %alloca_12 : memref<1xi64> -> index
     %114 = arith.index_cast %intptr_19 : index to i64
     %115 = call @sloth_fiber_untrack(%114) : (i64) -> i64
-    %116 = memref.load %alloca_12[%c0] : memref<1xi64>
+    %116 = memref.load %alloca[%c0] : memref<1xi64>
     %117 = call @sloth_rc_release(%116) : (i64) -> i64
-    %intptr_20 = memref.extract_aligned_pointer_as_index %alloca_12 : memref<1xi64> -> index
+    %intptr_20 = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
     %118 = arith.index_cast %intptr_20 : index to i64
     %119 = call @sloth_fiber_untrack(%118) : (i64) -> i64
-    %120 = memref.load %alloca[%c0] : memref<1xi64>
+    %120 = memref.load %alloca_15[%c0] : memref<1xi64>
     %121 = call @sloth_rc_release(%120) : (i64) -> i64
-    %intptr_21 = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
+    %intptr_21 = memref.extract_aligned_pointer_as_index %alloca_15 : memref<1xi64> -> index
     %122 = arith.index_cast %intptr_21 : index to i64
     %123 = call @sloth_fiber_untrack(%122) : (i64) -> i64
     cf.br ^bb5

@@ -83,9 +83,9 @@ impl ModEmitter {
     pub(crate) fn ty_named(&mut self, n: &str, a: Vec<TyId>) -> TyId {
         match n {
             "int" | "i64" | "int64" => self.r.mk(Ty::I64),
-            n if sloth_frontend::ty::IntKind::from_name(n).is_some() => {
-                self.r.mk(Ty::Int(sloth_frontend::ty::IntKind::from_name(n).unwrap()))
-            }
+            n if sloth_frontend::ty::IntKind::from_name(n).is_some() => self
+                .r
+                .mk(Ty::Int(sloth_frontend::ty::IntKind::from_name(n).unwrap())),
             "float" | "f64" => self.r.mk(Ty::F64),
             "bool" => self.r.mk(Ty::Bool),
             "str" => self.r.mk(Ty::Str),
@@ -221,6 +221,7 @@ impl ModEmitter {
                 impls: cdef.impls.clone(),
             },
         );
+        self.register_class_vt_surface(&inst);
         if n == "Result" {
             self.result_insts.insert(inst.clone());
         }

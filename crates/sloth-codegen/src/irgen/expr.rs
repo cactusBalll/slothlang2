@@ -106,11 +106,7 @@ impl ModEmitter {
             ExprNode::UInt(v) => {
                 // unsigned literal: the word is the two's-complement bit pattern
                 let r = fw.v();
-                fw.op(&format!(
-                    "    {} = arith.constant {} : i64",
-                    r,
-                    *v as i64
-                ));
+                fw.op(&format!("    {} = arith.constant {} : i64", r, *v as i64));
                 let t = self.r.mk(Ty::Int(sloth_frontend::ty::IntKind::U64));
                 (r, t)
             }
@@ -523,7 +519,9 @@ impl ModEmitter {
                             (Ty::Str, "str") => true,
                             (Ty::Bool, "bool") => true,
                             (Ty::Range, "range") => true,
-                            (Ty::Int(k), n) => sloth_frontend::ty::IntKind::from_name(n) == Some(*k),
+                            (Ty::Int(k), n) => {
+                                sloth_frontend::ty::IntKind::from_name(n) == Some(*k)
+                            }
                             _ => false,
                         };
                         // patch 42: an optional word is a runtime box-or-nil —
@@ -2224,7 +2222,10 @@ impl ModEmitter {
                     }
                     let af = emit_dec_f(fw, &av);
                     let r = fw.v();
-                    fw.op(&format!("    {} = func.call @{}({}) : (f64) -> f64", r, sym, af));
+                    fw.op(&format!(
+                        "    {} = func.call @{}({}) : (f64) -> f64",
+                        r, sym, af
+                    ));
                     return (emit_enc_f(fw, &r), self.r.mk(Ty::F64));
                 }
             }
@@ -2259,9 +2260,48 @@ impl ModEmitter {
                 return (String::new(), self.r.mk(Ty::Unit));
             }
         };
+        // `fn_addr(f)`: raw address of a compiled top-level function as an
+        // `int` word. Intercepted before argument evaluation (the argument is
+        // a function name, not a value). Used by the self-hosted container
+        // prelude to install its `__dispose__` routine as an rc death hook.
+        if let ExprNode::Ident(fname0) = &callee.node {
+            if fname0 == "fn_addr" && args.len() == 1 {
+                if let ExprNode::Ident(fname) = &args[0].node {
+                    let sym = if let Some(fd) = self.funcs.get(fname) {
+                        if fd.is_extern {
+                            fname.clone()
+                        } else if self.fixed_syms.contains(fname) {
+                            fname.clone()
+                        } else {
+                            mangle(&self.cur_mod, None, fname)
+                        }
+                    } else if let Some((m, _)) = self.cross_funcs.get(fname) {
+                        m.clone()
+                    } else {
+                        self.err(pos, format!("fn_addr: unknown function `{}`", fname));
+                        fname.clone()
+                    };
+                    let a = fw.v();
+                    fw.op(&format!(
+                        "    {} = llvm.mlir.addressof @{} : !llvm.ptr",
+                        a, sym
+                    ));
+                    let w = fw.v();
+                    fw.op(&format!(
+                        "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
+                        w, a
+                    ));
+                    return (w, self.r.mk(Ty::I64));
+                }
+                self.err(pos, "fn_addr expects a function name".to_string());
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                return (z, self.r.mk(Ty::I64));
+            }
+        }
+        // method call: receiver becomes first argument
         let mut argv: Vec<(String, TyId)> = Vec::new();
         let mut sigargs: Vec<String> = Vec::new();
-        // method call: receiver becomes first argument
         let mut recv: Option<(String, TyId)> = None;
         if let ExprNode::Field { obj, name: mname2 } = &callee.node {
             // qualified cross-module call: lib.fn(...) or alias.fn(...)
@@ -2488,12 +2528,14 @@ impl ModEmitter {
                         return self.emit_dyn_call(fw, &tr, &name, &recvv, &argv, &sargs, pos);
                     }
                     // design §2.4: plain class methods called through a
-                    // base-class reference also dispatch on the runtime class
-                    let sargs = sigargs.clone();
-                    if let Some(out) =
-                        self.emit_class_virtual_call(fw, &cls, &name, &recvv, &argv, &sargs, pos)
-                    {
-                        return out;
+                    // base-class reference also dispatch on the runtime class.
+                    // No descendant override -> devirtualize to a direct call.
+                    if self.has_virtual_override(&cls, &name) {
+                        if let Some(out) =
+                            self.emit_class_vt_call(fw, &cls, &name, &recvv, &argv, pos)
+                        {
+                            return out;
+                        }
                     }
                 }
                 let start = if is_super {
@@ -2754,17 +2796,22 @@ impl ModEmitter {
         match name.as_str() {
             // rc diagnostics (SLOTH_STATS surface, predeclared in module.rs)
             "sloth_rc_live" if argv.is_empty() => {
-                fw.op(&format!("    {} = func.call @sloth_rc_live() : () -> i64", r));
+                fw.op(&format!(
+                    "    {} = func.call @sloth_rc_live() : () -> i64",
+                    r
+                ));
                 (r, self.r.mk(Ty::I64))
             }
             "sloth_rc_drops" if argv.is_empty() => {
-                fw.op(&format!("    {} = func.call @sloth_rc_drops() : () -> i64", r));
+                fw.op(&format!(
+                    "    {} = func.call @sloth_rc_drops() : () -> i64",
+                    r
+                ));
                 (r, self.r.mk(Ty::I64))
             }
             // explicit fixed-width integer conversion: `int8(x)`, `uint32(x)`, …
             other
-                if !argv.is_empty()
-                    && sloth_frontend::ty::IntKind::from_name(other).is_some() =>
+                if !argv.is_empty() && sloth_frontend::ty::IntKind::from_name(other).is_some() =>
             {
                 let k = sloth_frontend::ty::IntKind::from_name(other).unwrap();
                 let to = self.r.mk(Ty::Int(k));
@@ -2820,7 +2867,10 @@ impl ModEmitter {
                     Ty::Map(..) => "sloth_map_len",
                     _ => "sloth_str_len",
                 };
-                fw.op(&format!("    {} = func.call @{}({}) : (i64) -> i64", r, sym, v));
+                fw.op(&format!(
+                    "    {} = func.call @{}({}) : (i64) -> i64",
+                    r, sym, v
+                ));
                 (r, self.r.mk(Ty::I64))
             }
             "keys" if !argv.is_empty() => {

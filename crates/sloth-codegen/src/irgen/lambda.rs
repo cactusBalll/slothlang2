@@ -32,34 +32,37 @@ impl ModEmitter {
             "    {} = func.call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
             ci, z, cid
         ));
-        // per-frame reference mask: a captured field is a ref exactly when
+        // per-frame reference fields: a captured field is a ref exactly when
         // its surface type is (base-first == capture order)
-        let mut cmask: i64 = 0;
+        let mut cref: Vec<i64> = Vec::new();
         for (j, cn) in caps.iter().enumerate() {
             if let Some((_a, ct)) = fw.lookup(cn) {
                 if !self.is_float(ct) && self.is_ref(ct) {
-                    cmask |= 1 << j;
+                    cref.push(j as i64);
                 }
             }
         }
-        {
-            let mvc = fw.v();
+        // emit the frame death cascade (release ref captures) and register its
+        // address as the frame allocation's sdtor; None when nothing to release
+        let cascade = if !cref.is_empty() {
+            let tsym = format!("sloth_lambda{}_cascade", self.lamcount);
+            self.emit_cascade_fn(&tsym, &cref, None);
+            let fp = fw.v();
             fw.op(&format!(
-                "    {} = arith.constant {} : i64",
-                mvc,
-                enc_i_lit(cmask)
+                "    {} = llvm.mlir.addressof @{} : !llvm.ptr",
+                fp, tsym
             ));
-            let nvc = fw.v();
+            let fpw = fw.v();
             fw.op(&format!(
-                "    {} = arith.constant {} : i64",
-                nvc,
-                enc_i_lit(ncap as i64)
+                "    {} = llvm.ptrtoint {} : !llvm.ptr to i64",
+                fpw, fp
             ));
-            fw.op(&format!(
-                "    func.call @sloth_cls_refmask({}, {}, {}) : (i64, i64, i64) -> i64",
-                ci, mvc, nvc
-            ));
-        }
+            fpw
+        } else {
+            let zero = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", zero));
+            zero
+        };
         let nf = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
@@ -68,8 +71,8 @@ impl ModEmitter {
         ));
         let frame = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
-            frame, ci, nf
+            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            frame, ci, nf, cascade
         ));
         // rc patch B: fresh frame = producer temp (released at stmt close
         // unless stored)

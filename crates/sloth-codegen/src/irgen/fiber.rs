@@ -232,7 +232,10 @@ impl ModEmitter {
     fn emit_fiber_pred(&mut self, fw: &mut FnWalk, farg: &Expr, sym: &str) -> (String, TyId) {
         let (fv, _ft) = self.emit_expr(fw, farg);
         let r = fw.v();
-        fw.op(&format!("    {} = func.call @{}({}) : (i64) -> i64", r, sym, fv));
+        fw.op(&format!(
+            "    {} = func.call @{}({}) : (i64) -> i64",
+            r, sym, fv
+        ));
         (r, self.r.mk(Ty::Bool))
     }
 

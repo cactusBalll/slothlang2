@@ -122,10 +122,12 @@ impl ModEmitter {
             one,
             enc_i_lit(1)
         ));
+        let z3 = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z3));
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}) : (i64, i64) -> i64",
-            obj, info, one
+            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            obj, info, one, z3
         ));
         // field 0 = value word; the word is never a reference, so a raw store
         let z = fw.v();
@@ -140,7 +142,10 @@ impl ModEmitter {
         ));
         let builder = self.emit_builtin_vt_builder(kind, tname);
         let vt = fw.v();
-        fw.op(&format!("    {} = func.call @{}() : () -> i64", vt, builder));
+        fw.op(&format!(
+            "    {} = func.call @{}() : () -> i64",
+            vt, builder
+        ));
         fw.op(&format!(
             "    func.call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt

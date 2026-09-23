@@ -19,6 +19,30 @@ use crate::boxopt::sloth_box_get;
 use crate::rc::{dec_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_ref, w_unref};
 use crate::strings::{intern_bytes, strb_append, strb_or_new, StrT};
 
+/// Array header `[len, cap, buf]` — the layout owned by the self-hosted
+/// container prelude (`lib/prelude/containers.slt`). The renderer only needs
+/// the length and the element-buffer pointer.
+unsafe fn arr_parts(w: i64) -> (i64, *const i64) {
+    let p = w_unref(w) as *const i64;
+    (*p, *p.offset(2) as *const i64)
+}
+
+/// Walk every live `(key, value)` pair of a Map. Layout:
+/// `[cap, used, kflag, buckets]`, slot `[used, key, value, hash]` (4 words).
+unsafe fn map_pairs(w: i64, mut f: impl FnMut(i64, i64)) {
+    let m = w_unref(w) as *const i64;
+    let cap = *m;
+    let bp = *m.offset(3) as *const i64;
+    let mut i = 0i64;
+    while i < cap {
+        let s = bp.offset((i * 4) as isize);
+        if *s == 1 {
+            f(*s.offset(1), *s.offset(2));
+        }
+        i += 1;
+    }
+}
+
 // ---------------- descriptor word offsets ----------------
 pub const D_KIND: isize = 0;
 pub const D_FLAGS: isize = 1;
@@ -388,13 +412,13 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
                 append(p, b"nil");
             } else {
                 append(p, b"[");
-                let n = crate::arrays::sloth_arr_len(word);
+                let (n, buf) = unsafe { arr_parts(word) };
                 let mut i = 0i64;
                 while i < n {
                     if i > 0 {
                         append(p, b", ");
                     }
-                    let w = crate::arrays::sloth_arr_get(word, i);
+                    let w = unsafe { *buf.offset(i as isize) };
                     render(w_ref(p as usize), elem, w);
                     i += 1;
                 }
@@ -409,15 +433,17 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
             } else {
                 append(p, b"{");
                 let mut first = true;
-                crate::maps::map_foreach(word, |kw, vw| {
-                    if !first {
-                        append(p, b", ");
-                    }
-                    first = false;
-                    render(w_ref(p as usize), kd, kw);
-                    append(p, b": ");
-                    render(w_ref(p as usize), vd, vw);
-                });
+                unsafe {
+                    map_pairs(word, |kw, vw| {
+                        if !first {
+                            append(p, b", ");
+                        }
+                        first = false;
+                        render(w_ref(p as usize), kd, kw);
+                        append(p, b": ");
+                        render(w_ref(p as usize), vd, vw);
+                    });
+                }
                 append(p, b"}");
             }
         }
