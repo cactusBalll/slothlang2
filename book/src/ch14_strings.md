@@ -57,7 +57,8 @@ it.next();   // nil
 ```
 
 - `chars()` 惰性求值、不预先物化整个字符串；底层用 `sloth_str_clen`（字符数）
-  与 `sloth_str_codepoint`（第 i 个码点）。
+  与 `sloth_str_codepoint`（第 i 个码点）。迭代器 `StrChars` 由编译器自动注入
+  （源码形态 `lib/prelude/strchars.slt`）。
 - 与 `for c in s` 的区别：`for c in s` 每轮产出一个**单字符 `str` 子串**；
   `chars()` 每轮产出一个**码点 `int`**，且可作为迭代器值传递 / 手动 `next()`。
 - 迭代器协议（`iter()`/`next(): int?`）见 §16。

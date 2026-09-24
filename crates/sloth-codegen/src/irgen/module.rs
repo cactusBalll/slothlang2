@@ -251,14 +251,11 @@ impl ModEmitter {
     }
 }
 
-/// stdlib `print` prelude: implemented in Sloth on top of the runtime writer
-/// (`__sloth_rt_write` / `__sloth_rt_puts`), not a compiler builtin. Injected into
-/// the root and every imported module so bare `print` resolves locally.
-pub(crate) const IO_PRELUDE: &str = "extern func __sloth_rt_write(v: any): str;\n\
-     extern func __sloth_rt_puts(v: str): unit;\n\
-     pub func print(v: any): unit {\n\
-     __sloth_rt_puts(__sloth_rt_write(v));\n\
-     }\n";
+/// stdlib `print` prelude, embedded from `lib/prelude/print.slt`. `print` is
+/// implemented in Sloth on top of the runtime writer (`__sloth_rt_write` /
+/// `__sloth_rt_puts`), not a compiler builtin. Injected into the root and every
+/// imported module so bare `print` resolves locally.
+pub(crate) const PRINT_PRELUDE: &str = include_str!("../../../../lib/prelude/print.slt");
 
 pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
     if decls
@@ -267,7 +264,7 @@ pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
     {
         return;
     }
-    if let Ok(stdp) = sloth_frontend::parser::parse(IO_PRELUDE) {
+    if let Ok(stdp) = sloth_frontend::parser::parse(PRINT_PRELUDE) {
         for d in stdp.decls.into_iter().rev() {
             decls.insert(0, d);
         }
@@ -337,35 +334,18 @@ pub(crate) const CORE_SYMS: &[&str] = &[
     "__sloth_box_get",
 ];
 
-/// stdlib `StrChars` lazy char iterator backing `s.chars()`: each `next()`
-/// yields the Unicode scalar value of one character as an `int` (fixed 4-byte
-/// code point). Injected once per emitter — into the root module, or into the
-/// first imported module when `chars()` appears there before the root is
-/// collected (imported bodies emit first).
-pub(crate) const STRCHARS_PRELUDE: &str = "extern func __sloth_str_clen(s: str): int;\n\
-     extern func __sloth_str_codepoint(s: str, i: int): int;\n\
-     class StrChars {\n\
-     var s: str;\n\
-     var i: int;\n\
-     var n: int;\n\
-     func __init__(s: str): unit {\n\
-     this.s = s;\n\
-     this.i = 0;\n\
-     this.n = __sloth_str_clen(s);\n\
-     return;\n\
-     }\n\
-     func iter(): StrChars {\n\
-     return this;\n\
-     }\n\
-     func next(): int? {\n\
-     if this.i >= this.n {\n\
-     return nil;\n\
-     }\n\
-     let c: int = __sloth_str_codepoint(this.s, this.i);\n\
-     this.i = this.i + 1;\n\
-     return c;\n\
-     }\n\
-     }\n";
+/// stdlib `Entry<K,V>` / `Result<T,E>` generic types, embedded from
+/// `lib/prelude/result.slt`. Injected once into the root module; the emitter
+/// recognizes `ok`/`err` calls against a declared `Result<T,E>` target.
+pub(crate) const RESULT_PRELUDE: &str = include_str!("../../../../lib/prelude/result.slt");
+
+/// stdlib `StrChars` lazy char iterator backing `s.chars()`, embedded from
+/// `lib/prelude/strchars.slt`. Each `next()` yields the Unicode scalar value of
+/// one character as an `int` (fixed 4-byte code point). Injected once per
+/// emitter — into the root module, or into the first imported module when
+/// `chars()` appears there before the root is collected (imported bodies emit
+/// first).
+pub(crate) const STRCHARS_PRELUDE: &str = include_str!("../../../../lib/prelude/strchars.slt");
 
 /// prelude `__dispose__` routines whose address is taken (`fn_addr`): emitted
 /// as `llvm.func` so `llvm.mlir.addressof` is legal
@@ -653,38 +633,13 @@ impl ModEmitter {
         // (which legitimately declares/uses reserved symbols) is injected
         let allowed = has_sloth_import(&prog.imports);
         self.check_reserved_module(prog, allowed);
-        // stdlib Result<T,E> prelude (only injected once)
+        // stdlib Entry<K,V> / Result<T,E> prelude (only injected once)
         let mut decls2: Vec<Decl> = prog.decls.clone();
         if !decls2
             .iter()
             .any(|d| d.name == "Result" && matches!(d.node, DeclNode::Class(_)))
         {
-            match sloth_frontend::parser::parse(
-                "extern func __sloth_panic_unwrap(): int;\n\
-                 class Entry<T, E> {\n\
-                 var key: T;\n\
-                 var val: E;\n\
-                 }\n\
-                 class Result<T, E> {\n\
-                 var ok: bool = false;\n\
-                 var v: T;\n\
-                 var e: E;\n\
-                 func is_ok(): bool {\n\
-                 return this.ok;\n\
-                 }\n\
-                 func unwrap(): T {\n\
-                 var flag: bool = this.ok;\n\
-                 if flag {\n\
-                 return this.v;\n\
-                 }\n\
-                 { __sloth_panic_unwrap(); }\n\
-                 return this.v;\n\
-                 }\n\
-                 func err(): E {\n\
-                 return this.e;\n\
-                 }\n\
-                 }\n",
-            ) {
+            match sloth_frontend::parser::parse(RESULT_PRELUDE) {
                 Ok(stdp) => {
                     for d in stdp.decls.into_iter().rev() {
                         decls2.insert(0, d);

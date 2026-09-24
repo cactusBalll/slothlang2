@@ -14,13 +14,14 @@
 | `sloth_rc_live()` | `() -> int` | ARC 存活计数 |
 | `sloth_rc_drops()` | `() -> int` | ARC 累计析构数 |
 
-`print` **不再是编译器内建**：它由编译器自动注入的 Sloth prelude 实现，基于
-运行时 `any` 写入面：
+`print` **不再是编译器内建**：它由编译器自动注入的 Sloth prelude 实现
+（源码形态在 `lib/prelude/print.slt`，经 `include_str!` 嵌入），基于运行时
+`any` 写入面：
 
 ```sloth
-extern func sloth_rt_write(v: any): str;   // 按运行时类型渲染为 str（递归容器）
-extern func sloth_rt_puts(v: str): unit;   // 仅打印一个 str（追加换行）
-pub func print(v: any): unit { sloth_rt_puts(sloth_rt_write(v)); }
+extern func __sloth_rt_write(v: any): str;   // 按运行时类型渲染为 str（递归容器）
+extern func __sloth_rt_puts(v: str): unit;   // 仅打印一个 str（追加换行）
+pub func print(v: any): unit { __sloth_rt_puts(__sloth_rt_write(v)); }
 ```
 
 任意值传入 `print`/`${}` 时会隐式装箱为 `any`（见 §5.1、§24.2），因此

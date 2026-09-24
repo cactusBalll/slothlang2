@@ -1,0 +1,38 @@
+// Injected `StrChars` lazy char iterator backing `s.chars()`, embedded from
+// `lib/prelude/strchars.slt`.
+//
+// Each `next()` yields the Unicode scalar value of one character as an `int`
+// (fixed 4-byte code point), so the iterator value can be passed around and
+// advanced manually (protocol `iter()`/`next(): int?`). Injected once per
+// emitter — into the root module, or into the first imported module when
+// `chars()` appears there before the root is collected (imported bodies emit
+// first).
+
+extern func __sloth_str_clen(s: str): int;
+extern func __sloth_str_codepoint(s: str, i: int): int;
+
+class StrChars {
+    var s: str;
+    var i: int;
+    var n: int;
+
+    func __init__(s: str): unit {
+        this.s = s;
+        this.i = 0;
+        this.n = __sloth_str_clen(s);
+        return;
+    }
+
+    func iter(): StrChars {
+        return this;
+    }
+
+    func next(): int? {
+        if this.i >= this.n {
+            return nil;
+        }
+        let c: int = __sloth_str_codepoint(this.s, this.i);
+        this.i = this.i + 1;
+        return c;
+    }
+}

@@ -113,8 +113,9 @@
 |---|---|
 | Array / Map（2026-09-23） | `lib/prelude/containers.slt` |
 | range / 值盒 boxopt（2026-09-24） | `lib/prelude/core.slt` |
-| `print` 前导 | `module.rs` `IO_PRELUDE` |
-| `Result<T,E>` / `Entry<K,V>` | `module.rs` 注入 |
+| `print` 前导 | `lib/prelude/print.slt` |
+| `StrChars`（`s.chars()` 迭代器） | `lib/prelude/strchars.slt` |
+| `Result<T,E>` / `Entry<K,V>` | `lib/prelude/result.slt` |
 | XorShift RNG | `lib/sloth/random.slt` |
 | HTTP 字符串 helpers / 路由 | `lib/sloth/http.slt` |
 | 事件 reactor | `lib/sloth/event.slt` |

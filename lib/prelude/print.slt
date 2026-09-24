@@ -1,0 +1,14 @@
+// Injected print prelude, embedded from `lib/prelude/print.slt`.
+//
+// `print` is not a compiler builtin: it is a thin sloth wrapper over the
+// runtime `any` renderer. `__sloth_rt_write` renders any value (recursively for
+// containers) to a fresh `str`; `__sloth_rt_puts` writes it with a trailing
+// newline. Injected into the root module and every imported module so a bare
+// `print` call resolves locally.
+
+extern func __sloth_rt_write(v: any): str;
+extern func __sloth_rt_puts(v: str): unit;
+
+pub func print(v: any): unit {
+    __sloth_rt_puts(__sloth_rt_write(v));
+}

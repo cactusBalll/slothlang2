@@ -4,7 +4,8 @@
 
 ## 17.1 `Result<T, E>`
 
-编译器为每个模块自动注入一个 stdlib 泛型类（源码形态）：
+编译器在根模块自动注入一个 stdlib 泛型类；源码形态在
+`lib/prelude/result.slt`（经 `include_str!` 嵌入编译器），`Entry<K,V>` 同在该文件：
 
 ```sloth
 class Result<T, E> {
@@ -13,8 +14,9 @@ class Result<T, E> {
     var e: E;
     func is_ok(): bool { return this.ok; }
     func unwrap(): T {          // 失败时 panic
-        if this.ok { return this.v; }
-        sloth_panic_unwrap();   // 运行时通道（打印并退出）
+        var flag: bool = this.ok;
+        if flag { return this.v; }
+        { __sloth_panic_unwrap(); }  // 运行时通道（打印并退出）
         return this.v;
     }
     func err(): E { return this.e; }

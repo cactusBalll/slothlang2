@@ -1,0 +1,40 @@
+// Injected stdlib generic types, embedded from `lib/prelude/result.slt`.
+//
+// `Entry<K,V>` is the live key/value record yielded by `for` over a `Map`
+// (book §3.5). `Result<T,E>` provides the `ok(v)` / `err(e)` constructor
+// surface and the `is_ok()` / `unwrap()` / `err()` methods; the emitter
+// recognizes `ok`/`err` calls against a declared `Result<T,E>` target, so the
+// target annotation supplies the instance's T/E frame. `unwrap()` on an err
+// value routes through the runtime panic channel (`__sloth_panic_unwrap`).
+//
+// Injected once into the root module.
+
+extern func __sloth_panic_unwrap(): int;
+
+class Entry<T, E> {
+    var key: T;
+    var val: E;
+}
+
+class Result<T, E> {
+    var ok: bool = false;
+    var v: T;
+    var e: E;
+
+    func is_ok(): bool {
+        return this.ok;
+    }
+
+    func unwrap(): T {
+        var flag: bool = this.ok;
+        if flag {
+            return this.v;
+        }
+        { __sloth_panic_unwrap(); }
+        return this.v;
+    }
+
+    func err(): E {
+        return this.e;
+    }
+}
