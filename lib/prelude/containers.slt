@@ -27,6 +27,8 @@ extern func __sloth_str_eq(a: int, b: int): int;
 extern func __sloth_panic_nokey(k: int): int;
 extern func __sloth_panic_oob(i: int, n: int): int;
 extern func __sloth_panic_pop(i: int, n: int): int;
+extern func __sloth_panic_slice(i: int, n: int): int;
+extern func __sloth_panic_slice_assign(got: int, want: int): int;
 
 // ============================ Array ============================
 
@@ -133,6 +135,69 @@ func __sloth_arr_pop(a: int): int {
     }
     __sloth_mem_store(a, 0, n - 1);
     return __sloth_mem_load(__sloth_mem_load(a, 2), n - 1);
+}
+
+// fresh copy of `a[lo, lo+len)` as a new array. `elref` mirrors the source
+// array's element-ref flag so the copy's death cascade releases reference
+// elements (each one retained into the new buffer). `a[lo..hi]` lowers to
+// `lo`/`len = hi - lo`; bounds are checked here.
+func __sloth_arr_slice(a: int, lo: int, len: int, elref: int): int {
+    let n: int = __sloth_mem_load(a, 0);
+    if lo < 0 or len < 0 or lo + len > n {
+        __sloth_panic_slice(lo + len, n);
+        return 0;
+    }
+    let r: int = __sloth_arr_new_k(len, elref);
+    let sbuf: int = __sloth_mem_load(a, 2);
+    let dbuf: int = __sloth_mem_load(r, 2);
+    var i: int = 0;
+    while i < len {
+        let w: int = __sloth_mem_load(sbuf, lo + i);
+        if elref != 0 {
+            if w != 0 {
+                __sloth_rc_retain(w);
+            }
+        }
+        __sloth_mem_store(dbuf, i, w);
+        i = i + 1;
+    }
+    return r;
+}
+
+// element-wise `a[lo, lo+len) = src[0, len)`: writes through the target array
+// in place. Both the target bounds and the length match (`src.len() == len`)
+// are checked here. Reference elements are retained into the slot before the
+// evicted old element is released; a full self-assign (`src == a`, which also
+// forces `lo == 0`) is therefore count-neutral.
+func __sloth_arr_slice_set(a: int, lo: int, len: int, src: int, elref: int): int {
+    let n: int = __sloth_mem_load(a, 0);
+    if lo < 0 or len < 0 or lo + len > n {
+        __sloth_panic_slice(lo + len, n);
+        return 0;
+    }
+    let sn: int = __sloth_mem_load(src, 0);
+    if sn != len {
+        __sloth_panic_slice_assign(sn, len);
+        return 0;
+    }
+    let dbuf: int = __sloth_mem_load(a, 2);
+    let sbuf: int = __sloth_mem_load(src, 2);
+    var i: int = 0;
+    while i < len {
+        let nw: int = __sloth_mem_load(sbuf, i);
+        if elref != 0 {
+            if nw != 0 {
+                __sloth_rc_retain(nw);
+            }
+            let old: int = __sloth_mem_load(dbuf, lo + i);
+            if old != 0 {
+                __sloth_rc_release(old);
+            }
+        }
+        __sloth_mem_store(dbuf, lo + i, nw);
+        i = i + 1;
+    }
+    return 0;
 }
 
 // ============================= Map =============================

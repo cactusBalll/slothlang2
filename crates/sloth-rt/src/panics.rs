@@ -72,3 +72,21 @@ pub extern "C" fn __sloth_panic_oob(i: i64, len: i64) -> i64 {
 pub extern "C" fn __sloth_panic_pop(i: i64, len: i64) -> i64 {
     panic_oob("pop", i, len)
 }
+
+/// C-ABI out-of-bounds entry for `Array` range slicing (`a[lo..hi]`): `i` is
+/// the exclusive end (or the offending `lo + len`), `len` the array length.
+#[no_mangle]
+pub extern "C" fn __sloth_panic_slice(i: i64, len: i64) -> i64 {
+    panic_oob("array slice", i, len)
+}
+
+/// C-ABI length-mismatch entry for `Array` slice assignment
+/// (`a[lo..hi] = src`): `got` is `src.len()`, `want` the slice length.
+#[no_mangle]
+pub extern "C" fn __sloth_panic_slice_assign(got: i64, want: i64) -> i64 {
+    eprintln!(
+        "sloth panic: array slice assignment length {} does not match target length {}",
+        got, want
+    );
+    std::process::exit(1);
+}

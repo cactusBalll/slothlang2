@@ -3606,16 +3606,130 @@ mod irgen_p44 {
         assert!(run_src(src, "main").is_err(), "chars() on array accepted");
     }
 
-    /// Array has no range slicing (only str does)
+    /// Array range slicing `a[lo..hi]` / `a[lo..=hi]` returns a fresh copy;
+    /// nested indexing, empty spans and ref-typed elements work.
     #[test]
-    fn array_range_slice_diag() {
+    fn array_slice_read_works() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2, 3, 4, 5];
+                print(a[1..3]);       // [2, 3]
+                print(a[1..=3]);      // [2, 3, 4]
+                print(a[0..0]);       // []
+                print(a[2..5][0]);    // 3
+                var sub = a[3..5];
+                sub[0] = 99;          // copy: does not touch a
+                print(a[3]);          // 4
+                print(sub[0]);        // 99
+                var s = ["x", "y", "z"];
+                print(s[1..3]);       // [y, z]
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `a[lo..hi] = src` copies `src` element-wise into the target span.
+    #[test]
+    fn array_slice_assign_works() {
         let src = r#"
             func main(): unit {
                 var a = [1, 2, 3, 4];
-                print(a[1..3]);
+                a[1..3] = [20, 30];
+                print(a);             // [1, 20, 30, 4]
+                var b = [7, 8];
+                a[0..2] = b;
+                print(a);             // [7, 8, 30, 4]
+                a[3..=3] = [40];
+                print(a);             // [7, 8, 30, 40]
             }
         "#;
-        assert!(run_src(src, "main").is_err(), "array range slice accepted");
+        run_src(src, "main").unwrap();
+    }
+
+    /// slicing a `str`-element array retains each element; the copy (and the
+    /// source) drain without leaks or double frees across a churn loop
+    #[test]
+    fn array_slice_refs_drain() {
+        let src = r#"
+            func main(): unit {
+                var base = sloth_rc_live();
+                var i = 0;
+                while i < 500 {
+                    var a = ["aa", "bb", "cc", "dd"];
+                    var s = a[1..3];
+                    s[0] = "zz";
+                    i = i + 1;
+                }
+                print(sloth_rc_live() == base);   // no leak
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `a[lo..hi] = src` on ref-typed elements releases the evicted elements
+    /// and retains the new ones (no leak, no double free) across a churn loop
+    #[test]
+    fn array_slice_assign_refs_drain() {
+        let src = r#"
+            func main(): unit {
+                var base = sloth_rc_live();
+                var i = 0;
+                while i < 500 {
+                    var a = ["aa", "bb", "cc"];
+                    var b = ["xx", "yy"];
+                    a[1..3] = b;
+                    i = i + 1;
+                }
+                print(sloth_rc_live() == base);   // no leak
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// a non-array RHS for slice assignment is a compile-time diagnostic
+    #[test]
+    fn array_slice_assign_bad_rhs_diag() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2, 3];
+                a[0..2] = 5;
+            }
+        "#;
+        assert!(
+            run_src(src, "main").is_err(),
+            "non-array slice assignment accepted"
+        );
+    }
+
+    /// a non-int array range bound is a compile-time diagnostic
+    #[test]
+    fn array_slice_non_int_diag() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2, 3];
+                print(a["x"..2]);
+            }
+        "#;
+        assert!(
+            run_src(src, "main").is_err(),
+            "non-int array range accepted"
+        );
+    }
+
+    /// assigning through a slice copy (`a[1..3][0] = x`) is rejected: a slice
+    /// is a fresh copy, so its elements are not aliases of the source
+    #[test]
+    fn array_slice_nested_assign_diag() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2, 3, 4];
+                a[1..3][0] = 9;
+            }
+        "#;
+        assert!(
+            run_src(src, "main").is_err(),
+            "nested slice assignment accepted"
+        );
     }
 }
 

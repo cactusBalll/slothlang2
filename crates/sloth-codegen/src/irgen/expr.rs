@@ -1863,16 +1863,12 @@ impl ModEmitter {
                 if matches!(self.r.get(at), Ty::Str) {
                     return self.emit_str_index(fw, &av, idx, &e.pos);
                 }
-                // Array range slicing is unsupported (only `str` has `s[a..b]`):
-                // diagnose instead of emitting a bogus range handle as an index.
-                if matches!(self.r.get(at), Ty::Array(_))
-                    && matches!(&idx.node, ExprNode::Range { .. })
-                {
-                    self.err(
-                        &e.pos,
-                        "Array does not support range slicing; only `str` supports `s[a..b]`"
-                            .to_string(),
-                    );
+                // Array range slicing: `a[lo..hi]` / `a[lo..=hi]` yields a fresh
+                // `Array<T>` copy of the chosen span (elements retained).
+                if let Ty::Array(el) = self.r.get(at).clone() {
+                    if matches!(&idx.node, ExprNode::Range { .. }) {
+                        return self.emit_arr_index(fw, &av, el, idx, &e.pos);
+                    }
                 }
                 let (iv, it) = self.emit_expr(fw, idx);
                 let _ = it;
@@ -2018,6 +2014,83 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// emit `lo` and `hi`(exclusive) as `i64` words for a range subscript.
+    /// `inclusive` normalizes `a..=b` to `hi = b + 1`. `what` names the
+    /// container for the non-int diagnostic (e.g. "str range" / "array range").
+    pub(crate) fn emit_range_bounds(
+        &mut self,
+        fw: &mut FnWalk,
+        idx: &Expr,
+        pos: &Pos,
+        what: &str,
+    ) -> (String, String) {
+        let (low, high, inclusive) = match &idx.node {
+            ExprNode::Range {
+                low,
+                high,
+                inclusive,
+            } => (low, high, *inclusive),
+            _ => unreachable!("emit_range_bounds on a non-range subscript"),
+        };
+        let ity = self.r.mk(Ty::I64);
+        let (lv, lt) = self.emit_expr(fw, low);
+        let (hv, ht) = self.emit_expr(fw, high);
+        for (t, side) in [(lt, "start"), (ht, "end")] {
+            if !self.is_int_like(t) {
+                let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                self.err(
+                    pos,
+                    format!("{} {} must be `int`, got `{}`", what, side, got),
+                );
+            }
+        }
+        let lo = self.coerce_int_word(fw, &lv, ity);
+        let mut hi = self.coerce_int_word(fw, &hv, ity);
+        if inclusive {
+            let one = fw.v();
+            fw.op(&format!("    {} = arith.constant 1 : i64", one));
+            let h = fw.v();
+            fw.op(&format!("    {} = arith.addi {}, {} : i64", h, hi, one));
+            hi = h;
+        }
+        (lo, hi)
+    }
+
+    /// array range slicing (`Index` on an `Array<T>`):
+    ///   `a[lo..hi]`  -> fresh `Array<T>` copy of `[lo, hi)`
+    ///   `a[lo..=hi]` -> fresh copy of `[lo, hi]` (inclusive)
+    /// The copy owns retained reference elements; out-of-bounds / inverted
+    /// ranges panic inside the runtime (`array slice ...` out of bounds).
+    fn emit_arr_index(
+        &mut self,
+        fw: &mut FnWalk,
+        a: &str,
+        el: TyId,
+        idx: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (lo, hi) = self.emit_range_bounds(fw, idx, pos, "array range");
+        let len = fw.v();
+        fw.op(&format!("    {} = arith.subi {}, {} : i64", len, hi, lo));
+        // element-refness drives the fresh array's death cascade
+        let elref = if self.is_ref(el) { 1 } else { 0 };
+        let k2 = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            k2,
+            enc_i_lit(elref)
+        ));
+        let r = fw.v();
+        fw.op(&format!(
+            "    {} = func.call @__sloth_arr_slice({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            r, a, lo, len, k2
+        ));
+        let rt = self.r.mk(Ty::Array(el));
+        // fresh allocation: an owned producer temp
+        self.dangling_producer(fw, &r, rt);
+        (r, rt)
+    }
+
     /// string subscript (`Index` on a `str`):
     ///   `s[i]`     -> i-th raw byte as `int` (0..255)
     ///   `s[a..b]`  -> byte slice `[a, b)` as a fresh `str`
@@ -2031,30 +2104,8 @@ impl ModEmitter {
         idx: &Expr,
         pos: &Pos,
     ) -> (String, TyId) {
-        let ity = self.r.mk(Ty::I64);
-        if let ExprNode::Range {
-            low,
-            high,
-            inclusive,
-        } = &idx.node
-        {
-            let (lv, lt) = self.emit_expr(fw, low);
-            let (hv, ht) = self.emit_expr(fw, high);
-            for (t, what) in [(lt, "range start"), (ht, "range end")] {
-                if !self.is_int_like(t) {
-                    let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
-                    self.err(pos, format!("str {} must be `int`, got `{}`", what, got));
-                }
-            }
-            let lo = self.coerce_int_word(fw, &lv, ity);
-            let mut hi = self.coerce_int_word(fw, &hv, ity);
-            if *inclusive {
-                let one = fw.v();
-                fw.op(&format!("    {} = arith.constant 1 : i64", one));
-                let h = fw.v();
-                fw.op(&format!("    {} = arith.addi {}, {} : i64", h, hi, one));
-                hi = h;
-            }
+        if matches!(&idx.node, ExprNode::Range { .. }) {
+            let (lo, hi) = self.emit_range_bounds(fw, idx, pos, "str range");
             let len = fw.v();
             fw.op(&format!("    {} = arith.subi {}, {} : i64", len, hi, lo));
             let r = fw.v();
@@ -2067,6 +2118,7 @@ impl ModEmitter {
             self.dangling_producer(fw, &r, rt);
             return (r, rt);
         }
+        let ity = self.r.mk(Ty::I64);
         let (iv, it) = self.emit_expr(fw, idx);
         if !self.is_int_like(it) {
             let got = sloth_frontend::ty::ty_name(self.r.get(it)).to_string();

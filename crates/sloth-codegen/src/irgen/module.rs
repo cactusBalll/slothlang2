@@ -288,6 +288,8 @@ pub(crate) const CONTAINER_SYMS: &[&str] = &[
     "__sloth_arr_set",
     "__sloth_arr_push",
     "__sloth_arr_pop",
+    "__sloth_arr_slice",
+    "__sloth_arr_slice_set",
     "__sloth_map_new",
     "__sloth_map_len",
     "__sloth_map_get",

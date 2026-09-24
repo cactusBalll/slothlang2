@@ -1,7 +1,7 @@
 // spec: str byte subscript / byte ranges + lazy chars() code-point iterator
 // `s[i]` = raw byte (int); `s[a..b]` / `s[a..=b]` = byte slice (fresh str);
 // `s.chars()` = lazy iterator yielding each UTF-8 code point as an int.
-// NOTE: Array has no range slice — only `str` supports `s[a..b]`.
+// NOTE: Array range slicing (`a[lo..hi]`) is separate — see spec 132.
 func main(): unit {
     var s = "héllo";
     print(s[0]);            // expect: 104

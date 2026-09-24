@@ -487,6 +487,52 @@ impl ModEmitter {
                                 fw.rc_flush();
                                 return;
                             }
+                            // array range slice assignment: `a[lo..hi] = src`
+                            // copies `src` element-wise into the target span.
+                            // Reference elements are retained/released by the
+                            // runtime helper; an out-of-range span or a length
+                            // mismatch panics there.
+                            if let Ty::Array(el) = ats.clone() {
+                                if matches!(ix.node, ExprNode::Range { .. }) {
+                                    let ok = match self.r.get(vty).clone() {
+                                        Ty::Array(vel) => {
+                                            self.surface_compat(self.r.get(el), self.r.get(vel))
+                                        }
+                                        _ => false,
+                                    };
+                                    if ok {
+                                        let (lo, hi) =
+                                            self.emit_range_bounds(fw, ix, &s.pos, "array range");
+                                        let len = fw.v();
+                                        fw.op(&format!(
+                                            "    {} = arith.subi {}, {} : i64",
+                                            len, hi, lo
+                                        ));
+                                        let elref = if self.is_ref(el) { 1 } else { 0 };
+                                        let k2 = fw.v();
+                                        fw.op(&format!(
+                                            "    {} = arith.constant {} : i64",
+                                            k2,
+                                            enc_i_lit(elref)
+                                        ));
+                                        fw.op(&format!(
+                                            "    func.call @__sloth_arr_slice_set({}, {}, {}, {}, {}) : (i64, i64, i64, i64, i64) -> i64",
+                                            av, lo, len, v, k2
+                                        ));
+                                    } else {
+                                        self.err(
+                                            &s.pos,
+                                            "array slice assignment expects a matching `Array<T>`"
+                                                .to_string(),
+                                        );
+                                    }
+                                    handled = true;
+                                }
+                            }
+                            if handled {
+                                fw.rc_flush();
+                                return;
+                            }
                             let (iv, _it) = self.emit_expr(fw, ix);
                             match ats {
                                 Ty::Array(el) => {
@@ -841,9 +887,15 @@ impl ModEmitter {
                         })
                 }
             }
-            PathSeg::Index(_) => {
+            PathSeg::Index(ix) => {
                 let ct = self.assign_container_type(fw, &target[..target.len() - 1])?;
                 match self.r.get(ct).clone() {
+                    // `a[lo..hi] = src` writes through the target array; the
+                    // assignment hint is the slice's own `Array<T>` surface so
+                    // an array-literal RHS (`a[0..2] = [4, 5]`) infers correctly
+                    Ty::Array(el) if matches!(ix.node, ExprNode::Range { .. }) => {
+                        Some(self.r.mk(Ty::Array(el)))
+                    }
                     Ty::Array(el) => Some(el),
                     Ty::Map(_, v) => Some(v),
                     Ty::Tensor(e, r) if r > 1 => Some(self.r.mk(Ty::Tensor(e, r - 1))),
@@ -931,6 +983,20 @@ impl ModEmitter {
                         }
                     }
                     PathSeg::Index(ix) => {
+                        // a range in a non-final assignment position denotes a
+                        // fresh slice copy, not a writable location (tensor
+                        // views excepted): reject it instead of emitting a
+                        // bogus range handle as an index.
+                        if matches!(ix.node, ExprNode::Range { .. })
+                            && matches!(self.r.get(pt).clone(), Ty::Array(_) | Ty::Map(..))
+                        {
+                            self.err(
+                                pos,
+                                "cannot assign through an array slice copy; use `a[lo..hi] = src` to write a whole span"
+                                    .to_string(),
+                            );
+                            return None;
+                        }
                         let (iv, _) = self.emit_expr(fw, ix);
                         match self.r.get(pt).clone() {
                             Ty::Array(el) => {
