@@ -278,7 +278,7 @@ impl FnWalk {
             pw, pi
         ));
         self.op(&format!(
-            "    func.call @sloth_fiber_track({}) : (i64) -> i64",
+            "    func.call @__sloth_fiber_track({}) : (i64) -> i64",
             pw
         ));
     }
@@ -296,7 +296,7 @@ impl FnWalk {
             pw, pi
         ));
         self.op(&format!(
-            "    func.call @sloth_fiber_untrack({}) : (i64) -> i64",
+            "    func.call @__sloth_fiber_untrack({}) : (i64) -> i64",
             pw
         ));
     }

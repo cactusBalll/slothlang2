@@ -63,7 +63,7 @@ unsafe fn evbuf_push(b: &mut EvBuf, token: i64, revents: i64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_evbuf_new(cap: i64) -> i64 {
+pub extern "C" fn __sloth_evbuf_new(cap: i64) -> i64 {
     unsafe {
         let c = cap.max(1) as usize;
         let p = libc::calloc(1, std::mem::size_of::<EvBuf>()) as *mut EvBuf;
@@ -80,7 +80,7 @@ pub extern "C" fn sloth_evbuf_new(cap: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_evbuf_free(h: i64) -> i64 {
+pub extern "C" fn __sloth_evbuf_free(h: i64) -> i64 {
     unsafe {
         if h != 0 {
             let b = &mut *(h as *mut EvBuf);
@@ -93,7 +93,7 @@ pub extern "C" fn sloth_evbuf_free(h: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_evbuf_count(h: i64) -> i64 {
+pub extern "C" fn __sloth_evbuf_count(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -101,7 +101,7 @@ pub extern "C" fn sloth_evbuf_count(h: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_evbuf_token(h: i64, i: i64) -> i64 {
+pub extern "C" fn __sloth_evbuf_token(h: i64, i: i64) -> i64 {
     unsafe {
         let b = &*(h as *const EvBuf);
         if i < 0 || i >= b.count {
@@ -112,7 +112,7 @@ pub extern "C" fn sloth_evbuf_token(h: i64, i: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_evbuf_events(h: i64, i: i64) -> i64 {
+pub extern "C" fn __sloth_evbuf_events(h: i64, i: i64) -> i64 {
     unsafe {
         let b = &*(h as *const EvBuf);
         if i < 0 || i >= b.count {
@@ -170,7 +170,7 @@ fn drain_eventfd(fd: i32) {
 
 /// create a nonblocking eventfd; returns the fd or `-errno`
 #[no_mangle]
-pub extern "C" fn sloth_async_new() -> i64 {
+pub extern "C" fn __sloth_async_new() -> i64 {
     let fd = make_eventfd();
     if fd < 0 {
         unsafe { errno() }
@@ -181,7 +181,7 @@ pub extern "C" fn sloth_async_new() -> i64 {
 
 /// signal an eventfd (add 1); returns 0 or `-errno`
 #[no_mangle]
-pub extern "C" fn sloth_async_signal(fd: i64) -> i64 {
+pub extern "C" fn __sloth_async_signal(fd: i64) -> i64 {
     let v: u64 = 1;
     let r = unsafe { libc::write(fd as i32, &v as *const u64 as *const libc::c_void, 8) };
     if r < 0 {
@@ -193,7 +193,7 @@ pub extern "C" fn sloth_async_signal(fd: i64) -> i64 {
 
 /// drain an eventfd (nonblocking read); returns 0 or `-errno`
 #[no_mangle]
-pub extern "C" fn sloth_async_drain(fd: i64) -> i64 {
+pub extern "C" fn __sloth_async_drain(fd: i64) -> i64 {
     let mut v: u64 = 0;
     let r = unsafe { libc::read(fd as i32, &mut v as *mut u64 as *mut libc::c_void, 8) };
     if r < 0 {
@@ -205,7 +205,7 @@ pub extern "C" fn sloth_async_drain(fd: i64) -> i64 {
 
 /// close an eventfd; returns 0 or `-errno`
 #[no_mangle]
-pub extern "C" fn sloth_async_free(fd: i64) -> i64 {
+pub extern "C" fn __sloth_async_free(fd: i64) -> i64 {
     if fd < 0 {
         return 0;
     }
@@ -251,7 +251,7 @@ fn probe_iouring() -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_available(kind: i64) -> i64 {
+pub extern "C" fn __sloth_ev_available(kind: i64) -> i64 {
     let ok = match kind {
         EV_SELECT | EV_POLL | EV_EPOLL => true,
         EV_IOURING => probe_iouring(),
@@ -266,7 +266,7 @@ pub extern "C" fn sloth_ev_available(kind: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_backend_name(kind: i64) -> i64 {
+pub extern "C" fn __sloth_ev_backend_name(kind: i64) -> i64 {
     let name = match kind {
         EV_SELECT => "select",
         EV_POLL => "poll",
@@ -281,8 +281,8 @@ pub extern "C" fn sloth_ev_backend_name(kind: i64) -> i64 {
 // ---------------- lifecycle ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_new(kind: i64) -> i64 {
-    if sloth_ev_available(kind) == 0 {
+pub extern "C" fn __sloth_ev_new(kind: i64) -> i64 {
+    if __sloth_ev_available(kind) == 0 {
         return 0;
     }
     let wake_fd = make_eventfd();
@@ -327,7 +327,7 @@ pub extern "C" fn sloth_ev_new(kind: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_free(h: i64) -> i64 {
+pub extern "C" fn __sloth_ev_free(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -345,9 +345,9 @@ pub extern "C" fn sloth_ev_free(h: i64) -> i64 {
     0
 }
 
-/// cross-thread wake: make a blocked `sloth_ev_poll` return promptly
+/// cross-thread wake: make a blocked `__sloth_ev_poll` return promptly
 #[no_mangle]
-pub extern "C" fn sloth_ev_wakeup(h: i64) -> i64 {
+pub extern "C" fn __sloth_ev_wakeup(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -390,7 +390,7 @@ fn unmap_interest(revents: i32) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_ctl(h: i64, op: i64, fd: i64, events: i64, token: i64) -> i64 {
+pub extern "C" fn __sloth_ev_ctl(h: i64, op: i64, fd: i64, events: i64, token: i64) -> i64 {
     let ev = match unsafe { loop_of(h) } {
         Some(e) => e,
         None => return -(libc::EINVAL as i64),
@@ -448,7 +448,7 @@ pub extern "C" fn sloth_ev_ctl(h: i64, op: i64, fd: i64, events: i64, token: i64
                     }
                 }
             } else {
-                return sloth_ev_ctl(h, OP_ADD, fd, events, token);
+                return __sloth_ev_ctl(h, OP_ADD, fd, events, token);
             }
             0
         }
@@ -470,7 +470,7 @@ pub extern "C" fn sloth_ev_ctl(h: i64, op: i64, fd: i64, events: i64, token: i64
 // ---------------- wait ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_ev_poll(h: i64, timeout_ms: i64, out: i64) -> i64 {
+pub extern "C" fn __sloth_ev_poll(h: i64, timeout_ms: i64, out: i64) -> i64 {
     let ev = match unsafe { loop_of(h) } {
         Some(e) => e,
         None => return -(libc::EINVAL as i64),

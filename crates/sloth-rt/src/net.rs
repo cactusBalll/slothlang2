@@ -109,7 +109,7 @@ unsafe fn make_addr(ip: &str, port: i64) -> Result<(libc::sockaddr_storage, libc
 // ---------------- address handles ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_addr_new() -> i64 {
+pub extern "C" fn __sloth_addr_new() -> i64 {
     unsafe {
         let p = libc::calloc(1, std::mem::size_of::<AddrBox>()) as *mut AddrBox;
         if p.is_null() {
@@ -120,7 +120,7 @@ pub extern "C" fn sloth_addr_new() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_addr_free(h: i64) -> i64 {
+pub extern "C" fn __sloth_addr_free(h: i64) -> i64 {
     if h != 0 {
         unsafe { libc::free(h as *mut libc::c_void) };
     }
@@ -128,7 +128,7 @@ pub extern "C" fn sloth_addr_free(h: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_addr_set(h: i64, ip_w: i64, port: i64) -> i64 {
+pub extern "C" fn __sloth_addr_set(h: i64, ip_w: i64, port: i64) -> i64 {
     unsafe {
         let a = match as_addr(h) {
             Some(a) => a,
@@ -145,7 +145,7 @@ pub extern "C" fn sloth_addr_set(h: i64, ip_w: i64, port: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_addr_ip(h: i64) -> i64 {
+pub extern "C" fn __sloth_addr_ip(h: i64) -> i64 {
     unsafe {
         let a = match as_addr(h) {
             Some(a) => a,
@@ -174,7 +174,7 @@ pub extern "C" fn sloth_addr_ip(h: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_addr_port(h: i64) -> i64 {
+pub extern "C" fn __sloth_addr_port(h: i64) -> i64 {
     unsafe {
         let a = match as_addr(h) {
             Some(a) => a,
@@ -191,7 +191,7 @@ pub extern "C" fn sloth_addr_port(h: i64) -> i64 {
 // ---------------- socket lifecycle ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_net_socket(domain: i64, kind: i64, proto: i64) -> i64 {
+pub extern "C" fn __sloth_net_socket(domain: i64, kind: i64, proto: i64) -> i64 {
     unsafe {
         let fd = libc::socket(
             domain as libc::c_int,
@@ -206,7 +206,7 @@ pub extern "C" fn sloth_net_socket(domain: i64, kind: i64, proto: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_close(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_close(fd: i64) -> i64 {
     if fd < 0 {
         return 0;
     }
@@ -219,7 +219,7 @@ pub extern "C" fn sloth_net_close(fd: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_shutdown(fd: i64, how: i64) -> i64 {
+pub extern "C" fn __sloth_net_shutdown(fd: i64, how: i64) -> i64 {
     unsafe {
         if libc::shutdown(fd as libc::c_int, how as libc::c_int) != 0 {
             return errno();
@@ -229,7 +229,7 @@ pub extern "C" fn sloth_net_shutdown(fd: i64, how: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_set_nonblocking(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_set_nonblocking(fd: i64) -> i64 {
     unsafe {
         let fl = libc::fcntl(fd as libc::c_int, libc::F_GETFL, 0);
         if fl < 0 {
@@ -244,7 +244,7 @@ pub extern "C" fn sloth_net_set_nonblocking(fd: i64) -> i64 {
 
 /// clear O_NONBLOCK (blocking thread-per-connection model)
 #[no_mangle]
-pub extern "C" fn sloth_net_set_blocking(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_set_blocking(fd: i64) -> i64 {
     unsafe {
         let fl = libc::fcntl(fd as libc::c_int, libc::F_GETFL, 0);
         if fl < 0 {
@@ -272,22 +272,22 @@ unsafe fn set_int_opt(fd: i64, level: libc::c_int, name: libc::c_int, val: libc:
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_set_reuseaddr(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_set_reuseaddr(fd: i64) -> i64 {
     unsafe { set_int_opt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_set_reuseport(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_set_reuseport(fd: i64) -> i64 {
     unsafe { set_int_opt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, 1) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_set_nodelay(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_set_nodelay(fd: i64) -> i64 {
     unsafe { set_int_opt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_bind(fd: i64, ip_w: i64, port: i64) -> i64 {
+pub extern "C" fn __sloth_net_bind(fd: i64, ip_w: i64, port: i64) -> i64 {
     unsafe {
         let ip = str_owned(ip_w);
         let (mut st, len) = match make_addr(&ip, port) {
@@ -307,7 +307,7 @@ pub extern "C" fn sloth_net_bind(fd: i64, ip_w: i64, port: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_listen(fd: i64, backlog: i64) -> i64 {
+pub extern "C" fn __sloth_net_listen(fd: i64, backlog: i64) -> i64 {
     unsafe {
         if libc::listen(fd as libc::c_int, backlog as libc::c_int) != 0 {
             return errno();
@@ -319,7 +319,7 @@ pub extern "C" fn sloth_net_listen(fd: i64, backlog: i64) -> i64 {
 /// accept a connection (returns a non-blocking fd, or `-errno`; `-EAGAIN`
 /// means no pending connection)
 #[no_mangle]
-pub extern "C" fn sloth_net_accept(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_accept(fd: i64) -> i64 {
     unsafe {
         let c = libc::accept4(
             fd as libc::c_int,
@@ -335,7 +335,7 @@ pub extern "C" fn sloth_net_accept(fd: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_connect(fd: i64, ip_w: i64, port: i64) -> i64 {
+pub extern "C" fn __sloth_net_connect(fd: i64, ip_w: i64, port: i64) -> i64 {
     unsafe {
         let ip = str_owned(ip_w);
         let (mut st, len) = match make_addr(&ip, port) {
@@ -357,7 +357,7 @@ pub extern "C" fn sloth_net_connect(fd: i64, ip_w: i64, port: i64) -> i64 {
 // ---------------- data transfer ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_net_recv(fd: i64, b: i64, off: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_net_recv(fd: i64, b: i64, off: i64, len: i64) -> i64 {
     let bo = match unsafe { bytes::obj(b) } {
         Some(x) => x,
         None => return -(libc::EINVAL as i64),
@@ -366,10 +366,10 @@ pub extern "C" fn sloth_net_recv(fd: i64, b: i64, off: i64, len: i64) -> i64 {
         return -(libc::EINVAL as i64);
     }
     let end = off + len;
-    if bytes::sloth_bytes_ensure(b, end) != 0 {
+    if bytes::__sloth_bytes_ensure(b, end) != 0 {
         return -(libc::ENOMEM as i64);
     }
-    let cur = bytes::sloth_bytes_len(b);
+    let cur = bytes::__sloth_bytes_len(b);
     unsafe {
         let dst = bytes::data_ptr(bo).add(off as usize) as *mut libc::c_void;
         let n = libc::recv(fd as libc::c_int, dst, len as usize, 0);
@@ -378,14 +378,14 @@ pub extern "C" fn sloth_net_recv(fd: i64, b: i64, off: i64, len: i64) -> i64 {
         }
         let total = off + n as i64;
         if total > cur {
-            bytes::sloth_bytes_set_len(b, total);
+            bytes::__sloth_bytes_set_len(b, total);
         }
         n as i64
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_send(fd: i64, b: i64, off: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_net_send(fd: i64, b: i64, off: i64, len: i64) -> i64 {
     let bo = match unsafe { bytes::obj(b) } {
         Some(x) => x,
         None => return -(libc::EINVAL as i64),
@@ -393,7 +393,7 @@ pub extern "C" fn sloth_net_send(fd: i64, b: i64, off: i64, len: i64) -> i64 {
     if off < 0 || len < 0 {
         return -(libc::EINVAL as i64);
     }
-    let cur = bytes::sloth_bytes_len(b);
+    let cur = bytes::__sloth_bytes_len(b);
     let avail = (cur - off).max(0);
     let n = len.min(avail);
     unsafe {
@@ -407,7 +407,7 @@ pub extern "C" fn sloth_net_send(fd: i64, b: i64, off: i64, len: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_send_str(fd: i64, s_w: i64) -> i64 {
+pub extern "C" fn __sloth_net_send_str(fd: i64, s_w: i64) -> i64 {
     unsafe {
         let t = match strings::str_of(s_w) {
             Some(t) => t as *const strings::StrT,
@@ -427,7 +427,7 @@ pub extern "C" fn sloth_net_send_str(fd: i64, s_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_recvfrom(fd: i64, b: i64, off: i64, len: i64, addr: i64) -> i64 {
+pub extern "C" fn __sloth_net_recvfrom(fd: i64, b: i64, off: i64, len: i64, addr: i64) -> i64 {
     let bo = match unsafe { bytes::obj(b) } {
         Some(x) => x,
         None => return -(libc::EINVAL as i64),
@@ -436,10 +436,10 @@ pub extern "C" fn sloth_net_recvfrom(fd: i64, b: i64, off: i64, len: i64, addr: 
         return -(libc::EINVAL as i64);
     }
     let end = off + len;
-    if bytes::sloth_bytes_ensure(b, end) != 0 {
+    if bytes::__sloth_bytes_ensure(b, end) != 0 {
         return -(libc::ENOMEM as i64);
     }
-    let cur = bytes::sloth_bytes_len(b);
+    let cur = bytes::__sloth_bytes_len(b);
     unsafe {
         let dst = bytes::data_ptr(bo).add(off as usize) as *mut libc::c_void;
         let (st, slen): (*mut libc::sockaddr, *mut libc::socklen_t) = if addr != 0 {
@@ -461,14 +461,14 @@ pub extern "C" fn sloth_net_recvfrom(fd: i64, b: i64, off: i64, len: i64, addr: 
         }
         let total = off + n as i64;
         if total > cur {
-            bytes::sloth_bytes_set_len(b, total);
+            bytes::__sloth_bytes_set_len(b, total);
         }
         n as i64
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_sendto(fd: i64, b: i64, off: i64, len: i64, addr: i64) -> i64 {
+pub extern "C" fn __sloth_net_sendto(fd: i64, b: i64, off: i64, len: i64, addr: i64) -> i64 {
     let bo = match unsafe { bytes::obj(b) } {
         Some(x) => x,
         None => return -(libc::EINVAL as i64),
@@ -480,7 +480,7 @@ pub extern "C" fn sloth_net_sendto(fd: i64, b: i64, off: i64, len: i64, addr: i6
         Some(a) => a,
         None => return -(libc::EINVAL as i64),
     };
-    let cur = bytes::sloth_bytes_len(b);
+    let cur = bytes::__sloth_bytes_len(b);
     let avail = (cur - off).max(0);
     let n = len.min(avail);
     unsafe {
@@ -501,7 +501,7 @@ pub extern "C" fn sloth_net_sendto(fd: i64, b: i64, off: i64, len: i64, addr: i6
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_peer_addr(fd: i64, addr: i64) -> i64 {
+pub extern "C" fn __sloth_net_peer_addr(fd: i64, addr: i64) -> i64 {
     unsafe {
         let a = match as_addr(addr) {
             Some(a) => a,
@@ -521,7 +521,7 @@ pub extern "C" fn sloth_net_peer_addr(fd: i64, addr: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_net_local_port(fd: i64) -> i64 {
+pub extern "C" fn __sloth_net_local_port(fd: i64) -> i64 {
     unsafe {
         let mut st: libc::sockaddr_storage = std::mem::zeroed();
         let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -544,13 +544,13 @@ pub extern "C" fn sloth_net_local_port(fd: i64) -> i64 {
 // ---------------- errno helpers ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_io_errno() -> i64 {
+pub extern "C" fn __sloth_io_errno() -> i64 {
     unsafe { *libc::__errno_location() as i64 }
 }
 
 /// is `r` (a `-errno` from this module) a would-block condition?
 #[no_mangle]
-pub extern "C" fn sloth_io_would_block(r: i64) -> i64 {
+pub extern "C" fn __sloth_io_would_block(r: i64) -> i64 {
     let e = -r;
     (e == libc::EAGAIN as i64 || e == libc::EWOULDBLOCK as i64 || e == libc::EINPROGRESS as i64)
         as i64
@@ -558,7 +558,7 @@ pub extern "C" fn sloth_io_would_block(r: i64) -> i64 {
 
 /// is `r` a closed/EOF condition?
 #[no_mangle]
-pub extern "C" fn sloth_io_conn_closed(r: i64) -> i64 {
+pub extern "C" fn __sloth_io_conn_closed(r: i64) -> i64 {
     let e = -r;
     (e == libc::ECONNRESET as i64
         || e == libc::ECONNABORTED as i64

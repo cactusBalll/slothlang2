@@ -28,7 +28,7 @@ pub struct ModEmitter {
     pub out: String,
     /// compile-time string-literal pool for `llvm.mlir.global` output (kept
     /// for the globals emitter; the current lowerer builds literals through
-    /// `sloth_str_push`/`sloth_str_finish`, so this is normally empty)
+    /// `__sloth_str_push`/`__sloth_str_finish`, so this is normally empty)
     pub strpool: Vec<String>,
     /// classes emitted: name -> id (assigned in collect order)
     pub class_ids: HashMap<String, i64>,
@@ -131,7 +131,7 @@ pub struct ModEmitter {
     /// `extern func` for one of these must not re-emit a declaration
     pub(crate) predeclared: HashSet<String>,
     /// self-hosted container prelude functions: emitted under their raw name
-    /// (no module mangling) so the hardcoded `@sloth_arr_*`/`@sloth_map_*`
+    /// (no module mangling) so the hardcoded `@__sloth_arr_*`/`@__sloth_map_*`
     /// call sites in this emitter resolve to them
     pub(crate) fixed_syms: HashSet<String>,
     /// top-level functions whose address is taken (`fn_addr`): emitted as
@@ -174,9 +174,9 @@ pub struct ClassInfo {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum IdxKind {
-    /// array word backed by sloth_arr_len + sloth_arr_get(_f64)
+    /// array word backed by __sloth_arr_len + __sloth_arr_get(_f64)
     Arr,
-    /// string: sloth_str_len + sloth_str_char returns Str words
+    /// string: __sloth_str_len + __sloth_str_char returns Str words
     StrChar,
 }
 

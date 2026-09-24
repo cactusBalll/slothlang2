@@ -68,7 +68,7 @@ impl ModEmitter {
     /// runtime same-shape assertion (panics on mismatch, design §3.1)
     fn emit_shape_eq(&mut self, fw: &mut FnWalk, a: &str, b: &str) {
         fw.op(&format!(
-            "    func.call @sloth_tensor_shape_eq({}, {}) : (i64, i64) -> i64",
+            "    func.call @__sloth_tensor_shape_eq({}, {}) : (i64, i64) -> i64",
             a, b
         ));
     }
@@ -88,7 +88,7 @@ impl ModEmitter {
             enc_i_lit(axb)
         ));
         fw.op(&format!(
-            "    func.call @sloth_tensor_dim_eq({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            "    func.call @__sloth_tensor_dim_eq({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
             a, aa, b, bb
         ));
     }
@@ -125,7 +125,7 @@ impl ModEmitter {
             ));
             let dw = fw.v();
             fw.op(&format!(
-                "    {} = func.call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                "    {} = func.call @__sloth_arr_get({}, {}) : (i64, i64) -> i64",
                 dw, shape_w, kw
             ));
             vals.push(dw);
@@ -136,7 +136,7 @@ impl ModEmitter {
         let r = fw.v();
         let sig: Vec<&str> = (0..vals.len()).map(|_| "i64").collect();
         fw.op(&format!(
-            "    {} = func.call @sloth_tensor_new_{}({}) : ({}) -> i64",
+            "    {} = func.call @__sloth_tensor_new_{}({}) : ({}) -> i64",
             r,
             rank,
             vals.join(", "),
@@ -203,7 +203,7 @@ impl ModEmitter {
         let (sv, _st) = self.emit_expr(fw, shape);
         let (tw, ty) = self.emit_tensor_new_from_shape(fw, &sv, rank, elem, pos);
         fw.op(&format!(
-            "    func.call @sloth_tensor_copy_from_array({}, {}) : (i64, i64) -> i64",
+            "    func.call @__sloth_tensor_copy_from_array({}, {}) : (i64, i64) -> i64",
             tw, dv
         ));
         (tw, ty)
@@ -257,7 +257,7 @@ impl ModEmitter {
                 ));
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = func.call @sloth_tensor_view({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                    "    {} = func.call @__sloth_tensor_view({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                     r, av, lo, dropw, len
                 ));
                 let ty = self.r.mk(Ty::Tensor(elem, rank));
@@ -269,7 +269,7 @@ impl ModEmitter {
                 if rank == 1 {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_tensor_get1({}, {}) : (i64, i64) -> i64",
+                        "    {} = func.call @__sloth_tensor_get1({}, {}) : (i64, i64) -> i64",
                         r, av, iv
                     ));
                     (r, elem)
@@ -308,7 +308,7 @@ impl ModEmitter {
         ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_tensor_view({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_tensor_view({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
             r, av, iv, dropw, zero
         ));
         let ty = self.r.mk(Ty::Tensor(elem, rank - 1));
@@ -319,14 +319,14 @@ impl ModEmitter {
     /// element write through a rank-1 tensor/view
     pub(crate) fn emit_tensor_set1(&mut self, fw: &mut FnWalk, av: &str, iw: &str, v: &str) {
         fw.op(&format!(
-            "    func.call @sloth_tensor_set1({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    func.call @__sloth_tensor_set1({}, {}, {}) : (i64, i64, i64) -> i64",
             av, iw, v
         ));
     }
 
     pub(crate) fn emit_tensor_copy_into(&mut self, fw: &mut FnWalk, dst: &str, src: &str) {
         fw.op(&format!(
-            "    func.call @sloth_tensor_copy_into({}, {}) : (i64, i64) -> i64",
+            "    func.call @__sloth_tensor_copy_into({}, {}) : (i64, i64) -> i64",
             dst, src
         ));
     }
@@ -349,9 +349,9 @@ impl ModEmitter {
 
     fn tensor_basis_fn(&self, elem: TyId) -> &'static str {
         if self.is_float(elem) {
-            "sloth_tensor_basis_f64"
+            "__sloth_tensor_basis_f64"
         } else {
-            "sloth_tensor_basis_i64"
+            "__sloth_tensor_basis_i64"
         }
     }
 
@@ -377,7 +377,7 @@ impl ModEmitter {
         ));
         let dw = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
             dw, tv, ax
         ));
         dw
@@ -398,7 +398,7 @@ impl ModEmitter {
         let r = fw.v();
         let sig: Vec<&str> = (0..vals.len()).map(|_| "i64").collect();
         fw.op(&format!(
-            "    {} = func.call @sloth_tensor_new_{}({}) : ({}) -> i64",
+            "    {} = func.call @__sloth_tensor_new_{}({}) : ({}) -> i64",
             r,
             rank,
             vals.join(", "),
@@ -430,7 +430,7 @@ impl ModEmitter {
             ));
             let dw = fw.v();
             fw.op(&format!(
-                "    {} = func.call @sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
+                "    {} = func.call @__sloth_tensor_dim({}, {}) : (i64, i64) -> i64",
                 dw, tv, ax
             ));
             let d = fw.v();
@@ -441,7 +441,7 @@ impl ModEmitter {
             dims.push(d);
             let sw = fw.v();
             fw.op(&format!(
-                "    {} = func.call @sloth_tensor_stride({}, {}) : (i64, i64) -> i64",
+                "    {} = func.call @__sloth_tensor_stride({}, {}) : (i64, i64) -> i64",
                 sw, tv, ax
             ));
             let s = fw.v();

@@ -33,7 +33,7 @@ fn chan_dtor(p: usize, _aux: u64) {
         if c.eref != 0 {
             for w in st.buf.drain(..) {
                 if w != 0 {
-                    rc::sloth_rc_release(w);
+                    rc::__sloth_rc_release(w);
                 }
             }
         } else {
@@ -44,7 +44,7 @@ fn chan_dtor(p: usize, _aux: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_chan_new(cap_w: i64, eref: i64) -> i64 {
+pub extern "C" fn __sloth_chan_new(cap_w: i64, eref: i64) -> i64 {
     unsafe {
         let p = rc::rc_addr(std::mem::size_of::<ChannelObj>(), Some(chan_dtor)) as *mut ChannelObj;
         std::ptr::write(
@@ -65,7 +65,7 @@ pub extern "C" fn sloth_chan_new(cap_w: i64, eref: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_chan_send(ch_w: i64, v_w: i64) -> i64 {
+pub extern "C" fn __sloth_chan_send(ch_w: i64, v_w: i64) -> i64 {
     if ch_w == 0 {
         return 0;
     }
@@ -86,7 +86,7 @@ pub extern "C" fn sloth_chan_send(ch_w: i64, v_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
+pub extern "C" fn __sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
     if ch_w == 0 {
         return 0;
     }
@@ -111,7 +111,7 @@ pub extern "C" fn sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_chan_close(ch_w: i64) -> i64 {
+pub extern "C" fn __sloth_chan_close(ch_w: i64) -> i64 {
     if ch_w == 0 {
         return 0;
     }

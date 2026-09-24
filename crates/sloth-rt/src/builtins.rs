@@ -85,7 +85,7 @@ fn info_slot(kind: i64) -> &'static AtomicI64 {
 
 /// `ObjInfo` word for a builtin kind (kind arrives raw)
 #[no_mangle]
-pub extern "C" fn sloth_builtin_info(kind_w: i64) -> i64 {
+pub extern "C" fn __sloth_builtin_info(kind_w: i64) -> i64 {
     let kind = kind_w;
     let slot = info_slot(kind);
     let cur = slot.load(Ordering::Acquire);
@@ -93,7 +93,7 @@ pub extern "C" fn sloth_builtin_info(kind_w: i64) -> i64 {
         return cur;
     }
     // ref mask stays 0: field 0 holds a value word, never an rc handle
-    let h = crate::objects::sloth_cls_info(0, kind_cls(kind));
+    let h = crate::objects::__sloth_cls_info(0, kind_cls(kind));
     // register the display name for the `type_name` builtin
     let nm: &[u8] = match kind {
         KIND_FLOAT => b"float",
@@ -107,7 +107,7 @@ pub extern "C" fn sloth_builtin_info(kind_w: i64) -> i64 {
         KIND_U32 => b"uint32",
         _ => b"int",
     };
-    crate::objects::sloth_cls_name(h, nm.as_ptr() as i64, nm.len() as i64);
+    crate::objects::__sloth_cls_name(h, nm.as_ptr() as i64, nm.len() as i64);
     let _ = slot.compare_exchange(0, h, Ordering::AcqRel, Ordering::Acquire);
     slot.load(Ordering::Acquire)
 }
@@ -117,7 +117,7 @@ pub extern "C" fn sloth_builtin_info(kind_w: i64) -> i64 {
 /// field 0 (the payload word) of a box; nil reads 0
 fn payload(w: i64) -> i64 {
     if w != 0 {
-        crate::objects::sloth_obj_field(w, 0)
+        crate::objects::__sloth_obj_field(w, 0)
     } else {
         0
     }
@@ -125,32 +125,32 @@ fn payload(w: i64) -> i64 {
 
 /// payload word of a box (nil = 0)
 #[no_mangle]
-pub extern "C" fn sloth_dyn_unbox(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_dyn_unbox(box_w: i64) -> i64 {
     payload(box_w)
 }
 
 /// Display `to_str`: render the boxed value into a fresh `str` handle
 #[no_mangle]
-pub extern "C" fn sloth_dyn_to_str(box_w: i64, kind_w: i64) -> i64 {
+pub extern "C" fn __sloth_dyn_to_str(box_w: i64, kind_w: i64) -> i64 {
     let kind = kind_w;
     let v = payload(box_w);
     let b = match kind {
-        KIND_FLOAT => crate::strings::sloth_str_push_f(0, f64::from_bits(dec_f_bits(v))),
-        KIND_BOOL => crate::strings::sloth_str_push_b(0, v),
-        KIND_UINT => crate::strings::sloth_str_push_u(0, v),
+        KIND_FLOAT => crate::strings::__sloth_str_push_f(0, f64::from_bits(dec_f_bits(v))),
+        KIND_BOOL => crate::strings::__sloth_str_push_b(0, v),
+        KIND_UINT => crate::strings::__sloth_str_push_u(0, v),
         KIND_I8 | KIND_U8 | KIND_I16 | KIND_U16 | KIND_I32 | KIND_U32 => {
-            crate::strings::sloth_str_push_i(0, v)
+            crate::strings::__sloth_str_push_i(0, v)
         }
-        _ => crate::strings::sloth_str_push_i(0, v),
+        _ => crate::strings::__sloth_str_push_i(0, v),
     };
-    crate::strings::sloth_str_finish(b)
+    crate::strings::__sloth_str_finish(b)
 }
 
 /// kind of an operand: a box handle carries it in the reserved class id; nil
 /// falls back to the caller's kind
 fn operand_kind(w: i64, fallback: i64) -> i64 {
     if w != 0 {
-        match crate::objects::sloth_obj_cls_id(w) {
+        match crate::objects::__sloth_obj_cls_id(w) {
             CLS_FLOAT => KIND_FLOAT,
             CLS_BOOL => KIND_BOOL,
             CLS_UINT => KIND_UINT,
@@ -179,7 +179,7 @@ fn mix64(mut x: u64) -> u64 {
 
 /// Hashable `__hash__`: int word, content-stable for the builtin kind
 #[no_mangle]
-pub extern "C" fn sloth_dyn_hash(box_w: i64, kind_w: i64) -> i64 {
+pub extern "C" fn __sloth_dyn_hash(box_w: i64, kind_w: i64) -> i64 {
     let kind = kind_w;
     let v = payload(box_w);
     match kind {
@@ -202,7 +202,7 @@ fn as_f64(kind: i64, v: i64) -> f64 {
 /// Operands are box handles or nil (codegen boxes builtin values at dyn
 /// surfaces).
 #[no_mangle]
-pub extern "C" fn sloth_dyn_binop(a_w: i64, b_w: i64, kind_w: i64, op_w: i64) -> i64 {
+pub extern "C" fn __sloth_dyn_binop(a_w: i64, b_w: i64, kind_w: i64, op_w: i64) -> i64 {
     let kind = kind_w;
     let op = op_w;
     let r = if b_w == 0 {

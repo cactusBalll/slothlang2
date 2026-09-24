@@ -8,19 +8,19 @@ pub extern "C" fn sloth_rt_hello() {
 
 /// print an i64 value (display form); never returns useful value
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_i64(v_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_print_i64(v_w: i64) -> i64 {
     println!("{}", crate::rc::dec_i(v_w));
     0
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_f64(v: f64) -> i64 {
+pub extern "C" fn __sloth_rt_print_f64(v: f64) -> i64 {
     println!("{}", v);
     0
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_bool(v_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_print_bool(v_w: i64) -> i64 {
     println!("{}", crate::rc::dec_i(v_w) != 0);
     0
 }
@@ -29,7 +29,7 @@ pub extern "C" fn sloth_rt_print_bool(v_w: i64) -> i64 {
 /// kind arrives decoded): nil prints "nil" — a box never collides with the
 /// nil word
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_opt(h_w: i64, kind_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_print_opt(h_w: i64, kind_w: i64) -> i64 {
     if h_w == 0 {
         println!("nil");
         return 0;

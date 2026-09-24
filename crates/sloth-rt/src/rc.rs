@@ -79,7 +79,7 @@ pub(crate) struct Hdr {
     /// generated-code death cascade: a raw C-ABI pointer to a routine
     /// `(payload, aux) -> i64`. Installed for objects (codegen emits one
     /// `@...__cascade` per class: user `__dispose__` + reference-field
-    /// releases) and for self-hosted containers via `sloth_rc_new`; takes
+    /// releases) and for self-hosted containers via `__sloth_rc_new`; takes
     /// precedence over `dtor` when set.
     sdtor: Option<unsafe extern "C" fn(i64, i64) -> i64>,
     /// per-kind auxiliary word: object/cascade payload word (field count for
@@ -143,7 +143,7 @@ impl Drop for WeakGuard {
 // ---------------- weak API ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_weak_new(h: i64) -> i64 {
+pub extern "C" fn __sloth_weak_new(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -194,7 +194,7 @@ fn weak_dtor(b: usize, _aux: u64) {
 /// target — it never resurrects a destroyed object, and the header stays
 /// mapped while this box lives.
 #[no_mangle]
-pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
+pub extern "C" fn __sloth_weak_upgrade(w: i64) -> i64 {
     if w == 0 {
         return 0;
     }
@@ -230,9 +230,9 @@ pub extern "C" fn sloth_weak_upgrade(w: i64) -> i64 {
 
 /// release a weak box's slot ownership (detach + free; idempotent)
 #[no_mangle]
-pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
+pub extern "C" fn __sloth_weak_release(w: i64) -> i64 {
     if w != 0 {
-        sloth_rc_release(w);
+        __sloth_rc_release(w);
     }
     0
 }
@@ -241,7 +241,7 @@ pub extern "C" fn sloth_weak_release(w: i64) -> i64 {
 
 /// number of live tracked handles (diagnostics; raw int word)
 #[no_mangle]
-pub extern "C" fn sloth_rc_live() -> i64 {
+pub extern "C" fn __sloth_rc_live() -> i64 {
     enc_i(RC_LIVE.load(Ordering::Relaxed) as i64)
 }
 
@@ -249,7 +249,7 @@ static RC_LIVE: AtomicU64 = AtomicU64::new(0);
 
 /// number of release calls executed (diagnostics; raw int word)
 #[no_mangle]
-pub extern "C" fn sloth_rc_drops() -> i64 {
+pub extern "C" fn __sloth_rc_drops() -> i64 {
     enc_i(DROPS.load(Ordering::Relaxed) as i64)
 }
 
@@ -301,11 +301,11 @@ unsafe fn rc_addr_full(
     payload as usize
 }
 
-/// `sloth_rc_new(nbytes, aux, dtor)` — bare tracked allocation for the
+/// `__sloth_rc_new(nbytes, aux, dtor)` — bare tracked allocation for the
 /// self-hosted container prelude. `dtor` is the raw address of a compiled
 /// sloth `__dispose__` routine `(payload, aux) -> i64` (0 = none).
 #[no_mangle]
-pub extern "C" fn sloth_rc_new(nbytes: i64, aux: i64, dtor: i64) -> i64 {
+pub extern "C" fn __sloth_rc_new(nbytes: i64, aux: i64, dtor: i64) -> i64 {
     if nbytes < 0 {
         crate::panics::panic_msg("rc_new: negative payload size");
     }
@@ -320,7 +320,7 @@ pub(crate) unsafe fn hdr_of(payload: usize) -> *mut Hdr {
 
 /// retain: bump the count of a tracked handle (nil is inert)
 #[no_mangle]
-pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {
+pub extern "C" fn __sloth_rc_retain(w: i64) -> i64 {
     if w != 0 {
         unsafe {
             let h = hdr_of(w_unref(w)) as *mut Hdr;
@@ -334,7 +334,7 @@ pub extern "C" fn sloth_rc_retain(w: i64) -> i64 {
 /// destructor (cascading mask-driven releases), invalidates the weak chain
 /// and frees header+payload once no weak box remains (nil is inert)
 #[no_mangle]
-pub extern "C" fn sloth_rc_release(w: i64) -> i64 {
+pub extern "C" fn __sloth_rc_release(w: i64) -> i64 {
     DROPS.fetch_add(1, Ordering::Relaxed);
     if w == 0 {
         return w;

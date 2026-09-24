@@ -4,7 +4,7 @@
 //! Container (Array/Map) algorithms live in the self-hosted sloth prelude
 //! (`lib/prelude/containers.slt`); the runtime only exposes bare allocation,
 //! word memory and the rc core for them.
-//! All exported symbols keep their C-ABI names.
+//! All exported symbols use the reserved `__sloth_` C-ABI prefix.
 
 pub mod alloc;
 pub mod any;

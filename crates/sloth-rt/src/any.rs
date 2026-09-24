@@ -1,4 +1,4 @@
-//! `any`: runtime-typed boxed values (top type) + `sloth_rt_write` renderer.
+//! `any`: runtime-typed boxed values (top type) + `__sloth_rt_write` renderer.
 //!
 //! An `any` value is a single word: `0` = nil, otherwise the handle of an rc
 //! box `{ desc, word }`. `desc` points at a compiler-emitted structural type
@@ -16,7 +16,7 @@
 //! - `cls_id`/`rank` are the runtime class id (objects) and tensor rank.
 
 use crate::boxopt::box_get;
-use crate::rc::{dec_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_ref, w_unref};
+use crate::rc::{__sloth_rc_release, __sloth_rc_retain, dec_i, rc_addr, w_ref, w_unref};
 use crate::strings::{intern_bytes, strb_append, strb_or_new, StrT};
 
 /// Array header `[len, cap, buf]` — the layout owned by the self-hosted
@@ -112,7 +112,7 @@ fn any_dtor(p: usize, _aux: u64) {
         let desc = *b;
         let word = *b.add(1);
         if desc != 0 && flags_of(desc) & FLAG_REF != 0 && word != 0 {
-            sloth_rc_release(word);
+            __sloth_rc_release(word);
         }
     }
 }
@@ -120,7 +120,7 @@ fn any_dtor(p: usize, _aux: u64) {
 /// box a value word under `desc`; nil-capable word 0 collapses to `any` nil.
 /// Reference payloads are retained so the box owns its own +1.
 #[no_mangle]
-pub extern "C" fn sloth_any_from(desc_w: i64, word: i64) -> i64 {
+pub extern "C" fn __sloth_any_from(desc_w: i64, word: i64) -> i64 {
     if desc_w == 0 {
         return 0;
     }
@@ -132,7 +132,7 @@ pub extern "C" fn sloth_any_from(desc_w: i64, word: i64) -> i64 {
         *b = desc_w;
         *b.add(1) = word;
         if flags_of(desc_w) & FLAG_REF != 0 && word != 0 {
-            sloth_rc_retain(word);
+            __sloth_rc_retain(word);
         }
         w_ref(b as usize)
     }
@@ -140,7 +140,7 @@ pub extern "C" fn sloth_any_from(desc_w: i64, word: i64) -> i64 {
 
 /// descriptor of an `any` (0 for nil / invalid)
 #[no_mangle]
-pub extern "C" fn sloth_any_desc(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_desc(box_w: i64) -> i64 {
     if box_w == 0 {
         0
     } else {
@@ -150,7 +150,7 @@ pub extern "C" fn sloth_any_desc(box_w: i64) -> i64 {
 
 /// payload word of an `any` (0 for nil)
 #[no_mangle]
-pub extern "C" fn sloth_any_word(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_word(box_w: i64) -> i64 {
     if box_w == 0 {
         0
     } else {
@@ -160,12 +160,12 @@ pub extern "C" fn sloth_any_word(box_w: i64) -> i64 {
 
 /// kind of an `any` payload (`-1` for nil)
 #[no_mangle]
-pub extern "C" fn sloth_any_kind(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_kind(box_w: i64) -> i64 {
     if box_w == 0 {
         return -1;
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
+        let d = __sloth_any_desc(box_w);
         if d == 0 {
             -1
         } else {
@@ -176,14 +176,14 @@ pub extern "C" fn sloth_any_kind(box_w: i64) -> i64 {
 
 /// runtime class id of the boxed object (i64::MIN when not an object/dyn)
 #[no_mangle]
-pub extern "C" fn sloth_any_cls_id(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_cls_id(box_w: i64) -> i64 {
     if box_w == 0 {
         return i64::MIN;
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
+        let d = __sloth_any_desc(box_w);
         if d != 0 && matches!(kind_of(d), AK_NAMED | AK_DYN) {
-            crate::objects::sloth_obj_cls_id(sloth_any_word(box_w))
+            crate::objects::__sloth_obj_cls_id(__sloth_any_word(box_w))
         } else {
             i64::MIN
         }
@@ -192,9 +192,9 @@ pub extern "C" fn sloth_any_cls_id(box_w: i64) -> i64 {
 
 /// retain (return) the box: used when narrowing materializes a new owner slot
 #[no_mangle]
-pub extern "C" fn sloth_any_retain(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_retain(box_w: i64) -> i64 {
     if box_w != 0 {
-        sloth_rc_retain(box_w);
+        __sloth_rc_retain(box_w);
     }
     box_w
 }
@@ -202,15 +202,15 @@ pub extern "C" fn sloth_any_retain(box_w: i64) -> i64 {
 /// retain the boxed payload (for narrowing a reference down to its concrete
 /// type); value payloads are returned untouched.
 #[no_mangle]
-pub extern "C" fn sloth_any_ref(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_ref(box_w: i64) -> i64 {
     if box_w == 0 {
         return 0;
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
-        let w = sloth_any_word(box_w);
+        let d = __sloth_any_desc(box_w);
+        let w = __sloth_any_word(box_w);
         if w != 0 && flags_of(d) & FLAG_REF != 0 {
-            sloth_rc_retain(w);
+            __sloth_rc_retain(w);
         }
         w
     }
@@ -218,14 +218,14 @@ pub extern "C" fn sloth_any_ref(box_w: i64) -> i64 {
 
 /// `typeid(any)`: object class id, else the structural type id
 #[no_mangle]
-pub extern "C" fn sloth_any_type_id(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_type_id(box_w: i64) -> i64 {
     if box_w == 0 {
         return 0;
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
+        let d = __sloth_any_desc(box_w);
         if kind_of(d) == AK_NAMED || kind_of(d) == AK_DYN {
-            crate::objects::sloth_obj_cls_id(sloth_any_word(box_w))
+            crate::objects::__sloth_obj_cls_id(__sloth_any_word(box_w))
         } else {
             child(d, D_TYPEID)
         }
@@ -234,15 +234,15 @@ pub extern "C" fn sloth_any_type_id(box_w: i64) -> i64 {
 
 /// `type_name(any)` as a fresh owned `str` (+1)
 #[no_mangle]
-pub extern "C" fn sloth_any_type_name(box_w: i64) -> i64 {
+pub extern "C" fn __sloth_any_type_name(box_w: i64) -> i64 {
     if box_w == 0 {
         return intern_bytes(b"nil".as_ptr() as usize, 3);
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
+        let d = __sloth_any_desc(box_w);
         let k = kind_of(d);
         if k == AK_NAMED || k == AK_DYN {
-            return crate::objects::sloth_obj_type_name(sloth_any_word(box_w));
+            return crate::objects::__sloth_obj_type_name(__sloth_any_word(box_w));
         }
         let np = child(d, D_NAME);
         let nl = child(d, D_NAMELEN);
@@ -292,14 +292,14 @@ unsafe fn desc_eq(a: i64, b: i64) -> bool {
 
 /// `x is T` for non-class targets: exact structural match of the boxed value's
 /// descriptor against the target descriptor. Class targets use
-/// `sloth_any_cls_id` + a compile-time ancestor chain instead.
+/// `__sloth_any_cls_id` + a compile-time ancestor chain instead.
 #[no_mangle]
-pub extern "C" fn sloth_any_is(box_w: i64, target_desc: i64) -> i64 {
+pub extern "C" fn __sloth_any_is(box_w: i64, target_desc: i64) -> i64 {
     if box_w == 0 || target_desc == 0 {
         return 0;
     }
     unsafe {
-        let d = sloth_any_desc(box_w);
+        let d = __sloth_any_desc(box_w);
         crate::rc::enc_i(desc_eq(d, target_desc) as i64)
     }
 }
@@ -460,7 +460,7 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
                 let s = f(word);
                 append_str_handle(p, s);
                 if s != 0 {
-                    sloth_rc_release(s);
+                    __sloth_rc_release(s);
                 }
             } else {
                 let np = child(desc, D_NAME);
@@ -489,8 +489,8 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
             if word == 0 {
                 append(p, b"nil");
             } else {
-                let d = sloth_any_desc(word);
-                let w = sloth_any_word(word);
+                let d = __sloth_any_desc(word);
+                let w = __sloth_any_word(word);
                 return render(w_ref(p as usize), d, w);
             }
         }
@@ -513,24 +513,24 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
     w_ref(p as usize)
 }
 
-/// `sloth_rt_write(v: any): str` — render a value to a fresh owned `str`,
+/// `__sloth_rt_write(v: any): str` — render a value to a fresh owned `str`,
 /// dispatching on the boxed runtime type and recursing through containers.
 #[no_mangle]
-pub extern "C" fn sloth_rt_write(v: i64) -> i64 {
+pub extern "C" fn __sloth_rt_write(v: i64) -> i64 {
     if v == 0 {
         return intern_bytes(b"nil".as_ptr() as usize, 3);
     }
     let b = unsafe {
-        let d = sloth_any_desc(v);
-        let w = sloth_any_word(v);
+        let d = __sloth_any_desc(v);
+        let w = __sloth_any_word(v);
         render(0, d, w)
     };
-    crate::strings::sloth_str_finish(b)
+    crate::strings::__sloth_str_finish(b)
 }
 
-/// `sloth_rt_puts(v: str): unit` — print a string followed by a newline.
+/// `__sloth_rt_puts(v: str): unit` — print a string followed by a newline.
 #[no_mangle]
-pub extern "C" fn sloth_rt_puts(s_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_puts(s_w: i64) -> i64 {
     use std::io::Write;
     unsafe {
         if s_w != 0 {

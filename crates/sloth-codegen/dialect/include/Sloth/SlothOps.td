@@ -26,14 +26,14 @@ class Sloth_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 def RcRetainOp : Sloth_Op<"rc_retain"> {
-  let summary = "ARC retain: +1 on a reference word (lowers to @sloth_rc_retain)";
+  let summary = "ARC retain: +1 on a reference word (lowers to @__sloth_rc_retain)";
   let arguments = (ins I64:$ref);
   let results = (outs I64:$out);
   let assemblyFormat = "$ref attr-dict `:` type($out)";
 }
 
 def RcReleaseOp : Sloth_Op<"rc_release"> {
-  let summary = "ARC release: -1 on a reference word (lowers to @sloth_rc_release)";
+  let summary = "ARC release: -1 on a reference word (lowers to @__sloth_rc_release)";
   let arguments = (ins I64:$ref);
   let assemblyFormat = "$ref attr-dict `:` type($ref)";
 }

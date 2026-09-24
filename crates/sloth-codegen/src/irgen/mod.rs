@@ -97,13 +97,22 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
     // order-independent devirtualization: index overrides across every module
     // (imports emit method bodies before root classes are registered)
     {
-        let mut progs: Vec<&Program> = mods.iter().map(|(_, p, _)| p).collect();
+        let mut progs: Vec<&Program> = mods.iter().map(|(_, p, _, _)| p).collect();
         progs.push(&root);
         me.register_override_index(&progs);
     }
-    for (mname, mut prog, alias) in mods {
+    for (mname, mut prog, alias, token) in mods {
+        // reserved `__sloth_*` gate: run on the raw module before any prelude
+        // (which itself legitimately uses reserved symbols) is injected
+        me.check_reserved_module(&prog, token);
         // imported modules get the same `print` prelude so bare calls resolve
         crate::irgen::inject_print_prelude(&mut prog.decls);
+        // and the reserved runtime ABI declarations so stdlib bodies resolve
+        crate::irgen::inject_abi_prelude(&mut prog.decls);
+        // `s.chars()` bodies in an imported module emit before the root is
+        // collected, so the `StrChars` class must land in the first module
+        // that needs it (the shared emitter registers it exactly once)
+        me.inject_strchars_prelude(&mut prog.decls);
         me.register_import(&mname, alias.as_deref(), &prog);
     }
     // hmm: root module runs under @sloth_main through emit_module
@@ -151,10 +160,15 @@ fn resolve_program(
     dir: &std::path::Path,
     stack: &mut Vec<std::path::PathBuf>,
     done: &mut HashSet<std::path::PathBuf>,
-) -> Result<(Program, Vec<(String, Program, Option<String>)>), String> {
+) -> Result<(Program, Vec<(String, Program, Option<String>, bool)>), String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
-    let mut mods: Vec<(String, Program, Option<String>)> = Vec::new();
+    let mut mods: Vec<(String, Program, Option<String>, bool)> = Vec::new();
     for imp in &prog.imports {
+        // pseudo-import: capability token for the reserved `__sloth_*` ABI
+        // surface — no file is resolved for it.
+        if imp.path == crate::irgen::SLOTH_IMPORT {
+            continue;
+        }
         let pb = match find_import(dir, &imp.path) {
             Some(p) => p,
             None => {
@@ -198,10 +212,15 @@ fn resolve_program(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "mod".to_string());
+        // capture the capability token before `prog2_of` drops the import list
+        let token = _p2
+            .imports
+            .iter()
+            .any(|i| i.path == crate::irgen::SLOTH_IMPORT);
         // dependencies first: a module's body may call the imports of its own
         // imports, so `register_import` must see them registered already
         mods.append(&mut m2);
-        mods.push((stem, prog2_of(&_p2), imp.alias.clone()));
+        mods.push((stem, prog2_of(&_p2), imp.alias.clone(), token));
     }
     Ok((prog, mods))
 }

@@ -113,7 +113,7 @@ impl ModEmitter {
         ));
         let info = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_builtin_info({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_builtin_info({}) : (i64) -> i64",
             info, kw
         ));
         let one = fw.v();
@@ -126,7 +126,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", z3));
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
             obj, info, one, z3
         ));
         // field 0 = value word; the word is never a reference, so a raw store
@@ -137,7 +137,7 @@ impl ModEmitter {
             enc_i_lit(0)
         ));
         fw.op(&format!(
-            "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
             obj, z, v
         ));
         let builder = self.emit_builtin_vt_builder(kind, tname);
@@ -147,7 +147,7 @@ impl ModEmitter {
             vt, builder
         ));
         fw.op(&format!(
-            "    func.call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
+            "    func.call @__sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt
         ));
         let dt = self.r.mk(Ty::Dyn(tname.to_string()));
@@ -205,7 +205,7 @@ impl ModEmitter {
         ));
         let vt = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_vt_new({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_vt_new({}) : (i64) -> i64",
             vt, ncap
         ));
         let methods = self.traits.get(tname).cloned().unwrap_or_default();
@@ -229,7 +229,7 @@ impl ModEmitter {
                 enc_i_lit(slot as i64)
             ));
             fw.op(&format!(
-                "    func.call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @__sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
                 vt, slotc, fp
             ));
         }
@@ -270,14 +270,16 @@ impl ModEmitter {
         if nparams == 0 {
             if is_hash_method(method) {
                 body.push_str(&format!("    %k = arith.constant {} : i64\n", kw));
-                body.push_str("    %r = func.call @sloth_dyn_hash(%p0, %k) : (i64, i64) -> i64\n");
+                body.push_str(
+                    "    %r = func.call @__sloth_dyn_hash(%p0, %k) : (i64, i64) -> i64\n",
+                );
             } else if is_str_method(method) {
                 body.push_str(&format!("    %k = arith.constant {} : i64\n", kw));
                 body.push_str(
-                    "    %r = func.call @sloth_dyn_to_str(%p0, %k) : (i64, i64) -> i64\n",
+                    "    %r = func.call @__sloth_dyn_to_str(%p0, %k) : (i64, i64) -> i64\n",
                 );
             } else {
-                body.push_str("    %r = func.call @sloth_dyn_unbox(%p0) : (i64) -> i64\n");
+                body.push_str("    %r = func.call @__sloth_dyn_unbox(%p0) : (i64) -> i64\n");
             }
         } else {
             let op = cmp_op(method).unwrap_or(0);
@@ -287,7 +289,7 @@ impl ModEmitter {
                 enc_i_lit(op)
             ));
             body.push_str(
-                "    %r = func.call @sloth_dyn_binop(%p0, %p1, %k, %o) : (i64, i64, i64, i64) -> i64\n",
+                "    %r = func.call @__sloth_dyn_binop(%p0, %p1, %k, %o) : (i64, i64, i64, i64) -> i64\n",
             );
         }
         body.push_str("    llvm.return %r : i64\n");

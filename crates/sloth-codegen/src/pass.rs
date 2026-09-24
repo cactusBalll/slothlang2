@@ -33,7 +33,7 @@ pub fn smoke_all() -> Result<(), String> {
     if !printed.contains("arith.addi") || printed.contains("sloth.") {
         return Err(format!("round-trip content mismatch:\n{}", printed));
     }
-    if !printed.contains("sloth_rc_retain") || !printed.contains("sloth_rc_release") {
+    if !printed.contains("__sloth_rc_retain") || !printed.contains("__sloth_rc_release") {
         return Err(format!("lowering missed rt calls:\n{}", printed));
     }
     Ok(())
@@ -69,7 +69,7 @@ mod dialect_migration {
             lowered
         );
         assert!(
-            lowered.contains("@sloth_rc_release"),
+            lowered.contains("@__sloth_rc_release"),
             "lowered output missing rt call:\n{}",
             lowered
         );
@@ -428,7 +428,7 @@ mod irgen_p4 {
     }
 
     /// empty string literal: no builder chunks pushed at all (was: NULL
-    /// builder deref in sloth_str_finish)
+    /// builder deref in __sloth_str_finish)
     #[test]
     fn empty_str_literal_works() {
         let src = r#"
@@ -3521,6 +3521,104 @@ mod irgen_p43 {
     }
 }
 
+// ---------------- patch #44: str byte index / ranges + chars() iterator ----------------
+#[cfg(test)]
+mod irgen_p44 {
+    use super::*;
+
+    /// `s[i]` = raw byte; `s[a..b]` / `s[a..=b]` = byte slices (fresh strings)
+    #[test]
+    fn str_byte_index_and_ranges_work() {
+        let src = r#"
+            func main(): unit {
+                var s = "héllo";
+                print(s[0]);        // 104
+                print(s[1]);        // 195 (0xC3, lead byte of é)
+                print(s[2]);        // 169 (0xA9, cont byte)
+                print(s[1..3]);     // é
+                print(s[1..=3]);    // él
+                print(s[1..1] == ""); // true (empty slice)
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// `chars()` yields the Unicode scalar value of each character as an int,
+    /// lazily and through the iter()/next() protocol (manual next too)
+    #[test]
+    fn chars_iterator_yields_code_points() {
+        let src = r#"
+            func main(): unit {
+                var t = "aé中";
+                var sum = 0;
+                for c in t.chars() { sum = sum + c; }
+                print(sum);                 // 97 + 233 + 20013 = 20343
+                for c in chars("ab") { print(c); }   // 97, 98 (bare form)
+                var it = t.chars();
+                print(it.next());           // 97
+                print(it.next());           // 233
+                print(it.next());           // 20013
+                print(it.next() is nil);    // true
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// the lazy iterator (and its retained string) is released every loop
+    #[test]
+    fn chars_iterator_drains() {
+        let src = r#"
+            func main(): unit {
+                var base = sloth_rc_live();
+                var i = 0;
+                while i < 1000 {
+                    var s = "aé中";
+                    for c in s.chars() { }
+                    i = i + 1;
+                }
+                print(sloth_rc_live() == base);   // no leak
+            }
+        "#;
+        run_src(src, "main").unwrap();
+    }
+
+    /// non-int str index is a compile-time diagnostic
+    #[test]
+    fn str_index_non_int_diag() {
+        let src = r#"
+            func main(): unit {
+                var s = "ab";
+                print(s["x"]);
+            }
+        "#;
+        assert!(run_src(src, "main").is_err(), "str index accepted");
+    }
+
+    /// chars() on a non-str is a compile-time diagnostic
+    #[test]
+    fn chars_non_str_diag() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2];
+                for c in a.chars() { print(c); }
+            }
+        "#;
+        assert!(run_src(src, "main").is_err(), "chars() on array accepted");
+    }
+
+    /// Array has no range slicing (only str does)
+    #[test]
+    fn array_range_slice_diag() {
+        let src = r#"
+            func main(): unit {
+                var a = [1, 2, 3, 4];
+                print(a[1..3]);
+            }
+        "#;
+        assert!(run_src(src, "main").is_err(), "array range slice accepted");
+    }
+}
+
 // ---------------- hidden-bug regression batch: globals, dispatch,
 // divide-by-zero, ranges, optionals, numeric promotion ----------------
 #[cfg(test)]
@@ -3698,7 +3796,7 @@ mod irgen_regress {
         "#;
         let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
         assert!(
-            ir.contains("sloth_obj_vtable"),
+            ir.contains("__sloth_obj_vtable"),
             "trait method call from a base body must route through the vtable"
         );
         assert!(ir.contains("llvm.call"), "expected indirect vtable call");
@@ -3838,11 +3936,11 @@ mod irgen_regress {
         // VD-P1: an overridden class method dispatches through the object
         // vtable, not the old class-id cmpi chain
         assert!(
-            ir.contains("sloth_obj_vtable") && ir.contains("sloth_vt_get"),
+            ir.contains("__sloth_obj_vtable") && ir.contains("__sloth_vt_get"),
             "plain class virtual call must route through the vtable"
         );
         assert!(
-            !ir.contains("call @sloth_obj_cls_id"),
+            !ir.contains("call @__sloth_obj_cls_id"),
             "class-id cmpi chain must be gone from class virtual dispatch"
         );
         run_src(src, "main").unwrap();
@@ -3888,7 +3986,7 @@ mod irgen_regress {
         let after = ir.split("@sloth_main__pick").nth(1).expect("pick emitted");
         let body = after.split("\n  func.").next().unwrap_or(after);
         assert!(
-            !body.contains("sloth_vt_get"),
+            !body.contains("__sloth_vt_get"),
             "un-overridden method must devirtualize to a direct call: {}",
             body
         );
@@ -4578,7 +4676,7 @@ mod irgen_te_p4 {
 /// runtime-built tensor's element buffer can cross into MLIR as a memref
 /// descriptor, be `memref.reinterpret_cast` to its runtime shape/strides,
 /// and be read/written there — with writes visible through the ordinary
-/// `sloth_tensor_get1` route (shared storage).
+/// `__sloth_tensor_get1` route (shared storage).
 #[cfg(test)]
 mod irgen_te_p2_r1 {
     use super::*;
@@ -4593,18 +4691,18 @@ mod irgen_te_p2_r1 {
         // [[1,2,3],[4,5,6]] built through the rt, addressed as a rank-2
         // memref via basis + reinterpret_cast using runtime dim/stride.
         let mut ir = String::from("module @r1probe {\n");
-        ir.push_str("  func.func private @sloth_tensor_new_1(i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_new_2(i64, i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_set1(i64, i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_copy_into(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_new_1(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_new_2(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_set1(i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_copy_into(i64, i64) -> i64\n");
         ir.push_str(
-            "  func.func private @sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
+            "  func.func private @__sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
         );
-        ir.push_str("  func.func private @sloth_tensor_dim(i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_stride(i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_view(i64, i64, i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_tensor_get1(i64, i64) -> i64\n");
-        ir.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_dim(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_stride(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_view(i64, i64, i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_tensor_get1(i64, i64) -> i64\n");
+        ir.push_str("  func.func private @__sloth_rt_print_f64(f64) -> i64\n");
         ir.push_str("  func.func @sloth_main() -> () attributes {llvm.emit_c_interface} {\n");
         // 2x3 float tensor [[1,2,3],[4,5,6]]: fill a rank-1 source 1.0 .. 6.0
         // then element-wise copy into the rank-2 descriptor.
@@ -4615,7 +4713,9 @@ mod irgen_te_p2_r1 {
             ENC_I(1)
         ));
         ir.push_str(&format!("    %len6 = arith.constant {} : i64\n", ENC_I(6)));
-        ir.push_str("    %src = func.call @sloth_tensor_new_1(%len6, %kind) : (i64, i64) -> i64\n");
+        ir.push_str(
+            "    %src = func.call @__sloth_tensor_new_1(%len6, %kind) : (i64, i64) -> i64\n",
+        );
         for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0].iter().enumerate() {
             ir.push_str(&format!(
                 "    %ai{i} = arith.constant {} : i64\n    %av{i} = arith.constant {} : i64\n",
@@ -4623,16 +4723,16 @@ mod irgen_te_p2_r1 {
                 enc_f(*v)
             ));
             ir.push_str(&format!(
-                "    func.call @sloth_tensor_set1(%src, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
+                "    func.call @__sloth_tensor_set1(%src, %ai{i}, %av{i}) : (i64, i64, i64) -> i64\n"
             ));
         }
         ir.push_str(
-            "    %t = func.call @sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
+            "    %t = func.call @__sloth_tensor_new_2(%d2, %d3, %kind) : (i64, i64, i64) -> i64\n",
         );
-        ir.push_str("    func.call @sloth_tensor_copy_into(%t, %src) : (i64, i64) -> i64\n");
+        ir.push_str("    func.call @__sloth_tensor_copy_into(%t, %src) : (i64, i64) -> i64\n");
         // flat basis memref
         ir.push_str(
-            "    %flat = func.call @sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
+            "    %flat = func.call @__sloth_tensor_basis_f64(%t) : (i64) -> memref<?xf64, strided<[?], offset: ?>>\n",
         );
         // runtime dims/strides from the descriptor (de-tag: raw words -> index)
         for (name, axis) in [("0", 0i64), ("1", 1i64)] {
@@ -4641,13 +4741,13 @@ mod irgen_te_p2_r1 {
                 ENC_I(axis)
             ));
             ir.push_str(&format!(
-                "    %dw{name} = func.call @sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
+                "    %dw{name} = func.call @__sloth_tensor_dim(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
                 "    %d{name} = arith.index_cast %dw{name} : i64 to index\n"
             ));
             ir.push_str(&format!(
-                "    %sw{name} = func.call @sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
+                "    %sw{name} = func.call @__sloth_tensor_stride(%t, %ax{name}) : (i64, i64) -> i64\n"
             ));
             ir.push_str(&format!(
                 "    %s{name} = arith.index_cast %sw{name} : i64 to index\n"
@@ -4662,7 +4762,7 @@ mod irgen_te_p2_r1 {
         ir.push_str(
             "    %v = memref.load %r2[%i1, %i2] : memref<?x?xf64, strided<[?, ?], offset: ?>>\n",
         );
-        ir.push_str("    %p = func.call @sloth_rt_print_f64(%v) : (f64) -> i64\n");
+        ir.push_str("    %p = func.call @__sloth_rt_print_f64(%v) : (f64) -> i64\n");
         // write 7 through the memref; read back through the tensor route
         ir.push_str("    %seven = arith.constant 7.0 : f64\n");
         ir.push_str(
@@ -4675,13 +4775,13 @@ mod irgen_te_p2_r1 {
             ENC_I(0)
         ));
         ir.push_str(
-            "    %t1 = func.call @sloth_tensor_view(%t, %off1, %drop1, %zero) : (i64, i64, i64, i64) -> i64\n",
+            "    %t1 = func.call @__sloth_tensor_view(%t, %off1, %drop1, %zero) : (i64, i64, i64, i64) -> i64\n",
         );
         ir.push_str(&format!(
-            "    %g = func.call @sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
+            "    %g = func.call @__sloth_tensor_get1(%t1, %d2) : (i64, i64) -> i64\n"
         ));
         ir.push_str("    %gv = arith.bitcast %g : i64 to f64\n");
-        ir.push_str("    %p2 = func.call @sloth_rt_print_f64(%gv) : (f64) -> i64\n");
+        ir.push_str("    %p2 = func.call @__sloth_rt_print_f64(%gv) : (f64) -> i64\n");
         ir.push_str("    return\n  }\n}\n");
 
         let ctx = Context::new();
@@ -4751,11 +4851,11 @@ mod irgen_ce_p1 {
         "#;
         let ir = crate::irgen::compile_to_ir(src, "main").expect("compile");
         for sym in [
-            "@sloth_fiber_create",
-            "@sloth_fiber_yield",
-            "@sloth_fiber_resume",
-            "@sloth_fiber_check",
-            "@sloth_fiber_resumable",
+            "@__sloth_fiber_create",
+            "@__sloth_fiber_yield",
+            "@__sloth_fiber_resume",
+            "@__sloth_fiber_check",
+            "@__sloth_fiber_resumable",
         ] {
             assert!(ir.contains(sym), "missing {} in:\n{}", sym, ir);
         }
@@ -4805,5 +4905,55 @@ mod irgen_ce_p1 {
             Ok(_) => panic!("expected bad-entry diag"),
             Err(e) => assert!(e.contains("entry function"), "unexpected: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod irgen_reserved {
+    use super::*;
+
+    /// a bare `__sloth_*` call without the capability token is rejected
+    #[test]
+    fn reserved_call_diag() {
+        let src = r#"
+            func main(): unit {
+                let h = __sloth_rc_new(16, 0, 0);
+                print(h);
+            }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected reserved-call diag"),
+            Err(e) => assert!(e.contains("reserved symbol"), "unexpected: {}", e),
+        }
+    }
+
+    /// `__sloth_*` may only be declared in the prelude — the token does not
+    /// unlock declarations
+    #[test]
+    fn reserved_decl_diag() {
+        let src = r#"
+            extern func __sloth_sneaky(x: int): int;
+            func main(): unit { print(__sloth_sneaky(1)); }
+        "#;
+        match run_src(src, "main") {
+            Ok(_) => panic!("expected reserved-decl diag"),
+            Err(e) => assert!(
+                e.contains("may only be declared in the prelude"),
+                "unexpected: {}",
+                e
+            ),
+        }
+    }
+
+    /// `import "__sloth";` grants the module the right to call reserved symbols
+    #[test]
+    fn reserved_token_allows_call() {
+        let src = r#"
+            import "__sloth";
+            func main(): unit {
+                print(__sloth_now_ms() > 0);
+            }
+        "#;
+        run_src(src, "main").unwrap();
     }
 }

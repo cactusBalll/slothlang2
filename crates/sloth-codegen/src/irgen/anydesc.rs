@@ -227,9 +227,9 @@ pub(crate) fn emit_any_disp_wrappers(me: &ModEmitter) -> String {
         if let Some(DispSpec::Dyn { slot }) = d.disp {
             out.push_str(&format!(
                 "  llvm.func @sloth_anydisp_{}(%p0: i64) -> i64 {{\n\
-                 \x20   %vt = func.call @sloth_obj_vtable(%p0) : (i64) -> i64\n\
+                 \x20   %vt = func.call @__sloth_obj_vtable(%p0) : (i64) -> i64\n\
                  \x20   %sl = arith.constant {} : i64\n\
-                 \x20   %fp = func.call @sloth_vt_get(%vt, %sl) : (i64, i64) -> i64\n\
+                 \x20   %fp = func.call @__sloth_vt_get(%vt, %sl) : (i64, i64) -> i64\n\
                  \x20   %fn = llvm.inttoptr %fp : i64 to !llvm.ptr\n\
                  \x20   %r = llvm.call %fn(%p0) : !llvm.ptr, (i64) -> i64\n\
                  \x20   llvm.return %r : i64\n\

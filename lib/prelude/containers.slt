@@ -13,49 +13,49 @@
 // kflag: low 2 bits key kind (0 word / 1 str / 2 object), bit 2 value-is-ref.
 
 // ---- bare runtime surface ----
-extern func sloth_rt_alloc(n: int): int;
-extern func sloth_free(p: int): unit;
-extern func sloth_mem_load(p: int, i: int): int;
-extern func sloth_mem_store(p: int, i: int, v: int): unit;
-extern func sloth_mem_copy(dst: int, src: int, n: int): unit;
-extern func sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
-extern func sloth_rc_release(w: int): int;
-extern func sloth_rc_retain(w: int): int;
-extern func sloth_str_len(s: int): int;
-extern func sloth_str_byte(s: int, i: int): int;
-extern func sloth_str_eq(a: int, b: int): int;
-extern func sloth_panic_nokey(k: int): int;
-extern func sloth_panic_oob(i: int, n: int): int;
-extern func sloth_panic_pop(i: int, n: int): int;
+extern func __sloth_rt_alloc(n: int): int;
+extern func __sloth_free(p: int): unit;
+extern func __sloth_mem_load(p: int, i: int): int;
+extern func __sloth_mem_store(p: int, i: int, v: int): unit;
+extern func __sloth_mem_copy(dst: int, src: int, n: int): unit;
+extern func __sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
+extern func __sloth_rc_release(w: int): int;
+extern func __sloth_rc_retain(w: int): int;
+extern func __sloth_str_len(s: int): int;
+extern func __sloth_str_byte(s: int, i: int): int;
+extern func __sloth_str_eq(a: int, b: int): int;
+extern func __sloth_panic_nokey(k: int): int;
+extern func __sloth_panic_oob(i: int, n: int): int;
+extern func __sloth_panic_pop(i: int, n: int): int;
 
 // ============================ Array ============================
 
-// death cascade (`__dispose__` hook installed by sloth_rc_new): release every
+// death cascade (`__dispose__` hook installed by __sloth_rc_new): release every
 // reference element when elref is set, then free the element buffer.
-func sloth_arr_dispose(p: int, aux: int): int {
-    let n: int = sloth_mem_load(p, 0);
-    let buf: int = sloth_mem_load(p, 2);
+func __sloth_arr_dispose(p: int, aux: int): int {
+    let n: int = __sloth_mem_load(p, 0);
+    let buf: int = __sloth_mem_load(p, 2);
     if aux != 0 {
         var i: int = 0;
         while i < n {
-            let w: int = sloth_mem_load(buf, i);
+            let w: int = __sloth_mem_load(buf, i);
             if w != 0 {
-                sloth_rc_release(w);
+                __sloth_rc_release(w);
             }
             i = i + 1;
         }
     }
     if buf != 0 {
-        sloth_free(buf);
+        __sloth_free(buf);
     }
     return 0;
 }
 
-func sloth_arr_new(len_w: int): int {
-    return sloth_arr_new_k(len_w, 0);
+func __sloth_arr_new(len_w: int): int {
+    return __sloth_arr_new_k(len_w, 0);
 }
 
-func sloth_arr_new_k(len_w: int, elref: int): int {
+func __sloth_arr_new_k(len_w: int, elref: int): int {
     var n: int = len_w;
     if n < 0 {
         n = 0;
@@ -65,150 +65,150 @@ func sloth_arr_new_k(len_w: int, elref: int): int {
     while cap < want {
         cap = cap * 2;
     }
-    let h: int = sloth_rc_new(24, elref, fn_addr(sloth_arr_dispose));
-    sloth_mem_store(h, 0, n);
-    sloth_mem_store(h, 1, cap);
-    sloth_mem_store(h, 2, sloth_rt_alloc(cap * 8));
+    let h: int = __sloth_rc_new(24, elref, fn_addr(__sloth_arr_dispose));
+    __sloth_mem_store(h, 0, n);
+    __sloth_mem_store(h, 1, cap);
+    __sloth_mem_store(h, 2, __sloth_rt_alloc(cap * 8));
     return h;
 }
 
-func sloth_arr_len(a: int): int {
-    return sloth_mem_load(a, 0);
+func __sloth_arr_len(a: int): int {
+    return __sloth_mem_load(a, 0);
 }
 
-func sloth_arr_get(a: int, i: int): int {
-    let n: int = sloth_mem_load(a, 0);
+func __sloth_arr_get(a: int, i: int): int {
+    let n: int = __sloth_mem_load(a, 0);
     if i < 0 {
-        sloth_panic_oob(i, n);
+        __sloth_panic_oob(i, n);
         return 0;
     }
     if i >= n {
-        sloth_panic_oob(i, n);
+        __sloth_panic_oob(i, n);
         return 0;
     }
-    return sloth_mem_load(sloth_mem_load(a, 2), i);
+    return __sloth_mem_load(__sloth_mem_load(a, 2), i);
 }
 
-func sloth_arr_set(a: int, i: int, v: int): int {
-    let n: int = sloth_mem_load(a, 0);
+func __sloth_arr_set(a: int, i: int, v: int): int {
+    let n: int = __sloth_mem_load(a, 0);
     if i < 0 {
-        sloth_panic_oob(i, n);
+        __sloth_panic_oob(i, n);
         return 0;
     }
     if i >= n {
-        sloth_panic_oob(i, n);
+        __sloth_panic_oob(i, n);
         return 0;
     }
-    sloth_mem_store(sloth_mem_load(a, 2), i, v);
+    __sloth_mem_store(__sloth_mem_load(a, 2), i, v);
     return 0;
 }
 
 // stable handle: only the element buffer grows, never the tracked header
-func sloth_arr_push(a: int, w: int): int {
-    let n: int = sloth_mem_load(a, 0);
-    var cap: int = sloth_mem_load(a, 1);
-    var buf: int = sloth_mem_load(a, 2);
+func __sloth_arr_push(a: int, w: int): int {
+    let n: int = __sloth_mem_load(a, 0);
+    var cap: int = __sloth_mem_load(a, 1);
+    var buf: int = __sloth_mem_load(a, 2);
     if n >= cap {
         var nc: int = cap * 2;
         if nc < 8 {
             nc = 8;
         }
-        let nb: int = sloth_rt_alloc(nc * 8);
-        sloth_mem_copy(nb, buf, n);
-        sloth_free(buf);
-        sloth_mem_store(a, 1, nc);
-        sloth_mem_store(a, 2, nb);
+        let nb: int = __sloth_rt_alloc(nc * 8);
+        __sloth_mem_copy(nb, buf, n);
+        __sloth_free(buf);
+        __sloth_mem_store(a, 1, nc);
+        __sloth_mem_store(a, 2, nb);
         buf = nb;
     }
-    sloth_mem_store(buf, n, w);
-    sloth_mem_store(a, 0, n + 1);
+    __sloth_mem_store(buf, n, w);
+    __sloth_mem_store(a, 0, n + 1);
     return a;
 }
 
-func sloth_arr_pop(a: int): int {
-    let n: int = sloth_mem_load(a, 0);
+func __sloth_arr_pop(a: int): int {
+    let n: int = __sloth_mem_load(a, 0);
     if n <= 0 {
-        sloth_panic_pop(0 - 1, n);
+        __sloth_panic_pop(0 - 1, n);
         return 0;
     }
-    sloth_mem_store(a, 0, n - 1);
-    return sloth_mem_load(sloth_mem_load(a, 2), n - 1);
+    __sloth_mem_store(a, 0, n - 1);
+    return __sloth_mem_load(__sloth_mem_load(a, 2), n - 1);
 }
 
 // ============================= Map =============================
 
-func sloth_map_kkind(kflag: int): int {
+func __sloth_map_kkind(kflag: int): int {
     return kflag & 3;
 }
 
-func sloth_map_kref(kflag: int): bool {
+func __sloth_map_kref(kflag: int): bool {
     return (kflag & 3) != 0;
 }
 
-func sloth_map_vref(kflag: int): bool {
+func __sloth_map_vref(kflag: int): bool {
     return (kflag & 4) != 0;
 }
 
 // logical right shift by 33 (sloth `>>` is arithmetic on i64)
-func sloth_map_lshr33(x: int): int {
+func __sloth_map_lshr33(x: int): int {
     return (x >> 33) & 2147483647;
 }
 
-func sloth_map_mix64(w: int): int {
+func __sloth_map_mix64(w: int): int {
     var x: int = w;
-    x = x ^ sloth_map_lshr33(x);
+    x = x ^ __sloth_map_lshr33(x);
     x = x * (0 - 49064778989728563);
-    x = x ^ sloth_map_lshr33(x);
+    x = x ^ __sloth_map_lshr33(x);
     x = x * (0 - 4265267296055464877);
-    x = x ^ sloth_map_lshr33(x);
+    x = x ^ __sloth_map_lshr33(x);
     return x;
 }
 
-func sloth_map_hash_i(k: int): int {
-    return sloth_map_mix64(k);
+func __sloth_map_hash_i(k: int): int {
+    return __sloth_map_mix64(k);
 }
 
 // FNV-1a over the str bytes
-func sloth_map_hash_s(h: int): int {
+func __sloth_map_hash_s(h: int): int {
     var hash: int = 0 - 3750763034362895579;
-    let n: int = sloth_str_len(h);
+    let n: int = __sloth_str_len(h);
     var i: int = 0;
     while i < n {
-        hash = hash ^ sloth_str_byte(h, i);
+        hash = hash ^ __sloth_str_byte(h, i);
         hash = hash * 1099511628211;
         i = i + 1;
     }
     return hash;
 }
 
-func sloth_map_key_hash(kkind: int, key: int): int {
+func __sloth_map_key_hash(kkind: int, key: int): int {
     if kkind == 1 {
-        return sloth_map_hash_s(key);
+        return __sloth_map_hash_s(key);
     }
-    return sloth_map_hash_i(key);
+    return __sloth_map_hash_i(key);
 }
 
 // cap is always a power of two, so `% cap` is `& (cap - 1)` (non-negative)
-func sloth_map_bucket_i(kkind: int, key: int, h: int, cap: int): int {
+func __sloth_map_bucket_i(kkind: int, key: int, h: int, cap: int): int {
     var hh: int = 0;
     if kkind == 2 {
-        hh = sloth_map_mix64(h);
+        hh = __sloth_map_mix64(h);
     } else {
-        hh = sloth_map_key_hash(kkind, key);
+        hh = __sloth_map_key_hash(kkind, key);
     }
     return hh & (cap - 1);
 }
 
-func sloth_map_key_eq(kkind: int, ka: int, kb: int): bool {
+func __sloth_map_key_eq(kkind: int, ka: int, kb: int): bool {
     if kkind == 1 {
-        return sloth_str_eq(ka, kb) != 0;
+        return __sloth_str_eq(ka, kb) != 0;
     }
     return ka == kb;
 }
 
-func sloth_map_key_eq_h(kkind: int, ka: int, ha: int, kb: int, hb: int): bool {
+func __sloth_map_key_eq_h(kkind: int, ka: int, ha: int, kb: int, hb: int): bool {
     if kkind != 2 {
-        return sloth_map_key_eq(kkind, ka, kb);
+        return __sloth_map_key_eq(kkind, ka, kb);
     }
     if ka == kb {
         return true;
@@ -219,90 +219,90 @@ func sloth_map_key_eq_h(kkind: int, ka: int, ha: int, kb: int, hb: int): bool {
     return false;
 }
 
-func sloth_map_insert_raw(m: int, key: int, val: int, h: int): int {
-    let cap: int = sloth_mem_load(m, 0);
-    let kkind: int = sloth_map_kkind(sloth_mem_load(m, 2));
-    var i: int = sloth_map_bucket_i(kkind, key, h, cap);
+func __sloth_map_insert_raw(m: int, key: int, val: int, h: int): int {
+    let cap: int = __sloth_mem_load(m, 0);
+    let kkind: int = __sloth_map_kkind(__sloth_mem_load(m, 2));
+    var i: int = __sloth_map_bucket_i(kkind, key, h, cap);
     while true {
-        let buckets: int = sloth_mem_load(m, 3);
+        let buckets: int = __sloth_mem_load(m, 3);
         let off: int = i * 4;
-        if sloth_mem_load(buckets, off) == 0 {
-            sloth_mem_store(buckets, off, 1);
-            sloth_mem_store(buckets, off + 1, key);
-            sloth_mem_store(buckets, off + 2, val);
-            sloth_mem_store(buckets, off + 3, h);
-            sloth_mem_store(m, 1, sloth_mem_load(m, 1) + 1);
+        if __sloth_mem_load(buckets, off) == 0 {
+            __sloth_mem_store(buckets, off, 1);
+            __sloth_mem_store(buckets, off + 1, key);
+            __sloth_mem_store(buckets, off + 2, val);
+            __sloth_mem_store(buckets, off + 3, h);
+            __sloth_mem_store(m, 1, __sloth_mem_load(m, 1) + 1);
             return 0;
         }
         i = (i + 1) & (cap - 1);
     }
 }
 
-func sloth_map_grow(m: int): int {
-    let cap: int = sloth_mem_load(m, 0);
+func __sloth_map_grow(m: int): int {
+    let cap: int = __sloth_mem_load(m, 0);
     let ncap: int = cap * 2;
-    let old: int = sloth_mem_load(m, 3);
-    sloth_mem_store(m, 3, sloth_rt_alloc(ncap * 32));
-    sloth_mem_store(m, 0, ncap);
-    sloth_mem_store(m, 1, 0);
+    let old: int = __sloth_mem_load(m, 3);
+    __sloth_mem_store(m, 3, __sloth_rt_alloc(ncap * 32));
+    __sloth_mem_store(m, 0, ncap);
+    __sloth_mem_store(m, 1, 0);
     var k: int = 0;
     let words: int = cap * 4;
     while k < words {
-        if sloth_mem_load(old, k) == 1 {
-            sloth_map_insert_raw(
+        if __sloth_mem_load(old, k) == 1 {
+            __sloth_map_insert_raw(
                 m,
-                sloth_mem_load(old, k + 1),
-                sloth_mem_load(old, k + 2),
-                sloth_mem_load(old, k + 3)
+                __sloth_mem_load(old, k + 1),
+                __sloth_mem_load(old, k + 2),
+                __sloth_mem_load(old, k + 3)
             );
         }
         k = k + 4;
     }
-    sloth_free(old);
+    __sloth_free(old);
     return 0;
 }
 
 // returns the slot's word offset in the bucket array
-func sloth_map_upsert(m: int, key: int, h: int): int {
-    var cap: int = sloth_mem_load(m, 0);
-    let kflag: int = sloth_mem_load(m, 2);
-    let kkind: int = sloth_map_kkind(kflag);
-    let used: int = sloth_mem_load(m, 1);
-    var i: int = sloth_map_bucket_i(kkind, key, h, cap);
+func __sloth_map_upsert(m: int, key: int, h: int): int {
+    var cap: int = __sloth_mem_load(m, 0);
+    let kflag: int = __sloth_mem_load(m, 2);
+    let kkind: int = __sloth_map_kkind(kflag);
+    let used: int = __sloth_mem_load(m, 1);
+    var i: int = __sloth_map_bucket_i(kkind, key, h, cap);
     var rounds: int = 0;
     while true {
-        let buckets: int = sloth_mem_load(m, 3);
+        let buckets: int = __sloth_mem_load(m, 3);
         let off: int = i * 4;
-        if sloth_mem_load(buckets, off) == 0 {
+        if __sloth_mem_load(buckets, off) == 0 {
             if used * 4 >= cap * 3 {
-                sloth_map_grow(m);
-                return sloth_map_upsert(m, key, h);
+                __sloth_map_grow(m);
+                return __sloth_map_upsert(m, key, h);
             }
-            sloth_mem_store(buckets, off, 1);
-            sloth_mem_store(buckets, off + 1, key);
-            sloth_mem_store(buckets, off + 3, h);
-            sloth_mem_store(m, 1, used + 1);
+            __sloth_mem_store(buckets, off, 1);
+            __sloth_mem_store(buckets, off + 1, key);
+            __sloth_mem_store(buckets, off + 3, h);
+            __sloth_mem_store(m, 1, used + 1);
             return off;
         }
-        if sloth_map_key_eq_h(
+        if __sloth_map_key_eq_h(
             kkind,
-            sloth_mem_load(buckets, off + 1),
-            sloth_mem_load(buckets, off + 3),
+            __sloth_mem_load(buckets, off + 1),
+            __sloth_mem_load(buckets, off + 3),
             key,
             h
         ) {
-            if sloth_map_kref(kflag) {
-                let ok: int = sloth_mem_load(buckets, off + 1);
+            if __sloth_map_kref(kflag) {
+                let ok: int = __sloth_mem_load(buckets, off + 1);
                 if ok != 0 {
-                    sloth_rc_release(ok);
+                    __sloth_rc_release(ok);
                 }
             }
-            sloth_mem_store(buckets, off + 1, key);
-            sloth_mem_store(buckets, off + 3, h);
-            if sloth_map_vref(kflag) {
-                let ov: int = sloth_mem_load(buckets, off + 2);
+            __sloth_mem_store(buckets, off + 1, key);
+            __sloth_mem_store(buckets, off + 3, h);
+            if __sloth_map_vref(kflag) {
+                let ov: int = __sloth_mem_load(buckets, off + 2);
                 if ov != 0 {
-                    sloth_rc_release(ov);
+                    __sloth_rc_release(ov);
                 }
             }
             return off;
@@ -310,151 +310,151 @@ func sloth_map_upsert(m: int, key: int, h: int): int {
         i = (i + 1) & (cap - 1);
         rounds = rounds + 1;
         if rounds > cap {
-            sloth_map_grow(m);
-            return sloth_map_upsert(m, key, h);
+            __sloth_map_grow(m);
+            return __sloth_map_upsert(m, key, h);
         }
     }
 }
 
-func sloth_map_set_h(m: int, key: int, h: int, v: int): int {
-    let off: int = sloth_map_upsert(m, key, h);
-    sloth_mem_store(sloth_mem_load(m, 3), off + 2, v);
+func __sloth_map_set_h(m: int, key: int, h: int, v: int): int {
+    let off: int = __sloth_map_upsert(m, key, h);
+    __sloth_mem_store(__sloth_mem_load(m, 3), off + 2, v);
     return 0;
 }
 
-func sloth_map_set(m: int, key: int, v: int): int {
-    return sloth_map_set_h(m, key, 0, v);
+func __sloth_map_set(m: int, key: int, v: int): int {
+    return __sloth_map_set_h(m, key, 0, v);
 }
 
-func sloth_map_str_set(m: int, key: int, v: int): int {
-    return sloth_map_set_h(m, key, 0, v);
+func __sloth_map_str_set(m: int, key: int, v: int): int {
+    return __sloth_map_set_h(m, key, 0, v);
 }
 
-func sloth_map_get_h(m: int, key: int, h: int): int {
-    let cap: int = sloth_mem_load(m, 0);
-    let kkind: int = sloth_map_kkind(sloth_mem_load(m, 2));
-    var i: int = sloth_map_bucket_i(kkind, key, h, cap);
+func __sloth_map_get_h(m: int, key: int, h: int): int {
+    let cap: int = __sloth_mem_load(m, 0);
+    let kkind: int = __sloth_map_kkind(__sloth_mem_load(m, 2));
+    var i: int = __sloth_map_bucket_i(kkind, key, h, cap);
     var rounds: int = 0;
     while true {
-        let buckets: int = sloth_mem_load(m, 3);
+        let buckets: int = __sloth_mem_load(m, 3);
         let off: int = i * 4;
-        if sloth_mem_load(buckets, off) == 0 or rounds > cap {
-            sloth_panic_nokey(key);
+        if __sloth_mem_load(buckets, off) == 0 or rounds > cap {
+            __sloth_panic_nokey(key);
             return 0;
         }
-        if sloth_map_key_eq_h(
+        if __sloth_map_key_eq_h(
             kkind,
-            sloth_mem_load(buckets, off + 1),
-            sloth_mem_load(buckets, off + 3),
+            __sloth_mem_load(buckets, off + 1),
+            __sloth_mem_load(buckets, off + 3),
             key,
             h
         ) {
-            return sloth_mem_load(buckets, off + 2);
+            return __sloth_mem_load(buckets, off + 2);
         }
         i = (i + 1) & (cap - 1);
         rounds = rounds + 1;
     }
 }
 
-func sloth_map_get(m: int, key: int): int {
-    return sloth_map_get_h(m, key, 0);
+func __sloth_map_get(m: int, key: int): int {
+    return __sloth_map_get_h(m, key, 0);
 }
 
-func sloth_map_str_get(m: int, key: int): int {
-    return sloth_map_get_h(m, key, 0);
+func __sloth_map_str_get(m: int, key: int): int {
+    return __sloth_map_get_h(m, key, 0);
 }
 
-func sloth_map_keys(m: int): int {
-    let cap: int = sloth_mem_load(m, 0);
-    let kflag: int = sloth_mem_load(m, 2);
+func __sloth_map_keys(m: int): int {
+    let cap: int = __sloth_mem_load(m, 0);
+    let kflag: int = __sloth_mem_load(m, 2);
     var elref: int = 0;
-    if sloth_map_kref(kflag) {
+    if __sloth_map_kref(kflag) {
         elref = 1;
     }
-    var arr: int = sloth_arr_new_k(0, elref);
+    var arr: int = __sloth_arr_new_k(0, elref);
     var i: int = 0;
     while i < cap {
-        let buckets: int = sloth_mem_load(m, 3);
+        let buckets: int = __sloth_mem_load(m, 3);
         let off: int = i * 4;
-        if sloth_mem_load(buckets, off) == 1 {
-            let k: int = sloth_mem_load(buckets, off + 1);
-            if sloth_map_kref(kflag) {
+        if __sloth_mem_load(buckets, off) == 1 {
+            let k: int = __sloth_mem_load(buckets, off + 1);
+            if __sloth_map_kref(kflag) {
                 if k != 0 {
-                    sloth_rc_retain(k);
+                    __sloth_rc_retain(k);
                 }
             }
-            arr = sloth_arr_push(arr, k);
+            arr = __sloth_arr_push(arr, k);
         }
         i = i + 1;
     }
     return arr;
 }
 
-func sloth_map_values(m: int): int {
-    let cap: int = sloth_mem_load(m, 0);
-    let kflag: int = sloth_mem_load(m, 2);
+func __sloth_map_values(m: int): int {
+    let cap: int = __sloth_mem_load(m, 0);
+    let kflag: int = __sloth_mem_load(m, 2);
     var elref: int = 0;
-    if sloth_map_vref(kflag) {
+    if __sloth_map_vref(kflag) {
         elref = 1;
     }
-    var arr: int = sloth_arr_new_k(0, elref);
+    var arr: int = __sloth_arr_new_k(0, elref);
     var i: int = 0;
     while i < cap {
-        let buckets: int = sloth_mem_load(m, 3);
+        let buckets: int = __sloth_mem_load(m, 3);
         let off: int = i * 4;
-        if sloth_mem_load(buckets, off) == 1 {
-            let v: int = sloth_mem_load(buckets, off + 2);
-            if sloth_map_vref(kflag) {
+        if __sloth_mem_load(buckets, off) == 1 {
+            let v: int = __sloth_mem_load(buckets, off + 2);
+            if __sloth_map_vref(kflag) {
                 if v != 0 {
-                    sloth_rc_retain(v);
+                    __sloth_rc_retain(v);
                 }
             }
-            arr = sloth_arr_push(arr, v);
+            arr = __sloth_arr_push(arr, v);
         }
         i = i + 1;
     }
     return arr;
 }
 
-func sloth_map_dispose(p: int, aux: int): int {
-    let cap: int = sloth_mem_load(p, 0);
-    let kflag: int = sloth_mem_load(p, 2);
-    let bp: int = sloth_mem_load(p, 3);
+func __sloth_map_dispose(p: int, aux: int): int {
+    let cap: int = __sloth_mem_load(p, 0);
+    let kflag: int = __sloth_mem_load(p, 2);
+    let bp: int = __sloth_mem_load(p, 3);
     if bp != 0 {
         var i: int = 0;
         while i < cap {
             let off: int = i * 4;
-            if sloth_mem_load(bp, off) == 1 {
-                if sloth_map_kref(kflag) {
-                    let k: int = sloth_mem_load(bp, off + 1);
+            if __sloth_mem_load(bp, off) == 1 {
+                if __sloth_map_kref(kflag) {
+                    let k: int = __sloth_mem_load(bp, off + 1);
                     if k != 0 {
-                        sloth_rc_release(k);
+                        __sloth_rc_release(k);
                     }
                 }
-                if sloth_map_vref(kflag) {
-                    let v: int = sloth_mem_load(bp, off + 2);
+                if __sloth_map_vref(kflag) {
+                    let v: int = __sloth_mem_load(bp, off + 2);
                     if v != 0 {
-                        sloth_rc_release(v);
+                        __sloth_rc_release(v);
                     }
                 }
             }
             i = i + 1;
         }
-        sloth_free(bp);
+        __sloth_free(bp);
     }
     return 0;
 }
 
-func sloth_map_new(kflag_w: int): int {
+func __sloth_map_new(kflag_w: int): int {
     let cap: int = 8;
-    let h: int = sloth_rc_new(32, 0, fn_addr(sloth_map_dispose));
-    sloth_mem_store(h, 0, cap);
-    sloth_mem_store(h, 1, 0);
-    sloth_mem_store(h, 2, kflag_w & 7);
-    sloth_mem_store(h, 3, sloth_rt_alloc(cap * 32));
+    let h: int = __sloth_rc_new(32, 0, fn_addr(__sloth_map_dispose));
+    __sloth_mem_store(h, 0, cap);
+    __sloth_mem_store(h, 1, 0);
+    __sloth_mem_store(h, 2, kflag_w & 7);
+    __sloth_mem_store(h, 3, __sloth_rt_alloc(cap * 32));
     return h;
 }
 
-func sloth_map_len(m: int): int {
-    return sloth_mem_load(m, 1);
+func __sloth_map_len(m: int): int {
+    return __sloth_mem_load(m, 1);
 }

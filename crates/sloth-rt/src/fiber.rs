@@ -227,7 +227,7 @@ unsafe fn trackable() -> bool {
 /// register an owned-local slot on the running fiber (no-op on the main stack
 /// and in programs that never create a fiber)
 #[no_mangle]
-pub extern "C" fn sloth_fiber_track(addr_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_track(addr_w: i64) -> i64 {
     unsafe {
         if trackable() {
             (*cur()).slots.push(addr_w as usize);
@@ -238,7 +238,7 @@ pub extern "C" fn sloth_fiber_track(addr_w: i64) -> i64 {
 
 /// unregister a slot (scope exit / return / loop break paths)
 #[no_mangle]
-pub extern "C" fn sloth_fiber_untrack(addr_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_untrack(addr_w: i64) -> i64 {
     unsafe {
         if trackable() {
             let a = addr_w as usize;
@@ -406,10 +406,10 @@ unsafe fn fiber_setup(entry_w: i64, init_w: i64, stack_w: i64, eref: i64) -> i64
     f.entry = if entry_w == 0 {
         0
     } else {
-        rc::sloth_rc_retain(entry_w)
+        rc::__sloth_rc_retain(entry_w)
     };
     f.init = if eref != 0 && init_w != 0 {
-        rc::sloth_rc_retain(init_w)
+        rc::__sloth_rc_retain(init_w)
     } else {
         init_w
     };
@@ -423,12 +423,12 @@ unsafe fn fiber_setup(entry_w: i64, init_w: i64, stack_w: i64, eref: i64) -> i64
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_create(entry_w: i64, init_w: i64, eref: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_create(entry_w: i64, init_w: i64, eref: i64) -> i64 {
     unsafe { fiber_setup(entry_w, init_w, 0, eref) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_create_with(
+pub extern "C" fn __sloth_fiber_create_with(
     entry_w: i64,
     init_w: i64,
     stack_w: i64,
@@ -446,14 +446,14 @@ fn fiber_dtor(p: usize, _aux: u64) {
         }
         if f.eref != 0 {
             if f.init != 0 {
-                rc::sloth_rc_release(f.init);
+                rc::__sloth_rc_release(f.init);
             }
             if f.inbox != 0 {
-                rc::sloth_rc_release(f.inbox);
+                rc::__sloth_rc_release(f.inbox);
             }
         }
         if f.entry != 0 {
-            rc::sloth_rc_release(f.entry);
+            rc::__sloth_rc_release(f.entry);
         }
         // abandoned suspended fiber: release its tracked locals (release
         // build) so skipped frames do not leak, then drop the registry
@@ -461,7 +461,7 @@ fn fiber_dtor(p: usize, _aux: u64) {
         for a in slots {
             let w = *(a as *const i64);
             if w != 0 {
-                rc::sloth_rc_release(w);
+                rc::__sloth_rc_release(w);
             }
         }
         if !f.stack_base.is_null() {
@@ -489,8 +489,8 @@ pub(crate) extern "C" fn sloth_fiber_entry(f: *mut FiberObj) -> ! {
         ff.state = STATE_RUNNING;
         let init = ff.init;
         let entry = ff.entry;
-        let fnptr_w = crate::objects::sloth_obj_field(entry, rc::enc_i(0));
-        let env = crate::objects::sloth_obj_field(entry, rc::enc_i(1));
+        let fnptr_w = crate::objects::__sloth_obj_field(entry, rc::enc_i(0));
+        let env = crate::objects::__sloth_obj_field(entry, rc::enc_i(1));
         let raw = fnptr_w as usize;
         let cb: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(raw);
         // the closure ABI borrows `init`; the fiber's owning +1 is settled in
@@ -512,10 +512,10 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
     // it) and any unconsumed resume payload (reference payloads only)
     if ff.eref != 0 {
         if ff.init != 0 {
-            rc::sloth_rc_release(ff.init);
+            rc::__sloth_rc_release(ff.init);
         }
         if ff.inbox != 0 {
-            rc::sloth_rc_release(ff.inbox);
+            rc::__sloth_rc_release(ff.inbox);
         }
     }
     ff.init = 0;
@@ -527,7 +527,7 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
     for a in slots {
         let w = *(a as *const i64);
         if w != 0 {
-            rc::sloth_rc_release(w);
+            rc::__sloth_rc_release(w);
         }
     }
     let to = ff.prev;
@@ -540,7 +540,7 @@ unsafe fn terminate(f: *mut FiberObj) -> ! {
 // ---------------- public coroutine API ----------------
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
     if f_w == 0 {
         return 0;
     }
@@ -553,7 +553,7 @@ pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
             return 0;
         }
         (*f).inbox = if (*f).eref != 0 && v_w != 0 {
-            rc::sloth_rc_retain(v_w)
+            rc::__sloth_rc_retain(v_w)
         } else {
             v_w
         };
@@ -576,7 +576,7 @@ pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
     if f_w == 0 {
         return 0;
     }
@@ -589,7 +589,7 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
             return 0;
         }
         (*f).inbox = if (*f).eref != 0 && v_w != 0 {
-            rc::sloth_rc_retain(v_w)
+            rc::__sloth_rc_retain(v_w)
         } else {
             v_w
         };
@@ -615,7 +615,7 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_yield(v_w: i64) -> i64 {
     unsafe {
         let f = cur();
         if (*f).owner_tid != cur_tid() {
@@ -631,7 +631,7 @@ pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
         (*f).state = STATE_SUSPENDED;
         let to = (*f).prev;
         (*to).inbox = if (*f).eref != 0 && v_w != 0 {
-            rc::sloth_rc_retain(v_w)
+            rc::__sloth_rc_retain(v_w)
         } else {
             v_w
         };
@@ -645,9 +645,9 @@ pub extern "C" fn sloth_fiber_yield(v_w: i64) -> i64 {
 
 /// has the running fiber been asked to cancel? After this returns a truthy
 /// (encoded bool) word the emitter unwinds the current frame and calls
-/// `sloth_fiber_cancel_abort`.
+/// `__sloth_fiber_cancel_abort`.
 #[no_mangle]
-pub extern "C" fn sloth_fiber_cancelled() -> i64 {
+pub extern "C" fn __sloth_fiber_cancelled() -> i64 {
     unsafe { rc::enc_i(((*cur()).cancel != 0) as i64) }
 }
 
@@ -656,14 +656,14 @@ pub extern "C" fn sloth_fiber_cancelled() -> i64 {
 /// which the abandoned frames' slot addresses are no longer valid; the current
 /// frame's own slots were already settled by the emitter.
 #[no_mangle]
-pub extern "C" fn sloth_fiber_cancel_abort() -> ! {
+pub extern "C" fn __sloth_fiber_cancel_abort() -> ! {
     unsafe {
         let f = cur();
         let slots = std::mem::take(&mut (*f).slots);
         for a in slots {
             let w = *(a as *const i64);
             if w != 0 {
-                rc::sloth_rc_release(w);
+                rc::__sloth_rc_release(w);
             }
         }
         longjmp((*f).jb.as_mut_ptr(), 1)
@@ -671,7 +671,7 @@ pub extern "C" fn sloth_fiber_cancel_abort() -> ! {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_error(msg_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_error(msg_w: i64) -> i64 {
     unsafe {
         if msg_w != 0 {
             let td = w_unref(msg_w) as *const StrT;
@@ -684,7 +684,7 @@ pub extern "C" fn sloth_fiber_error(msg_w: i64) -> i64 {
         // the emitter transfers an owning +1 on the message so the skipped
         // caller frame cannot leak the literal/slot value
         if msg_w != 0 {
-            rc::sloth_rc_release(msg_w);
+            rc::__sloth_rc_release(msg_w);
         }
         let f = cur();
         (*f).state = STATE_ERROR;
@@ -693,7 +693,7 @@ pub extern "C" fn sloth_fiber_error(msg_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_check(f_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_check(f_w: i64) -> i64 {
     if f_w == 0 {
         return 0;
     }
@@ -704,7 +704,7 @@ pub extern "C" fn sloth_fiber_check(f_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_fiber_resumable(f_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_resumable(f_w: i64) -> i64 {
     if f_w == 0 {
         return 0;
     }
@@ -719,7 +719,7 @@ pub extern "C" fn sloth_fiber_resumable(f_w: i64) -> i64 {
 /// `yield` longjmps to the entry landing pad. The fiber stack is reclaimed;
 /// owned references in skipped frames are abandoned (leak, never dangling).
 #[no_mangle]
-pub extern "C" fn sloth_fiber_cancel(f_w: i64) -> i64 {
+pub extern "C" fn __sloth_fiber_cancel(f_w: i64) -> i64 {
     if f_w == 0 {
         return 0;
     }
@@ -750,7 +750,7 @@ thread_local! {
 
 /// called at OS-thread exit by the thread trampoline (TH-P2 discipline)
 #[no_mangle]
-pub extern "C" fn sloth_fiber_thread_exit() -> i64 {
+pub extern "C" fn __sloth_fiber_thread_exit() -> i64 {
     LIVE_FIBERS.with(|c| {
         #[cfg(debug_assertions)]
         if c.get() != 0 {
@@ -768,7 +768,7 @@ mod tests {
     extern "C" fn counting_entry(_env: i64, _init: i64) -> i64 {
         let mut i = 1i64;
         while i <= 3 {
-            let _got = sloth_fiber_yield(rc::enc_i(i));
+            let _got = __sloth_fiber_yield(rc::enc_i(i));
             i += 1;
         }
         0
@@ -776,13 +776,13 @@ mod tests {
 
     #[test]
     fn switch_roundtrip() {
-        let base = rc::dec_i(rc::sloth_rc_live());
+        let base = rc::dec_i(rc::__sloth_rc_live());
         let fp = rc::w_ref(counting_entry as *const () as usize);
-        let clo = crate::objects::sloth_closure_new(fp, 0);
-        let f = sloth_fiber_create(clo, rc::enc_i(7), 0);
+        let clo = crate::objects::__sloth_closure_new(fp, 0);
+        let f = __sloth_fiber_create(clo, rc::enc_i(7), 0);
         let mut got = Vec::new();
         loop {
-            let r = sloth_fiber_resume(f, rc::enc_i(100), 0);
+            let r = __sloth_fiber_resume(f, rc::enc_i(100), 0);
             if r == 0 {
                 break;
             }
@@ -790,16 +790,16 @@ mod tests {
             assert!(got.len() < 10, "runaway fiber");
         }
         assert_eq!(got, vec![1, 2, 3]);
-        assert_eq!(rc::dec_i(sloth_fiber_resumable(f)), 0);
-        rc::sloth_rc_release(f);
-        rc::sloth_rc_release(clo);
-        assert_eq!(rc::dec_i(rc::sloth_rc_live()), base);
+        assert_eq!(rc::dec_i(__sloth_fiber_resumable(f)), 0);
+        rc::__sloth_rc_release(f);
+        rc::__sloth_rc_release(clo);
+        assert_eq!(rc::dec_i(rc::__sloth_rc_live()), base);
     }
 
     extern "C" fn million_entry(_env: i64, _init: i64) -> i64 {
         let mut i = 0i64;
         while i < 1_000_000 {
-            let _ = sloth_fiber_yield(rc::enc_i(0));
+            let _ = __sloth_fiber_yield(rc::enc_i(0));
             i += 1;
         }
         0
@@ -807,49 +807,49 @@ mod tests {
 
     #[test]
     fn million_switches() {
-        let base = rc::dec_i(rc::sloth_rc_live());
+        let base = rc::dec_i(rc::__sloth_rc_live());
         let fp = rc::w_ref(million_entry as *const () as usize);
-        let clo = crate::objects::sloth_closure_new(fp, 0);
-        let f = sloth_fiber_create(clo, 0, 0);
+        let clo = crate::objects::__sloth_closure_new(fp, 0);
+        let f = __sloth_fiber_create(clo, 0, 0);
         let mut n = 0i64;
         loop {
             // box=1 makes a yielded value 0 distinguishable from completion nil
-            let r = sloth_fiber_resume(f, 0, 1);
+            let r = __sloth_fiber_resume(f, 0, 1);
             if r == 0 {
                 break;
             }
-            rc::sloth_rc_release(r);
+            rc::__sloth_rc_release(r);
             n += 1;
         }
         assert_eq!(n, 1_000_000);
-        rc::sloth_rc_release(f);
-        rc::sloth_rc_release(clo);
-        assert_eq!(rc::dec_i(rc::sloth_rc_live()), base);
+        rc::__sloth_rc_release(f);
+        rc::__sloth_rc_release(clo);
+        assert_eq!(rc::dec_i(rc::__sloth_rc_live()), base);
     }
 
     extern "C" fn cancel_entry(_env: i64, _init: i64) -> i64 {
         loop {
-            let _ = sloth_fiber_yield(rc::enc_i(1));
+            let _ = __sloth_fiber_yield(rc::enc_i(1));
             // mirrors the emitter's cancel guard
-            if rc::dec_i(sloth_fiber_cancelled()) != 0 {
-                sloth_fiber_cancel_abort();
+            if rc::dec_i(__sloth_fiber_cancelled()) != 0 {
+                __sloth_fiber_cancel_abort();
             }
         }
     }
 
     #[test]
     fn cancel_unwinds() {
-        let base = rc::dec_i(rc::sloth_rc_live());
+        let base = rc::dec_i(rc::__sloth_rc_live());
         let fp = rc::w_ref(cancel_entry as *const () as usize);
-        let clo = crate::objects::sloth_closure_new(fp, 0);
-        let f = sloth_fiber_create(clo, 0, 0);
-        let r = sloth_fiber_resume(f, 0, 0);
+        let clo = crate::objects::__sloth_closure_new(fp, 0);
+        let f = __sloth_fiber_create(clo, 0, 0);
+        let r = __sloth_fiber_resume(f, 0, 0);
         assert_eq!(rc::dec_i(r), 1);
-        assert_eq!(rc::dec_i(sloth_fiber_resumable(f)), 1);
-        sloth_fiber_cancel(f);
-        assert_eq!(rc::dec_i(sloth_fiber_resumable(f)), 0);
-        rc::sloth_rc_release(f);
-        rc::sloth_rc_release(clo);
-        assert_eq!(rc::dec_i(rc::sloth_rc_live()), base);
+        assert_eq!(rc::dec_i(__sloth_fiber_resumable(f)), 1);
+        __sloth_fiber_cancel(f);
+        assert_eq!(rc::dec_i(__sloth_fiber_resumable(f)), 0);
+        rc::__sloth_rc_release(f);
+        rc::__sloth_rc_release(clo);
+        assert_eq!(rc::dec_i(rc::__sloth_rc_live()), base);
     }
 }

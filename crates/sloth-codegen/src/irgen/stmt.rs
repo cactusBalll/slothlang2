@@ -529,7 +529,7 @@ impl ModEmitter {
                                     if self.is_ref(el) {
                                         let old = fw.v();
                                         fw.op(&format!(
-                                                    "    {} = func.call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                                                    "    {} = func.call @__sloth_arr_get({}, {}) : (i64, i64) -> i64",
                                                     old, av, iv
                                                 ));
                                         self.emit_release(fw, &old);
@@ -537,7 +537,7 @@ impl ModEmitter {
                                         v = rv2;
                                     }
                                     fw.op(&format!(
-                                                "    func.call @sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                                                "    func.call @__sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
                                                 av, iv, v
                                             ));
                                 }
@@ -615,15 +615,15 @@ impl ModEmitter {
                                     match use_h {
                                         Some(hv) => {
                                             fw.op(&format!(
-                                                        "    func.call @sloth_map_set_h({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                                                        "    func.call @__sloth_map_set_h({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                                                         av, iv, hv, v
                                                     ));
                                         }
                                         None => {
                                             let sym = if kkind {
-                                                "sloth_map_str_set"
+                                                "__sloth_map_str_set"
                                             } else {
-                                                "sloth_map_set"
+                                                "__sloth_map_set"
                                             };
                                             fw.op(&format!(
                                                 "    func.call @{}({}, {}, {}) : (i64, i64, i64) -> i64",
@@ -916,7 +916,7 @@ impl ModEmitter {
                             ));
                             let fv = fw.v();
                             fw.op(&format!(
-                                "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+                                "    {} = func.call @__sloth_obj_field({}, {}) : (i64, i64) -> i64",
                                 fv, pw, zi
                             ));
                             Some((fv, self.field_type(&c, f)))
@@ -931,7 +931,7 @@ impl ModEmitter {
                             Ty::Array(el) => {
                                 let inner = fw.v();
                                 fw.op(&format!(
-                                    "    {} = func.call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+                                    "    {} = func.call @__sloth_arr_get({}, {}) : (i64, i64) -> i64",
                                     inner, pw, iv
                                 ));
                                 Some((inner, el))
@@ -939,9 +939,9 @@ impl ModEmitter {
                             Ty::Map(k, v) => {
                                 let kkind = matches!(self.r.get(k), Ty::Str);
                                 let sym = if kkind {
-                                    "sloth_map_str_get"
+                                    "__sloth_map_str_get"
                                 } else {
-                                    "sloth_map_get"
+                                    "__sloth_map_get"
                                 };
                                 let inner = fw.v();
                                 fw.op(&format!(
@@ -1279,7 +1279,7 @@ impl ModEmitter {
                 ));
                 let p = fw.v();
                 fw.op(&format!(
-                    "    {} = func.call @sloth_any_word({}) : (i64) -> i64",
+                    "    {} = func.call @__sloth_any_word({}) : (i64) -> i64",
                     p, w
                 ));
                 fw.push_scope();
@@ -1321,7 +1321,7 @@ impl ModEmitter {
                 let (u, _ut) = if matches!(cur, Ty::Dyn(_)) {
                     let r = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_dyn_unbox({}) : (i64) -> i64",
+                        "    {} = func.call @__sloth_dyn_unbox({}) : (i64) -> i64",
                         r, w
                     ));
                     (r, nty)
@@ -1487,6 +1487,13 @@ impl ModEmitter {
                 let consumed = fw.rc_consume(&mav);
                 let taken = fw.rc_take_xfer(&mav);
                 let iter_owned = consumed || taken;
+                // any *other* owned producers of the iterable expression (e.g.
+                // the receiver literal in `for c in "ab".chars()`, or the map
+                // in `for k in keys(mkmap())`) are argument temporaries: settle
+                // them once in the preheader. Leaving them pending would put
+                // their release in the loop-head block, freeing them on every
+                // back-edge.
+                fw.rc_flush();
                 let ats = self.r.get(at).clone();
                 match &ats {
                     Ty::Array(e) => {
@@ -1532,12 +1539,12 @@ impl ModEmitter {
                     Ty::Range => {
                         let lo = fw.v();
                         fw.op(&format!(
-                            "    {} = func.call @sloth_range_lo({}) : (i64) -> i64",
+                            "    {} = func.call @__sloth_range_lo({}) : (i64) -> i64",
                             lo, mav
                         ));
                         let hi = fw.v();
                         fw.op(&format!(
-                            "    {} = func.call @sloth_range_hi({}) : (i64) -> i64",
+                            "    {} = func.call @__sloth_range_hi({}) : (i64) -> i64",
                             hi, mav
                         ));
                         self.emit_range_loop(fw, var, body, &lo, &hi);
@@ -1662,12 +1669,12 @@ impl ModEmitter {
         // keys snapshot array (same as keys() route)
         let ks = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_map_keys({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_map_keys({}) : (i64) -> i64",
             ks, mav
         ));
         let lenv = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_arr_len({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_arr_len({}) : (i64) -> i64",
             lenv, ks
         ));
         fw.push_scope();
@@ -1710,7 +1717,7 @@ impl ModEmitter {
         // key word: keys array (word route covers int/str/Hashable keys)
         let kw = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_arr_get({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_arr_get({}, {}) : (i64, i64) -> i64",
             kw, ks, iv
         ));
         // value word: same map-read family as indexing (kkind routed by table);
@@ -1727,7 +1734,7 @@ impl ModEmitter {
                         let _ = vf;
                         let vw = fw.v();
                         fw.op(&format!(
-                            "    {} = func.call @sloth_map_get_h({}, {}, {}) : (i64, i64, i64) -> i64",
+                            "    {} = func.call @__sloth_map_get_h({}, {}, {}) : (i64, i64, i64) -> i64",
                             vw, mav, kw, hv
                         ));
                         vw
@@ -1737,7 +1744,7 @@ impl ModEmitter {
                         // the legacy pointer-identity fetch
                         let vw = fw.v();
                         fw.op(&format!(
-                            "    {} = func.call @sloth_map_get({}, {}) : (i64, i64) -> i64",
+                            "    {} = func.call @__sloth_map_get({}, {}) : (i64, i64) -> i64",
                             vw, mav, kw
                         ));
                         vw
@@ -1746,7 +1753,7 @@ impl ModEmitter {
             } else {
                 let vw = fw.v();
                 fw.op(&format!(
-                    "    {} = func.call @sloth_map_get({}, {}) : (i64, i64) -> i64",
+                    "    {} = func.call @__sloth_map_get({}, {}) : (i64, i64) -> i64",
                     vw, mav, kw
                 ));
                 vw
@@ -1754,7 +1761,7 @@ impl ModEmitter {
         } else {
             let vw = fw.v();
             fw.op(&format!(
-                "    {} = func.call @sloth_map_str_get({}, {}) : (i64, i64) -> i64",
+                "    {} = func.call @__sloth_map_str_get({}, {}) : (i64, i64) -> i64",
                 vw, mav, kw
             ));
             vw
@@ -1848,8 +1855,8 @@ impl ModEmitter {
     ) {
         let (countfn, getfn, getty) = match kind {
             // tag migration: one word route (float elements ride the word)
-            IdxKind::Arr => ("sloth_arr_len", "sloth_arr_get", "(i64, i64) -> i64"),
-            IdxKind::StrChar => ("sloth_str_clen", "sloth_str_char", "(i64, i64) -> i64"),
+            IdxKind::Arr => ("__sloth_arr_len", "__sloth_arr_get", "(i64, i64) -> i64"),
+            IdxKind::StrChar => ("__sloth_str_clen", "__sloth_str_char", "(i64, i64) -> i64"),
         };
         let lenv = fw.v();
         fw.op(&format!(

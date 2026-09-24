@@ -450,7 +450,7 @@ impl ModEmitter {
             m.clone()
         } else if self.fixed_syms.contains(name) {
             // self-hosted container prelude: keep the raw ABI symbol so the
-            // hardcoded @sloth_arr_*/@sloth_map_* call sites resolve
+            // hardcoded @__sloth_arr_*/@__sloth_map_* call sites resolve
             name.to_string()
         } else {
             mangle(&self.cur_mod.clone(), cls, name)

@@ -1,0 +1,114 @@
+// Reserved runtime ABI surface (`__sloth_*`), declared in the prelude only.
+//
+// This file is embedded into the compiler and injected into every module
+// (root and imports) alongside the `print` prelude. It is the *single*
+// declaration site for the runtime externs the standard library calls; the
+// stdlib (`lib/sloth/*.slt`) must add `import "__sloth";` to call them.
+//
+// The self-hosted container/range prelude keeps its own bare-word externs in
+// `core.slt`/`containers.slt` (also prelude). Everything else the stdlib needs
+// — byte buffers, clock/errno, the event backend, mmap, tensors and the raw
+// string helpers — is declared here.
+
+// ---------------- opaque handles ----------------
+extern type Bytes;
+extern type EvBuf;
+extern type EvLoop;
+extern type SockAddr;
+extern type ByteBuffer;
+
+// ---------------- byte buffers (io.slt) ----------------
+extern func __sloth_bytes_new(cap: int): Bytes;
+extern func __sloth_bytes_free(b: Bytes): int;
+extern func __sloth_bytes_len(b: Bytes): int;
+extern func __sloth_bytes_cap(b: Bytes): int;
+extern func __sloth_bytes_ensure(b: Bytes, cap: int): int;
+extern func __sloth_bytes_set_len(b: Bytes, n: int): int;
+extern func __sloth_bytes_get(b: Bytes, i: int): int;
+extern func __sloth_bytes_set(b: Bytes, i: int, v: int): int;
+extern func __sloth_bytes_fill(b: Bytes, off: int, v: int, n: int): int;
+extern func __sloth_bytes_append(b: Bytes, v: int): int;
+extern func __sloth_bytes_copy_from_str(b: Bytes, off: int, s: str): int;
+extern func __sloth_bytes_to_str(b: Bytes, off: int, len: int): str;
+extern func __sloth_bytes_as_str(b: Bytes): str;
+
+// ---------------- clock + errno (io.slt) ----------------
+extern func __sloth_now_ms(): int;
+extern func __sloth_sleep_ms(ms: int): int;
+extern func __sloth_io_errno(): int;
+extern func __sloth_io_would_block(r: int): int;
+extern func __sloth_io_conn_closed(r: int): int;
+
+// ---------------- event backend (io.slt) ----------------
+extern func __sloth_ev_available(kind: int): int;
+extern func __sloth_ev_backend_name(kind: int): str;
+extern func __sloth_ev_new(kind: int): EvLoop;
+extern func __sloth_ev_free(ev: EvLoop): int;
+extern func __sloth_ev_wakeup(ev: EvLoop): int;
+extern func __sloth_ev_ctl(ev: EvLoop, op: int, fd: int, events: int, token: int): int;
+extern func __sloth_ev_poll(ev: EvLoop, timeout_ms: int, out: EvBuf): int;
+extern func __sloth_evbuf_new(cap: int): EvBuf;
+extern func __sloth_evbuf_free(b: EvBuf): int;
+extern func __sloth_evbuf_count(b: EvBuf): int;
+extern func __sloth_evbuf_token(b: EvBuf, i: int): int;
+extern func __sloth_evbuf_events(b: EvBuf, i: int): int;
+
+// ---------------- async completion (io.slt) ----------------
+extern func __sloth_async_new(): int;
+extern func __sloth_async_signal(fd: int): int;
+extern func __sloth_async_drain(fd: int): int;
+extern func __sloth_async_free(fd: int): int;
+
+// ---------------- raw string helpers (io.slt / fs.slt) ----------------
+extern func __sloth_str_find(hay: str, needle: str, from: int): int;
+extern func __sloth_str_starts_with(s: str, prefix: str): int;
+extern func __sloth_str_slice(s: str, start: int, len: int): str;
+extern func __sloth_str_byte(s: str, i: int): int;
+extern func __sloth_str_of_byte(v: int): str;
+extern func __sloth_str_cmp(a: str, b: str): int;
+
+// ---------------- mmap + f32 views (fs.slt) ----------------
+extern func __sloth_mmap(path: str): ByteBuffer;
+extern func __sloth_mmap_len(b: ByteBuffer): int;
+extern func __sloth_mmap_i32(b: ByteBuffer, off: int): int;
+extern func __sloth_mmap_u8(b: ByteBuffer, off: int): int;
+extern func __sloth_mmap_f32(b: ByteBuffer, off: int): float;
+extern func __sloth_mmap_str(b: ByteBuffer, off: int, len: int): str;
+extern func __sloth_tensor_from_f32_ptr(b: ByteBuffer, off: int, len: int): Tensor<float, 1>;
+extern func __sloth_rt_write_str(s: str): unit;
+
+// ---------------- socket address + net (net.slt) ----------------
+extern func __sloth_addr_new(): SockAddr;
+extern func __sloth_addr_free(a: SockAddr): int;
+extern func __sloth_addr_set(a: SockAddr, ip: str, port: int): int;
+extern func __sloth_addr_ip(a: SockAddr): str;
+extern func __sloth_addr_port(a: SockAddr): int;
+
+extern func __sloth_net_socket(domain: int, kind: int, proto: int): int;
+extern func __sloth_net_close(fd: int): int;
+extern func __sloth_net_shutdown(fd: int, how: int): int;
+extern func __sloth_net_set_nonblocking(fd: int): int;
+extern func __sloth_net_set_blocking(fd: int): int;
+extern func __sloth_net_set_reuseaddr(fd: int): int;
+extern func __sloth_net_set_reuseport(fd: int): int;
+extern func __sloth_net_set_nodelay(fd: int): int;
+extern func __sloth_net_bind(fd: int, ip: str, port: int): int;
+extern func __sloth_net_listen(fd: int, backlog: int): int;
+extern func __sloth_net_accept(fd: int): int;
+extern func __sloth_net_connect(fd: int, ip: str, port: int): int;
+extern func __sloth_net_recv(fd: int, b: Bytes, off: int, len: int): int;
+extern func __sloth_net_send(fd: int, b: Bytes, off: int, len: int): int;
+extern func __sloth_net_send_str(fd: int, s: str): int;
+extern func __sloth_net_recvfrom(fd: int, b: Bytes, off: int, len: int, a: SockAddr): int;
+extern func __sloth_net_sendto(fd: int, b: Bytes, off: int, len: int, a: SockAddr): int;
+extern func __sloth_net_peer_addr(fd: int, a: SockAddr): int;
+extern func __sloth_net_local_port(fd: int): int;
+
+// ---------------- shared-storage tensor reshape views (tensor.slt) ----------------
+extern func __sloth_tensor_reshape1(t: Tensor<float, 1>, off: int, d0: int): Tensor<float, 1>;
+extern func __sloth_tensor_reshape2(
+    t: Tensor<float, 1>, off: int, d0: int, d1: int
+): Tensor<float, 2>;
+extern func __sloth_tensor_reshape3(
+    t: Tensor<float, 1>, off: int, d0: int, d1: int, d2: int
+): Tensor<float, 3>;

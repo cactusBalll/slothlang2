@@ -29,7 +29,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", cid));
         let ci = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_cls_info({}, {}) : (i64, i64) -> i64",
             ci, z, cid
         ));
         // per-frame reference fields: a captured field is a ref exactly when
@@ -71,7 +71,7 @@ impl ModEmitter {
         ));
         let frame = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
             frame, ci, nf, cascade
         ));
         // rc patch B: fresh frame = producer temp (released at stmt close
@@ -110,12 +110,12 @@ impl ModEmitter {
             if self.is_ref(ct) {
                 let rcv = self.emit_retain(fw, &cv);
                 fw.op(&format!(
-                    "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                     frame, zi, rcv
                 ));
             } else {
                 fw.op(&format!(
-                    "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                    "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                     frame, zi, cv
                 ));
             }

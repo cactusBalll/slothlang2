@@ -102,7 +102,7 @@ impl ModEmitter {
         ));
         let out = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_thread_spawn({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_thread_spawn({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
             out, fv, iv, aref, rref
         ));
         let rt = self.r.mk(Ty::JoinHandle(r));
@@ -113,7 +113,7 @@ impl ModEmitter {
     pub(crate) fn emit_thread_current_id(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_thread_current_id() : () -> i64",
+            "    {} = func.call @__sloth_thread_current_id() : () -> i64",
             r
         ));
         (r, self.r.mk(Ty::I64))
@@ -122,7 +122,7 @@ impl ModEmitter {
     pub(crate) fn emit_thread_yield(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_thread_yield_now() : () -> i64",
+            "    {} = func.call @__sloth_thread_yield_now() : () -> i64",
             r
         ));
         (r, self.r.mk(Ty::Unit))
@@ -151,7 +151,7 @@ impl ModEmitter {
         ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_chan_new({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_chan_new({}, {}) : (i64, i64) -> i64",
             r, cv, eref
         ));
         let rt = self.r.mk(Ty::Channel(targ));
@@ -162,7 +162,7 @@ impl ModEmitter {
     pub(crate) fn emit_mutex_new(&mut self, fw: &mut FnWalk) -> (String, TyId) {
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_mutex_new() : () -> i64",
+            "    {} = func.call @__sloth_mutex_new() : () -> i64",
             r
         ));
         let rt = self.r.mk(Ty::Mutex);
@@ -182,7 +182,7 @@ impl ModEmitter {
         }
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_atomic_new({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_atomic_new({}) : (i64) -> i64",
             r, iv
         ));
         let rt = self.r.mk(Ty::AtomicInt);
@@ -221,7 +221,7 @@ impl ModEmitter {
                 "join" => {
                     let out = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_thread_join({}) : (i64) -> i64",
+                        "    {} = func.call @__sloth_thread_join({}) : (i64) -> i64",
                         out, recvv
                     ));
                     if self.is_ref(r) {
@@ -231,7 +231,7 @@ impl ModEmitter {
                 }
                 "detach" => {
                     fw.op(&format!(
-                        "    func.call @sloth_thread_detach({}) : (i64) -> i64",
+                        "    func.call @__sloth_thread_detach({}) : (i64) -> i64",
                         recvv
                     ));
                     let z = fw.v();
@@ -248,7 +248,7 @@ impl ModEmitter {
                     }
                     let owned = self.transfer_arg(fw, &argv[1].0, t);
                     fw.op(&format!(
-                        "    func.call @sloth_chan_send({}, {}) : (i64, i64) -> i64",
+                        "    func.call @__sloth_chan_send({}, {}) : (i64, i64) -> i64",
                         recvv, owned
                     ));
                     let z = fw.v();
@@ -264,7 +264,7 @@ impl ModEmitter {
                     ));
                     let out = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_chan_recv({}, {}) : (i64, i64) -> i64",
+                        "    {} = func.call @__sloth_chan_recv({}, {}) : (i64, i64) -> i64",
                         out, recvv, bf
                     ));
                     let ot = self.r.mk(Ty::Opt(t));
@@ -275,7 +275,7 @@ impl ModEmitter {
                 }
                 "close" => {
                     fw.op(&format!(
-                        "    func.call @sloth_chan_close({}) : (i64) -> i64",
+                        "    func.call @__sloth_chan_close({}) : (i64) -> i64",
                         recvv
                     ));
                     let z = fw.v();
@@ -287,9 +287,9 @@ impl ModEmitter {
             Ty::Mutex => match name {
                 "lock" | "unlock" => {
                     let sym = if name == "lock" {
-                        "sloth_mutex_lock"
+                        "__sloth_mutex_lock"
                     } else {
-                        "sloth_mutex_unlock"
+                        "__sloth_mutex_unlock"
                     };
                     fw.op(&format!("    func.call @{}({}) : (i64) -> i64", sym, recvv));
                     let z = fw.v();
@@ -299,7 +299,7 @@ impl ModEmitter {
                 "try_lock" => {
                     let out = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_mutex_try_lock({}) : (i64) -> i64",
+                        "    {} = func.call @__sloth_mutex_try_lock({}) : (i64) -> i64",
                         out, recvv
                     ));
                     Some((out, self.r.mk(Ty::Bool)))
@@ -310,7 +310,7 @@ impl ModEmitter {
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
                     fw.op(&format!(
-                        "    func.call @sloth_mutex_with({}, {}) : (i64, i64) -> i64",
+                        "    func.call @__sloth_mutex_with({}, {}) : (i64, i64) -> i64",
                         recvv, argv[1].0
                     ));
                     let z = fw.v();
@@ -323,7 +323,7 @@ impl ModEmitter {
                 "load" => {
                     let out = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_atomic_load({}) : (i64) -> i64",
+                        "    {} = func.call @__sloth_atomic_load({}) : (i64) -> i64",
                         out, recvv
                     ));
                     Some((out, self.r.mk(Ty::I64)))
@@ -334,7 +334,7 @@ impl ModEmitter {
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
                     fw.op(&format!(
-                        "    func.call @sloth_atomic_store({}, {}) : (i64, i64) -> i64",
+                        "    func.call @__sloth_atomic_store({}, {}) : (i64, i64) -> i64",
                         recvv, argv[1].0
                     ));
                     let z = fw.v();
@@ -347,9 +347,9 @@ impl ModEmitter {
                         return Some((String::new(), self.r.mk(Ty::I64)));
                     }
                     let sym = if name == "add" {
-                        "sloth_atomic_add"
+                        "__sloth_atomic_add"
                     } else {
-                        "sloth_atomic_sub"
+                        "__sloth_atomic_sub"
                     };
                     let out = fw.v();
                     fw.op(&format!(
@@ -368,7 +368,7 @@ impl ModEmitter {
                     }
                     let out = fw.v();
                     fw.op(&format!(
-                        "    {} = func.call @sloth_atomic_cas({}, {}, {}) : (i64, i64, i64) -> i64",
+                        "    {} = func.call @__sloth_atomic_cas({}, {}, {}) : (i64, i64, i64) -> i64",
                         out, recvv, argv[1].0, argv[2].0
                     ));
                     Some((out, self.r.mk(Ty::Bool)))

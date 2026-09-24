@@ -44,7 +44,7 @@ impl ModEmitter {
         let rev = self.emit_retain(fw, env);
         let obj = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_closure_new({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_closure_new({}, {}) : (i64, i64) -> i64",
             obj, fnptr, rev
         ));
         obj
@@ -78,7 +78,7 @@ impl ModEmitter {
             for j in 0..ncap {
                 let jw = fresh(&mut vc);
                 // the frame stores capture `j` at the *tagged* index word
-                // (`enc_i_lit(j)`); sloth_obj_field decodes it, so the bridge
+                // (`enc_i_lit(j)`); __sloth_obj_field decodes it, so the bridge
                 // must hand over the same encoding (multi-capture fix)
                 body.push_str(&format!(
                     "    {} = arith.constant {} : i64\n",
@@ -87,7 +87,7 @@ impl ModEmitter {
                 ));
                 let c = fresh(&mut vc);
                 body.push_str(&format!(
-                    "    {} = func.call @sloth_obj_field(%p0, {}) : (i64, i64) -> i64\n",
+                    "    {} = func.call @__sloth_obj_field(%p0, {}) : (i64, i64) -> i64\n",
                     c, jw
                 ));
                 args.push(c);
@@ -247,7 +247,7 @@ impl ModEmitter {
         ));
         let fp = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_field({}, {}) : (i64, i64) -> i64",
             fp, clo, f0
         ));
         let f1 = fw.v();
@@ -258,7 +258,7 @@ impl ModEmitter {
         ));
         let env = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_field({}, {}) : (i64, i64) -> i64",
             env, clo, f1
         ));
         let vp = fw.v();

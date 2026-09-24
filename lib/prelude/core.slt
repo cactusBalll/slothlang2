@@ -4,54 +4,54 @@
 // in the emitter resolve here instead of the Rust runtime. The runtime only
 // supplies bare rc allocation + word memory.
 //
-// Layouts are frozen and shared with the `any` renderer, `sloth_rt_print_opt`
-// and `sloth_str_push_opt` (Rust reads these boxes directly):
+// Layouts are frozen and shared with the `any` renderer, `__sloth_rt_print_opt`
+// and `__sloth_str_push_opt` (Rust reads these boxes directly):
 //   range box [lo, hi]   (rc-tracked 16-byte payload; hi is already the
 //                         exclusive upper bound)
 //   value box [payload]  (rc-tracked 8-byte payload; handle 0 = nil, so a
 //                         payload word 0 inside a real box never collides)
 
 // ---- bare runtime surface ----
-extern func sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
-extern func sloth_mem_load(p: int, i: int): int;
-extern func sloth_mem_store(p: int, i: int, v: int): unit;
+extern func __sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
+extern func __sloth_mem_load(p: int, i: int): int;
+extern func __sloth_mem_store(p: int, i: int, v: int): unit;
 
 // pack `lo`/`hi` words into a fresh range handle
-func sloth_range_pack(lo: int, hi: int): int {
-    let b: int = sloth_rc_new(16, 0, 0);
-    sloth_mem_store(b, 0, lo);
-    sloth_mem_store(b, 1, hi);
+func __sloth_range_pack(lo: int, hi: int): int {
+    let b: int = __sloth_rc_new(16, 0, 0);
+    __sloth_mem_store(b, 0, lo);
+    __sloth_mem_store(b, 1, hi);
     return b;
 }
 
 // lower bound word (nil range reads 0)
-func sloth_range_lo(h: int): int {
+func __sloth_range_lo(h: int): int {
     if h == 0 {
         return 0;
     }
-    return sloth_mem_load(h, 0);
+    return __sloth_mem_load(h, 0);
 }
 
 // exclusive upper bound word (nil range reads 0)
-func sloth_range_hi(h: int): int {
+func __sloth_range_hi(h: int): int {
     if h == 0 {
         return 0;
     }
-    return sloth_mem_load(h, 1);
+    return __sloth_mem_load(h, 1);
 }
 
 // allocate a box holding a raw payload word
-func sloth_box_new(v: int): int {
-    let b: int = sloth_rc_new(8, 0, 0);
-    sloth_mem_store(b, 0, v);
+func __sloth_box_new(v: int): int {
+    let b: int = __sloth_rc_new(8, 0, 0);
+    __sloth_mem_store(b, 0, v);
     return b;
 }
 
 // payload read (nil reads 0 — callers never dereference a nil box except
 // under unwrap-or-0 semantics)
-func sloth_box_get(h: int): int {
+func __sloth_box_get(h: int): int {
     if h == 0 {
         return 0;
     }
-    return sloth_mem_load(h, 0);
+    return __sloth_mem_load(h, 0);
 }

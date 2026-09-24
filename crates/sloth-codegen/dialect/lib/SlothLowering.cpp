@@ -11,7 +11,7 @@ using mlir::OpRewritePattern;
 using mlir::PatternRewriter;
 
 /// %r = sloth.rc_retain %h : i64
-///   -> %r = func.call @sloth_rc_retain(%h) : (i64) -> i64
+///   -> %r = func.call @__sloth_rc_retain(%h) : (i64) -> i64
 struct LowerRcRetain : public mlir::OpRewritePattern<RcRetainOp> {
   using OpRewritePattern = mlir::OpRewritePattern<RcRetainOp>;
   using OpRewritePattern::OpRewritePattern;
@@ -21,7 +21,7 @@ struct LowerRcRetain : public mlir::OpRewritePattern<RcRetainOp> {
     auto loc = op.getLoc();
     auto resTy = op.getOut().getType();
     auto call = rewriter.create<mlir::func::CallOp>(
-        loc, rewriter.getStringAttr("sloth_rc_retain"),
+        loc, rewriter.getStringAttr("__sloth_rc_retain"),
         mlir::TypeRange{resTy}, mlir::ValueRange{op.getRef()});
     rewriter.replaceOp(op, call.getResult(0));
     return mlir::success();
@@ -29,7 +29,7 @@ struct LowerRcRetain : public mlir::OpRewritePattern<RcRetainOp> {
 };
 
 /// sloth.rc_release %h : i64
-///   -> func.call @sloth_rc_release(%h) : (i64) -> i64  (result discarded)
+///   -> func.call @__sloth_rc_release(%h) : (i64) -> i64  (result discarded)
 struct LowerRcRelease : public OpRewritePattern<RcReleaseOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -38,7 +38,7 @@ struct LowerRcRelease : public OpRewritePattern<RcReleaseOp> {
     auto loc = op.getLoc();
     auto i64 = rewriter.getI64Type();
     rewriter.create<mlir::func::CallOp>(
-        loc, rewriter.getStringAttr("sloth_rc_release"), mlir::TypeRange{i64},
+        loc, rewriter.getStringAttr("__sloth_rc_release"), mlir::TypeRange{i64},
         mlir::ValueRange{op.getRef()});
     rewriter.eraseOp(op);
     return mlir::success();

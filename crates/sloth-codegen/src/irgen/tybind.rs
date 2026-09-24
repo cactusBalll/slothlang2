@@ -470,7 +470,7 @@ impl ModEmitter {
 
     /// wrap a produced word into its value-optional surface (`int?` etc):
     /// a nil/Unit word passes through as nil (0); a bare scalar is boxed
-    /// (`sloth_box_new[_f64]`), an already-opt word passes through (idempotent)
+    /// (`__sloth_box_new[_f64]`), an already-opt word passes through (idempotent)
     pub(crate) fn coerce_into_opt(
         &mut self,
         fw: &mut FnWalk,
@@ -497,7 +497,7 @@ impl ModEmitter {
             };
             let r = fw.v();
             fw.op(&format!(
-                "    {} = func.call @sloth_box_new({}) : (i64) -> i64",
+                "    {} = func.call @__sloth_box_new({}) : (i64) -> i64",
                 r, payload
             ));
             self.dangling_producer(fw, &r, to);
@@ -508,7 +508,7 @@ impl ModEmitter {
                 // f64 word boxes as-is (the box holds the encoded word)
                 let r = fw.v();
                 fw.op(&format!(
-                    "    {} = func.call @sloth_box_new({}) : (i64) -> i64",
+                    "    {} = func.call @__sloth_box_new({}) : (i64) -> i64",
                     r, v
                 ));
                 self.dangling_producer(fw, &r, to);
@@ -539,7 +539,7 @@ impl ModEmitter {
         // tag migration: the box holds one tagged payload word
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_box_get({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_box_get({}) : (i64) -> i64",
             r, v
         ));
         (r, inner)
@@ -637,7 +637,7 @@ impl ModEmitter {
         let (targ, _tt) = self.coerce_word_to(fw, v, from, check);
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_weak_new({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_weak_new({}) : (i64) -> i64",
             r, targ
         ));
         self.dangling_producer(fw, &r, to);
@@ -660,7 +660,7 @@ impl ModEmitter {
         let d = self.emit_any_desc_ptr(fw, from);
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_any_from({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_any_from({}, {}) : (i64, i64) -> i64",
             r, d, v
         ));
         self.dangling_producer(fw, &r, any);

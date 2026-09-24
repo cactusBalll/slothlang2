@@ -1,7 +1,7 @@
 //! Panic entry points: all abort the process with a diagnosis on stderr.
 
 #[no_mangle]
-pub extern "C" fn sloth_panic(msg: *const libc::c_char) -> ! {
+pub extern "C" fn __sloth_panic(msg: *const libc::c_char) -> ! {
     let s = unsafe {
         if msg.is_null() {
             "panic".to_string()
@@ -15,14 +15,14 @@ pub extern "C" fn sloth_panic(msg: *const libc::c_char) -> ! {
 
 /// missing map key (never returns normally)
 #[no_mangle]
-pub extern "C" fn sloth_panic_nokey(key: i64) -> i64 {
+pub extern "C" fn __sloth_panic_nokey(key: i64) -> i64 {
     eprintln!("sloth panic: map key not found ({})", key);
     std::process::exit(1);
 }
 
 /// dyn receiver is not an implementing class (never returns)
 #[no_mangle]
-pub extern "C" fn sloth_panic_noimpl(cls_id: i64) -> i64 {
+pub extern "C" fn __sloth_panic_noimpl(cls_id: i64) -> i64 {
     eprintln!(
         "sloth panic: no impl for trait method on receiver (cls {})",
         cls_id
@@ -32,14 +32,14 @@ pub extern "C" fn sloth_panic_noimpl(cls_id: i64) -> i64 {
 
 /// unwrap() on an err Result: unrecoverable, exit with diagnosis
 #[no_mangle]
-pub extern "C" fn sloth_panic_unwrap() -> i64 {
+pub extern "C" fn __sloth_panic_unwrap() -> i64 {
     eprintln!("sloth panic: unwrap() on err Result");
     std::process::exit(1);
 }
 
 /// integer division/modulo by zero: unrecoverable (design §5.5)
 #[no_mangle]
-pub extern "C" fn sloth_panic_divzero() -> i64 {
+pub extern "C" fn __sloth_panic_divzero() -> i64 {
     eprintln!("sloth panic: integer division by zero");
     std::process::exit(1);
 }
@@ -63,12 +63,12 @@ pub fn panic_oob(kind: &str, i: i64, len: i64) -> ! {
 /// C-ABI out-of-bounds entry for the self-hosted container prelude (array
 /// indexing / pop). `i` is the offending index, `len` the container length.
 #[no_mangle]
-pub extern "C" fn sloth_panic_oob(i: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_panic_oob(i: i64, len: i64) -> i64 {
     panic_oob("array", i, len)
 }
 
 /// C-ABI pop-from-empty entry for the self-hosted container prelude.
 #[no_mangle]
-pub extern "C" fn sloth_panic_pop(i: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_panic_pop(i: i64, len: i64) -> i64 {
     panic_oob("pop", i, len)
 }

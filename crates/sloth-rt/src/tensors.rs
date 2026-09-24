@@ -16,7 +16,7 @@
 //! arrays, then either releases the owner (view) or frees the data buffer.
 
 use crate::rc::{
-    dec_f_bits, dec_i, enc_f_bits, enc_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_ref,
+    __sloth_rc_release, __sloth_rc_retain, dec_f_bits, dec_i, enc_f_bits, enc_i, rc_addr, w_ref,
     w_unref,
 };
 
@@ -105,7 +105,7 @@ fn tensor_dtor(p: usize, _aux: u64) {
         }
         let owner = *d.offset(5);
         if owner != 0 {
-            sloth_rc_release(owner);
+            __sloth_rc_release(owner);
         } else {
             let data = data_of(d);
             if !data.is_null() {
@@ -116,17 +116,17 @@ fn tensor_dtor(p: usize, _aux: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_new_1(d0: i64, kind: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_new_1(d0: i64, kind: i64) -> i64 {
     unsafe { tensor_new_impl(&[dec_i(d0)], dec_i(kind)) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_new_2(d0: i64, d1: i64, kind: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_new_2(d0: i64, d1: i64, kind: i64) -> i64 {
     unsafe { tensor_new_impl(&[dec_i(d0), dec_i(d1)], dec_i(kind)) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_new_3(d0: i64, d1: i64, d2: i64, kind: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_new_3(d0: i64, d1: i64, d2: i64, kind: i64) -> i64 {
     unsafe { tensor_new_impl(&[dec_i(d0), dec_i(d1), dec_i(d2)], dec_i(kind)) }
 }
 
@@ -134,7 +134,7 @@ pub extern "C" fn sloth_tensor_new_3(d0: i64, d1: i64, d2: i64, kind: i64) -> i6
 /// `drop` != 0 drops dim 0 (`t[i]`), else dim 0 is kept with the new length
 /// `len0` (`t[a..b]`). Bounds-checked.
 #[no_mangle]
-pub extern "C" fn sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64) -> i64 {
     if t == 0 {
         crate::panics::panic_msg("view of a nil tensor");
     }
@@ -182,7 +182,7 @@ pub extern "C" fn sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64
         }
         // `off` indexes dim 0, so the element offset scales by stride[0]
         let ndata = data.offset((off * *st) as isize * ELEM as isize);
-        let owner = sloth_rc_retain(t);
+        let owner = __sloth_rc_retain(t);
         let p = rc_addr(HDR_WORDS * 8, Some(tensor_dtor)) as *mut i64;
         *p = kind | FLAG_VIEW;
         *p.offset(1) = nn as i64;
@@ -197,7 +197,7 @@ pub extern "C" fn sloth_tensor_view(t: i64, off_w: i64, drop_w: i64, len0_w: i64
 
 /// rank-1 element read (bounds-checked) as a tagged scalar word
 #[no_mangle]
-pub extern "C" fn sloth_tensor_get1(t: i64, i_w: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_get1(t: i64, i_w: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -220,7 +220,7 @@ pub extern "C" fn sloth_tensor_get1(t: i64, i_w: i64) -> i64 {
 
 /// rank-1 element write (bounds-checked); the tagged value word decodes by kind
 #[no_mangle]
-pub extern "C" fn sloth_tensor_set1(t: i64, i_w: i64, v: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_set1(t: i64, i_w: i64, v: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -245,7 +245,7 @@ pub extern "C" fn sloth_tensor_set1(t: i64, i_w: i64, v: i64) -> i64 {
 /// element-wise copy `dst = src` (same kind and element count); used for
 /// view assignment `kc[l][pos] = k`
 #[no_mangle]
-pub extern "C" fn sloth_tensor_copy_into(dst: i64, src: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_copy_into(dst: i64, src: i64) -> i64 {
     if dst == 0 || src == 0 {
         crate::panics::panic_msg("tensor copy of a nil operand");
     }
@@ -269,7 +269,7 @@ pub extern "C" fn sloth_tensor_copy_into(dst: i64, src: i64) -> i64 {
 
 /// copy the leading elements of an `Array<T>` into a tensor (construction)
 #[no_mangle]
-pub extern "C" fn sloth_tensor_copy_from_array(t: i64, arr: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_copy_from_array(t: i64, arr: i64) -> i64 {
     if t == 0 || arr == 0 {
         return 0;
     }
@@ -297,7 +297,7 @@ pub extern "C" fn sloth_tensor_copy_from_array(t: i64, arr: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_rank(t: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_rank(t: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -332,7 +332,7 @@ unsafe fn basis_desc(t: i64) -> MemRefDesc {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
+pub extern "C" fn __sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
     if t == 0 {
         crate::panics::panic_msg("basis of a nil tensor");
     }
@@ -340,7 +340,7 @@ pub extern "C" fn sloth_tensor_basis_f64(t: i64) -> MemRefDesc {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
+pub extern "C" fn __sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
     if t == 0 {
         crate::panics::panic_msg("basis of a nil tensor");
     }
@@ -351,7 +351,7 @@ pub extern "C" fn sloth_tensor_basis_i64(t: i64) -> MemRefDesc {
 /// the elementwise / in-place operators (shape errors are runtime panics,
 /// design §3.1)
 #[no_mangle]
-pub extern "C" fn sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
     if a == 0 || b == 0 {
         crate::panics::panic_msg("shape check on a nil tensor");
     }
@@ -377,7 +377,7 @@ pub extern "C" fn sloth_tensor_shape_eq(a: i64, b: i64) -> i64 {
 
 /// panic unless `dim(a, axa) == dim(b, axb)`; matvec/matmul inner dims
 #[no_mangle]
-pub extern "C" fn sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) -> i64 {
     if a == 0 || b == 0 {
         crate::panics::panic_msg("shape check on a nil tensor");
     }
@@ -400,7 +400,7 @@ pub extern "C" fn sloth_tensor_dim_eq(a: i64, axa_w: i64, b: i64, axb_w: i64) ->
 
 /// stride of `axis` (tagged int word); 0 for a nil tensor
 #[no_mangle]
-pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -416,7 +416,7 @@ pub extern "C" fn sloth_tensor_stride(t: i64, axis_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -433,7 +433,7 @@ pub extern "C" fn sloth_tensor_dim(t: i64, axis_w: i64) -> i64 {
 
 /// zero-fill the tensor's elements in place
 #[no_mangle]
-pub extern "C" fn sloth_tensor_fill_zero(t: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_fill_zero(t: i64) -> i64 {
     if t == 0 {
         return 0;
     }
@@ -483,7 +483,7 @@ unsafe fn reshape_impl(t: i64, off: i64, dims: &[i64]) -> i64 {
         acc *= dims[i];
     }
     let ndata = data_of(base).offset((off * ELEM as i64) as isize);
-    let owner = sloth_rc_retain(t);
+    let owner = __sloth_rc_retain(t);
     let p = rc_addr(HDR_WORDS * 8, Some(tensor_dtor)) as *mut i64;
     *p = kind | FLAG_VIEW;
     *p.offset(1) = n as i64;
@@ -496,24 +496,24 @@ unsafe fn reshape_impl(t: i64, off: i64, dims: &[i64]) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_reshape1(t: i64, off: i64, d0: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_reshape1(t: i64, off: i64, d0: i64) -> i64 {
     unsafe { reshape_impl(t, off, &[d0]) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_reshape2(t: i64, off: i64, d0: i64, d1: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_reshape2(t: i64, off: i64, d0: i64, d1: i64) -> i64 {
     unsafe { reshape_impl(t, off, &[d0, d1]) }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_tensor_reshape3(t: i64, off: i64, d0: i64, d1: i64, d2: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_reshape3(t: i64, off: i64, d0: i64, d1: i64, d2: i64) -> i64 {
     unsafe { reshape_impl(t, off, &[d0, d1, d2]) }
 }
 
 /// widen `len` f32 values from a mapped region into a fresh rank-1 float
 /// tensor (design D7: the f32→f64 correction — explicitly *not* zero-copy)
 #[no_mangle]
-pub extern "C" fn sloth_tensor_from_f32_ptr(buf: i64, off: i64, n: i64) -> i64 {
+pub extern "C" fn __sloth_tensor_from_f32_ptr(buf: i64, off: i64, n: i64) -> i64 {
     unsafe {
         let hd = &*(buf as *const crate::mmap::BufHdr);
         if n < 0 || off < 0 || off + n * 4 > hd.len {

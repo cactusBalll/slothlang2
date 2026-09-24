@@ -1,8 +1,8 @@
 //! Read-only file mapping (design D7): the llama2.c checkpoint path.
 //!
-//! `sloth_mmap(str) -> ByteBuffer` maps the whole file; the opaque handle is a
-//! `BufHdr*` (length + base). `sloth_mmap_i32` reads little-endian config
-//! fields, and `sloth_tensor_from_f32_ptr` (in `tensors`) widens the f32 weight
+//! `__sloth_mmap(str) -> ByteBuffer` maps the whole file; the opaque handle is a
+//! `BufHdr*` (length + base). `__sloth_mmap_i32` reads little-endian config
+//! fields, and `__sloth_tensor_from_f32_ptr` (in `tensors`) widens the f32 weight
 //! region into an f64 tensor (the documented non-zero-copy correction).
 
 use crate::panics;
@@ -17,7 +17,7 @@ pub struct BufHdr {
 
 /// map `path` read-only; panics on any failure
 #[no_mangle]
-pub extern "C" fn sloth_mmap(path_w: i64) -> i64 {
+pub extern "C" fn __sloth_mmap(path_w: i64) -> i64 {
     unsafe {
         let td = w_unref(path_w) as *const StrT;
         let n = (*td).len;
@@ -64,7 +64,7 @@ pub extern "C" fn sloth_mmap(path_w: i64) -> i64 {
 
 /// byte length of the mapping (raw i64; sloth side declares `int`)
 #[no_mangle]
-pub extern "C" fn sloth_mmap_len(h: i64) -> i64 {
+pub extern "C" fn __sloth_mmap_len(h: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -73,7 +73,7 @@ pub extern "C" fn sloth_mmap_len(h: i64) -> i64 {
 
 /// little-endian i32 at byte `off` (raw C-ABI i64 arg; bounds-checked)
 #[no_mangle]
-pub extern "C" fn sloth_mmap_i32(h: i64, off: i64) -> i64 {
+pub extern "C" fn __sloth_mmap_i32(h: i64, off: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -89,7 +89,7 @@ pub extern "C" fn sloth_mmap_i32(h: i64, off: i64) -> i64 {
 
 /// byte at `off` (raw C-ABI args; bounds-checked) — tokenizer vocabulary
 #[no_mangle]
-pub extern "C" fn sloth_mmap_u8(h: i64, off: i64) -> i64 {
+pub extern "C" fn __sloth_mmap_u8(h: i64, off: i64) -> i64 {
     if h == 0 {
         return 0;
     }
@@ -104,7 +104,7 @@ pub extern "C" fn sloth_mmap_u8(h: i64, off: i64) -> i64 {
 
 /// little-endian f32 at `off` as an f64 (raw C-ABI arg; bounds-checked)
 #[no_mangle]
-pub extern "C" fn sloth_mmap_f32(h: i64, off: i64) -> f64 {
+pub extern "C" fn __sloth_mmap_f32(h: i64, off: i64) -> f64 {
     if h == 0 {
         return 0.0;
     }
@@ -119,7 +119,7 @@ pub extern "C" fn sloth_mmap_f32(h: i64, off: i64) -> f64 {
 
 /// build a fresh `str` handle from the `len` bytes at `off` — tokenizer pieces
 #[no_mangle]
-pub extern "C" fn sloth_mmap_str(h: i64, off: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_mmap_str(h: i64, off: i64, len: i64) -> i64 {
     if h == 0 {
         return 0;
     }

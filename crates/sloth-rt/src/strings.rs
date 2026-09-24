@@ -3,7 +3,7 @@
 //! There is **no interning pool / deduplication**: every construction
 //! (literal, concat, slice, char, byte, …) allocates a fresh `StrT`, so two
 //! equal-content strings are distinct objects. Equality is therefore by
-//! content (`sloth_str_eq`), never by handle identity.
+//! content (`__sloth_str_eq`), never by handle identity.
 //!
 //! Handles cross the boundary as raw words; the `StrT` payload internals
 //! (len/data) are raw too. String builders stay untracked libc chunks (they
@@ -23,9 +23,9 @@ pub(crate) struct StrB {
 }
 
 /// builder lifecycle: push chunks in, take back the builder handle;
-/// `sloth_str_finish` materializes a fresh `str` from it.
+/// `__sloth_str_finish` materializes a fresh `str` from it.
 #[no_mangle]
-pub extern "C" fn sloth_str_push(b_w: i64, w: i64, n_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_push(b_w: i64, w: i64, n_w: i64) -> i64 {
     unsafe {
         let p: *mut StrB = if b_w == 0 {
             libc::calloc(1, std::mem::size_of::<StrB>()) as *mut StrB
@@ -62,7 +62,7 @@ pub struct StrT {
 /// arrives tagged). The name is historical: this does **not** dedup, every
 /// call allocates a fresh `StrT`.
 #[no_mangle]
-pub extern "C" fn sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_intern(ptr_w: i64, len_w: i64) -> i64 {
     intern_bytes(w_unref(ptr_w), rc::dec_i(len_w))
 }
 
@@ -98,7 +98,7 @@ pub(crate) fn intern_bytes(ptr: usize, len: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_rt_print_str(p_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_print_str(p_w: i64) -> i64 {
     use std::io::Write;
     unsafe {
         let td = w_unref(p_w) as *const StrT;
@@ -113,14 +113,14 @@ pub extern "C" fn sloth_rt_print_str(p_w: i64) -> i64 {
 
 /// string length (the word plane carries it tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_len(p_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_len(p_w: i64) -> i64 {
     unsafe { rc::enc_i((*(w_unref(p_w) as *const StrT)).len as i64) }
 }
 
 /// number of Unicode scalar values in a `str` (str iteration bound).
 /// Falls back to the byte length for non-UTF-8 content.
 #[no_mangle]
-pub extern "C" fn sloth_str_clen(p_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_clen(p_w: i64) -> i64 {
     unsafe {
         let td = w_unref(p_w) as *const StrT;
         let bytes = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
@@ -132,10 +132,10 @@ pub extern "C" fn sloth_str_clen(p_w: i64) -> i64 {
 }
 
 /// i-th character (Unicode scalar) as a one-char fresh `str`; the index is
-/// a CHAR index, matching `sloth_str_clen` (design §3.5: str iterates by
+/// a CHAR index, matching `__sloth_str_clen` (design §3.5: str iterates by
 /// character). Non-UTF-8 content falls back to byte slicing.
 #[no_mangle]
-pub extern "C" fn sloth_str_char(s_w: i64, i_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_char(s_w: i64, i_w: i64) -> i64 {
     unsafe {
         let td = w_unref(s_w) as *const StrT;
         let bytes = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
@@ -168,6 +168,34 @@ pub extern "C" fn sloth_str_char(s_w: i64, i_w: i64) -> i64 {
     }
 }
 
+/// i-th character (Unicode scalar) as its raw code point (a fixed 4-byte
+/// value): `chars()` iteration value. The index is a CHAR index, matching
+/// `__sloth_str_clen`. Non-UTF-8 content falls back to the raw byte. Out of
+/// range panics (the iterator bound normally guarantees `i < clen`).
+#[no_mangle]
+pub extern "C" fn __sloth_str_codepoint(s_w: i64, i_w: i64) -> i64 {
+    unsafe {
+        let td = w_unref(s_w) as *const StrT;
+        let bytes = std::slice::from_raw_parts((*td).data as *const u8, (*td).len);
+        let idx = rc::dec_i(i_w) as usize;
+        match std::str::from_utf8(bytes) {
+            Ok(s) => match s.chars().nth(idx) {
+                Some(ch) => ch as i64,
+                None => {
+                    crate::panics::panic_oob("str codepoint", idx as i64, s.chars().count() as i64)
+                }
+            },
+            Err(_) => {
+                if idx < bytes.len() {
+                    bytes[idx] as i64
+                } else {
+                    crate::panics::panic_oob("str codepoint", idx as i64, bytes.len() as i64)
+                }
+            }
+        }
+    }
+}
+
 pub(crate) unsafe fn strb_append(p: *mut StrB, src: *const libc::c_void, n: usize) {
     if (*p).cap < (*p).len + n {
         let nc = ((*p).len + n + 16).next_power_of_two();
@@ -194,7 +222,7 @@ pub(crate) unsafe fn strb_or_new(b_w: i64) -> *mut StrB {
 
 /// push a `str`'s bytes onto a builder
 #[no_mangle]
-pub extern "C" fn sloth_str_pushp(b_w: i64, h_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_pushp(b_w: i64, h_w: i64) -> i64 {
     unsafe {
         let p = strb_or_new(b_w);
         let td = w_unref(h_w) as *mut StrT;
@@ -206,7 +234,7 @@ pub extern "C" fn sloth_str_pushp(b_w: i64, h_w: i64) -> i64 {
 
 /// push an i64 rendered in decimal (value arrives tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_i(b_w: i64, v_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_push_i(b_w: i64, v_w: i64) -> i64 {
     unsafe {
         let s = format!("{}", rc::dec_i(v_w));
         let p = strb_or_new(b_w);
@@ -217,7 +245,7 @@ pub extern "C" fn sloth_str_push_i(b_w: i64, v_w: i64) -> i64 {
 
 /// push a u64 rendered in decimal (raw word reinterpreted unsigned)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_u(b_w: i64, v_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_push_u(b_w: i64, v_w: i64) -> i64 {
     unsafe {
         let s = format!("{}", v_w as u64);
         let p = strb_or_new(b_w);
@@ -228,7 +256,7 @@ pub extern "C" fn sloth_str_push_u(b_w: i64, v_w: i64) -> i64 {
 
 /// push an f64 rendered with one decimal (raw f64 route: callers decode)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_f(b_w: i64, v: f64) -> i64 {
+pub extern "C" fn __sloth_str_push_f(b_w: i64, v: f64) -> i64 {
     unsafe {
         let s = format!("{}", v);
         let p = strb_or_new(b_w);
@@ -239,7 +267,7 @@ pub extern "C" fn sloth_str_push_f(b_w: i64, v: f64) -> i64 {
 
 /// push a bool rendered as true/false (value arrives tagged)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_b(b_w: i64, v_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_push_b(b_w: i64, v_w: i64) -> i64 {
     unsafe {
         let s = if rc::dec_i(v_w) != 0 { "true" } else { "false" };
         let p = strb_or_new(b_w);
@@ -252,7 +280,7 @@ pub extern "C" fn sloth_str_push_b(b_w: i64, v_w: i64) -> i64 {
 /// nil renders as "nil" — 0/0.0/false inside a box never collide
 /// (the box handle arrives tagged; payload words are decoded)
 #[no_mangle]
-pub extern "C" fn sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
     unsafe {
         if h_w == 0 {
             let p = strb_or_new(b_w);
@@ -284,7 +312,7 @@ pub extern "C" fn sloth_str_push_opt(b_w: i64, h_w: i64, kind_w: i64) -> i64 {
 
 /// finalize: materialize a fresh `str` from the built byte buffer (no dedup)
 #[no_mangle]
-pub extern "C" fn sloth_str_finish(b_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_finish(b_w: i64) -> i64 {
     unsafe {
         // b == 0 (no chunks pushed at all, e.g. the `""` literal) makes a
         // fresh empty builder instead of dereferencing a NULL handle
@@ -297,9 +325,9 @@ pub extern "C" fn sloth_str_finish(b_w: i64) -> i64 {
 }
 
 /// concatenate two `str`s; the result is a fresh allocation (no content
-/// dedup — equal results are distinct objects, compare with `sloth_str_eq`)
+/// dedup — equal results are distinct objects, compare with `__sloth_str_eq`)
 #[no_mangle]
-pub extern "C" fn sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
     unsafe {
         let ta = w_unref(a_w) as *const StrT;
         let tb = w_unref(b_w) as *const StrT;
@@ -322,7 +350,7 @@ pub extern "C" fn sloth_str_concat(a_w: i64, b_w: i64) -> i64 {
 
 /// content equality of two `str` words: len + memcmp (never handle identity)
 #[no_mangle]
-pub extern "C" fn sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
     unsafe {
         let ta = w_unref(a_w) as *const StrT;
         let tb = w_unref(b_w) as *const StrT;
@@ -335,7 +363,7 @@ pub extern "C" fn sloth_str_eq(a_w: i64, b_w: i64) -> i64 {
 /// lexicographic byte comparison (TE-P4 tokenizer): raw C-ABI args, returns a
 /// raw negative/zero/positive i64 (the codegen re-encodes extern int returns)
 #[no_mangle]
-pub extern "C" fn sloth_str_cmp(a_w: i64, b_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_cmp(a_w: i64, b_w: i64) -> i64 {
     unsafe {
         let ta = w_unref(a_w) as *const StrT;
         let tb = w_unref(b_w) as *const StrT;
@@ -356,7 +384,7 @@ pub extern "C" fn sloth_str_cmp(a_w: i64, b_w: i64) -> i64 {
 
 /// i-th raw byte of a `str` (raw C-ABI index in, raw byte out)
 #[no_mangle]
-pub extern "C" fn sloth_str_byte(s_w: i64, i: i64) -> i64 {
+pub extern "C" fn __sloth_str_byte(s_w: i64, i: i64) -> i64 {
     unsafe {
         let td = w_unref(s_w) as *const StrT;
         if i < 0 || i as usize >= (*td).len {
@@ -368,7 +396,7 @@ pub extern "C" fn sloth_str_byte(s_w: i64, i: i64) -> i64 {
 
 /// byte slice `[start, start+len)` as a fresh `str` (raw C-ABI ints)
 #[no_mangle]
-pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
+pub extern "C" fn __sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
     unsafe {
         let td = w_unref(s_w) as *const StrT;
         if start < 0 || len < 0 || start + len > (*td).len as i64 {
@@ -382,14 +410,14 @@ pub extern "C" fn sloth_str_slice(s_w: i64, start: i64, len: i64) -> i64 {
 /// one raw byte as a fresh `str` (raw C-ABI byte in); used by the tokenizer
 /// for `<0xNN>` raw-byte vocabulary entries
 #[no_mangle]
-pub extern "C" fn sloth_str_of_byte(v: i64) -> i64 {
+pub extern "C" fn __sloth_str_of_byte(v: i64) -> i64 {
     let b = (v & 0xff) as u8;
     intern_bytes((&b as *const u8) as usize, 1)
 }
 
 /// first occurrence of `needle` in `hay` at or after `from`, or -1 (raw bytes)
 #[no_mangle]
-pub extern "C" fn sloth_str_find(hay_w: i64, needle_w: i64, from: i64) -> i64 {
+pub extern "C" fn __sloth_str_find(hay_w: i64, needle_w: i64, from: i64) -> i64 {
     unsafe {
         let h = w_unref(hay_w) as *const StrT;
         let n = w_unref(needle_w) as *const StrT;
@@ -413,7 +441,7 @@ pub extern "C" fn sloth_str_find(hay_w: i64, needle_w: i64, from: i64) -> i64 {
 
 /// does `s` start with `prefix`? (raw bool word)
 #[no_mangle]
-pub extern "C" fn sloth_str_starts_with(s_w: i64, prefix_w: i64) -> i64 {
+pub extern "C" fn __sloth_str_starts_with(s_w: i64, prefix_w: i64) -> i64 {
     unsafe {
         let s = w_unref(s_w) as *const StrT;
         let p = w_unref(prefix_w) as *const StrT;
@@ -427,7 +455,7 @@ pub extern "C" fn sloth_str_starts_with(s_w: i64, prefix_w: i64) -> i64 {
 /// write a `str`'s bytes to stdout with no trailing newline (generation
 /// output must be printable piece-by-piece)
 #[no_mangle]
-pub extern "C" fn sloth_rt_write_str(p_w: i64) -> i64 {
+pub extern "C" fn __sloth_rt_write_str(p_w: i64) -> i64 {
     use std::io::Write;
     unsafe {
         let td = w_unref(p_w) as *const StrT;

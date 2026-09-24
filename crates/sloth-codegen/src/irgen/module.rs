@@ -231,12 +231,12 @@ impl ModEmitter {
 }
 
 /// stdlib `print` prelude: implemented in Sloth on top of the runtime writer
-/// (`sloth_rt_write` / `sloth_rt_puts`), not a compiler builtin. Injected into
+/// (`__sloth_rt_write` / `__sloth_rt_puts`), not a compiler builtin. Injected into
 /// the root and every imported module so bare `print` resolves locally.
-pub(crate) const IO_PRELUDE: &str = "extern func sloth_rt_write(v: any): str;\n\
-     extern func sloth_rt_puts(v: str): unit;\n\
+pub(crate) const IO_PRELUDE: &str = "extern func __sloth_rt_write(v: any): str;\n\
+     extern func __sloth_rt_puts(v: str): unit;\n\
      pub func print(v: any): unit {\n\
-     sloth_rt_puts(sloth_rt_write(v));\n\
+     __sloth_rt_puts(__sloth_rt_write(v));\n\
      }\n";
 
 pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
@@ -253,50 +253,100 @@ pub(crate) fn inject_print_prelude(decls: &mut Vec<Decl>) {
     }
 }
 
+/// Reserved runtime ABI surface (`__sloth_*`), embedded from
+/// `lib/prelude/abi.slt`. This is the single declaration site for the runtime
+/// externs the standard library calls; injected into every module (root and
+/// imports) so stdlib bodies resolve `__sloth_*` without declaring it itself.
+pub(crate) const ABI_PRELUDE: &str = include_str!("../../../../lib/prelude/abi.slt");
+
+pub(crate) fn inject_abi_prelude(decls: &mut Vec<Decl>) {
+    // already present? (root injects once; imports inject once each)
+    if decls.iter().any(|d| {
+        matches!(d.node, DeclNode::Func(ref f) if f.is_extern) && d.name == "__sloth_bytes_new"
+    }) {
+        return;
+    }
+    if let Ok(stdp) = sloth_frontend::parser::parse(ABI_PRELUDE) {
+        for d in stdp.decls.into_iter().rev() {
+            decls.insert(0, d);
+        }
+    }
+}
+
 /// Self-hosted Array/Map runtime, embedded from `lib/prelude/containers.slt`.
 /// Injected once into the root module; the container ABI symbols below are
 /// emitted under their raw names (no mangling) so the hardcoded
-/// `@sloth_arr_*`/`@sloth_map_*` call sites in the emitter resolve here.
+/// `@__sloth_arr_*`/`@__sloth_map_*` call sites in the emitter resolve here.
 pub(crate) const CONTAINER_PRELUDE: &str = include_str!("../../../../lib/prelude/containers.slt");
 
 /// container ABI symbols defined by the prelude (fixed, unmangled)
 pub(crate) const CONTAINER_SYMS: &[&str] = &[
-    "sloth_arr_new",
-    "sloth_arr_new_k",
-    "sloth_arr_len",
-    "sloth_arr_get",
-    "sloth_arr_set",
-    "sloth_arr_push",
-    "sloth_arr_pop",
-    "sloth_map_new",
-    "sloth_map_len",
-    "sloth_map_get",
-    "sloth_map_set",
-    "sloth_map_get_h",
-    "sloth_map_set_h",
-    "sloth_map_str_get",
-    "sloth_map_str_set",
-    "sloth_map_keys",
-    "sloth_map_values",
+    "__sloth_arr_new",
+    "__sloth_arr_new_k",
+    "__sloth_arr_len",
+    "__sloth_arr_get",
+    "__sloth_arr_set",
+    "__sloth_arr_push",
+    "__sloth_arr_pop",
+    "__sloth_map_new",
+    "__sloth_map_len",
+    "__sloth_map_get",
+    "__sloth_map_set",
+    "__sloth_map_get_h",
+    "__sloth_map_set_h",
+    "__sloth_map_str_get",
+    "__sloth_map_str_set",
+    "__sloth_map_keys",
+    "__sloth_map_values",
 ];
 
 /// Self-hosted range/value-box runtime, embedded from `lib/prelude/core.slt`.
 /// Same mechanism as the container prelude: the hardcoded
-/// `@sloth_range_*`/`@sloth_box_*` call sites resolve here.
+/// `@__sloth_range_*`/`@__sloth_box_*` call sites resolve here.
 pub(crate) const CORE_PRELUDE: &str = include_str!("../../../../lib/prelude/core.slt");
 
 /// core prelude ABI symbols defined by the prelude (fixed, unmangled)
 pub(crate) const CORE_SYMS: &[&str] = &[
-    "sloth_range_pack",
-    "sloth_range_lo",
-    "sloth_range_hi",
-    "sloth_box_new",
-    "sloth_box_get",
+    "__sloth_range_pack",
+    "__sloth_range_lo",
+    "__sloth_range_hi",
+    "__sloth_box_new",
+    "__sloth_box_get",
 ];
+
+/// stdlib `StrChars` lazy char iterator backing `s.chars()`: each `next()`
+/// yields the Unicode scalar value of one character as an `int` (fixed 4-byte
+/// code point). Injected once per emitter — into the root module, or into the
+/// first imported module when `chars()` appears there before the root is
+/// collected (imported bodies emit first).
+pub(crate) const STRCHARS_PRELUDE: &str = "extern func __sloth_str_clen(s: str): int;\n\
+     extern func __sloth_str_codepoint(s: str, i: int): int;\n\
+     class StrChars {\n\
+     var s: str;\n\
+     var i: int;\n\
+     var n: int;\n\
+     func __init__(s: str): unit {\n\
+     this.s = s;\n\
+     this.i = 0;\n\
+     this.n = __sloth_str_clen(s);\n\
+     return;\n\
+     }\n\
+     func iter(): StrChars {\n\
+     return this;\n\
+     }\n\
+     func next(): int? {\n\
+     if this.i >= this.n {\n\
+     return nil;\n\
+     }\n\
+     let c: int = __sloth_str_codepoint(this.s, this.i);\n\
+     this.i = this.i + 1;\n\
+     return c;\n\
+     }\n\
+     }\n";
 
 /// prelude `__dispose__` routines whose address is taken (`fn_addr`): emitted
 /// as `llvm.func` so `llvm.mlir.addressof` is legal
-pub(crate) const CONTAINER_DISPOSERS: &[&str] = &["sloth_arr_dispose", "sloth_map_dispose"];
+pub(crate) const CONTAINER_DISPOSERS: &[&str] = &["__sloth_arr_dispose", "__sloth_map_dispose"];
 
 impl ModEmitter {
     /// inject the container + core preludes into the root module (once) and
@@ -332,126 +382,149 @@ impl ModEmitter {
             }
         }
     }
+
+    /// inject the `StrChars` class (backing `s.chars()`) once per emitter.
+    /// `emit_module` covers the single-module case; `compile_multimod` calls
+    /// this for each imported module so bodies that use `chars()` emit before
+    /// the root is collected. Guarded on `self.classes` so the class is
+    /// registered exactly once in the shared emitter.
+    pub(crate) fn inject_strchars_prelude(&mut self, decls: &mut Vec<Decl>) {
+        if self.classes.contains_key("StrChars")
+            || decls
+                .iter()
+                .any(|d| d.name == "StrChars" && matches!(d.node, DeclNode::Class(_)))
+        {
+            return;
+        }
+        if let Ok(stdp) = sloth_frontend::parser::parse(STRCHARS_PRELUDE) {
+            for d in stdp.decls.into_iter().rev() {
+                decls.insert(0, d);
+            }
+        }
+    }
 }
 
 pub fn rt_decls() -> String {
     let mut s = String::new();
     // rc core (ARC migration patch B): counting primitives
-    s.push_str("  func.func private @sloth_rc_retain(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rc_release(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rc_live() -> i64\n");
-    s.push_str("  func.func private @sloth_rc_drops() -> i64\n");
-    s.push_str("  func.func private @sloth_weak_new(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_weak_upgrade(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_weak_release(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rc_retain(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rc_release(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rc_live() -> i64\n");
+    s.push_str("  func.func private @__sloth_rc_drops() -> i64\n");
+    s.push_str("  func.func private @__sloth_weak_new(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_weak_upgrade(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_weak_release(i64) -> i64\n");
     // patch 42: value-optional payload boxes + nil-aware print/interp faces.
-    // The box core (`sloth_box_new`/`sloth_box_get`) is self-hosted in
+    // The box core (`__sloth_box_new`/`__sloth_box_get`) is self-hosted in
     // `lib/prelude/core.slt` — no private declarations here.
-    s.push_str("  func.func private @sloth_rt_print_opt(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_push_opt(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_print_i64(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_print_f64(f64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_print_bool(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_print_str(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_print_opt(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_push_opt(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_print_i64(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_print_f64(f64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_print_bool(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_print_str(i64) -> i64\n");
     // `any` top type + runtime renderer
-    s.push_str("  func.func private @sloth_any_from(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_desc(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_word(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_kind(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_cls_id(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_ref(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_retain(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_is(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_type_id(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_any_type_name(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_write(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_rt_puts(i64) -> ()\n");
-    s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
-    // range ABI (`sloth_range_pack/lo/hi`) is self-hosted in
+    s.push_str("  func.func private @__sloth_any_from(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_desc(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_word(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_kind(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_cls_id(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_ref(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_retain(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_is(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_type_id(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_any_type_name(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_write(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_rt_puts(i64) -> ()\n");
+    s.push_str("  func.func private @__sloth_str_intern(i64, i64) -> i64\n");
+    // range ABI (`__sloth_range_pack/lo/hi`) is self-hosted in
     // `lib/prelude/core.slt` — no private declarations here.
-    s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_push(i64, i64, i64) -> i64\n");
     s.push_str(
-        "  func.func private @sloth_str_finish(i64) -> i64
-  func.func private @sloth_str_pushp(i64, i64) -> i64
-  func.func private @sloth_str_push_i(i64, i64) -> i64
-  func.func private @sloth_str_push_f(i64, f64) -> i64
-  func.func private @sloth_str_push_b(i64, i64) -> i64\n",
+        "  func.func private @__sloth_str_finish(i64) -> i64
+  func.func private @__sloth_str_pushp(i64, i64) -> i64
+  func.func private @__sloth_str_push_i(i64, i64) -> i64
+  func.func private @__sloth_str_push_f(i64, f64) -> i64
+  func.func private @__sloth_str_push_b(i64, i64) -> i64\n",
     );
-    s.push_str("  func.func private @sloth_str_len(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_clen(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_char(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_concat(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_str_eq(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_len(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_clen(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_char(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_codepoint(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_byte(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_slice(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_concat(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_str_eq(i64, i64) -> i64\n");
     // Array/Map ABI is defined by the self-hosted container prelude
     // (`lib/prelude/containers.slt`, injected in emit_module): no runtime
     // declarations here, so the prelude definitions are the single source.
     // scalar math faces (design D6): libm wrappers for sloth source calls
     s.push_str(
-        "  func.func private @sloth_rt_sqrt(f64) -> f64
-  func.func private @sloth_rt_exp(f64) -> f64
-  func.func private @sloth_rt_sin(f64) -> f64
-  func.func private @sloth_rt_cos(f64) -> f64
-  func.func private @sloth_rt_tan(f64) -> f64
-  func.func private @sloth_rt_pow(f64, f64) -> f64
-  func.func private @sloth_rt_floor(f64) -> f64\n",
+        "  func.func private @__sloth_rt_sqrt(f64) -> f64
+  func.func private @__sloth_rt_exp(f64) -> f64
+  func.func private @__sloth_rt_sin(f64) -> f64
+  func.func private @__sloth_rt_cos(f64) -> f64
+  func.func private @__sloth_rt_tan(f64) -> f64
+  func.func private @__sloth_rt_pow(f64, f64) -> f64
+  func.func private @__sloth_rt_floor(f64) -> f64\n",
     );
     // tensor extension TE-P1: descriptor + views + element access
     s.push_str(
-        "  func.func private @sloth_tensor_new_1(i64, i64) -> i64
-  func.func private @sloth_tensor_new_2(i64, i64, i64) -> i64
-  func.func private @sloth_tensor_new_3(i64, i64, i64, i64) -> i64
-  func.func private @sloth_tensor_view(i64, i64, i64, i64) -> i64
-  func.func private @sloth_tensor_get1(i64, i64) -> i64
-  func.func private @sloth_tensor_set1(i64, i64, i64) -> i64
-  func.func private @sloth_tensor_copy_into(i64, i64) -> i64
-  func.func private @sloth_tensor_copy_from_array(i64, i64) -> i64
-  func.func private @sloth_tensor_rank(i64) -> i64
-  func.func private @sloth_tensor_dim(i64, i64) -> i64
-  func.func private @sloth_tensor_stride(i64, i64) -> i64
-  func.func private @sloth_tensor_fill_zero(i64) -> i64
-  func.func private @sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>
-  func.func private @sloth_tensor_basis_i64(i64) -> memref<?xi64, strided<[?], offset: ?>>
-  func.func private @sloth_tensor_shape_eq(i64, i64) -> i64
-  func.func private @sloth_tensor_dim_eq(i64, i64, i64, i64) -> i64\n",
+        "  func.func private @__sloth_tensor_new_1(i64, i64) -> i64
+  func.func private @__sloth_tensor_new_2(i64, i64, i64) -> i64
+  func.func private @__sloth_tensor_new_3(i64, i64, i64, i64) -> i64
+  func.func private @__sloth_tensor_view(i64, i64, i64, i64) -> i64
+  func.func private @__sloth_tensor_get1(i64, i64) -> i64
+  func.func private @__sloth_tensor_set1(i64, i64, i64) -> i64
+  func.func private @__sloth_tensor_copy_into(i64, i64) -> i64
+  func.func private @__sloth_tensor_copy_from_array(i64, i64) -> i64
+  func.func private @__sloth_tensor_rank(i64) -> i64
+  func.func private @__sloth_tensor_dim(i64, i64) -> i64
+  func.func private @__sloth_tensor_stride(i64, i64) -> i64
+  func.func private @__sloth_tensor_fill_zero(i64) -> i64
+  func.func private @__sloth_tensor_basis_f64(i64) -> memref<?xf64, strided<[?], offset: ?>>
+  func.func private @__sloth_tensor_basis_i64(i64) -> memref<?xi64, strided<[?], offset: ?>>
+  func.func private @__sloth_tensor_shape_eq(i64, i64) -> i64
+  func.func private @__sloth_tensor_dim_eq(i64, i64, i64, i64) -> i64\n",
     );
     // coroutine extension CE-P1: stackful fiber entry points
     s.push_str(
-        "  func.func private @sloth_fiber_create(i64, i64, i64) -> i64
-  func.func private @sloth_fiber_create_with(i64, i64, i64, i64) -> i64
-  func.func private @sloth_fiber_resume(i64, i64, i64) -> i64
-  func.func private @sloth_fiber_transfer(i64, i64, i64) -> i64
-  func.func private @sloth_fiber_yield(i64) -> i64
-  func.func private @sloth_fiber_error(i64) -> i64
-  func.func private @sloth_fiber_check(i64) -> i64
-  func.func private @sloth_fiber_resumable(i64) -> i64
-  func.func private @sloth_fiber_cancel(i64) -> i64
-  func.func private @sloth_fiber_cancelled() -> i64
-  func.func private @sloth_fiber_cancel_abort() -> ()
-  func.func private @sloth_fiber_track(i64) -> i64
-  func.func private @sloth_fiber_untrack(i64) -> i64\n",
+        "  func.func private @__sloth_fiber_create(i64, i64, i64) -> i64
+  func.func private @__sloth_fiber_create_with(i64, i64, i64, i64) -> i64
+  func.func private @__sloth_fiber_resume(i64, i64, i64) -> i64
+  func.func private @__sloth_fiber_transfer(i64, i64, i64) -> i64
+  func.func private @__sloth_fiber_yield(i64) -> i64
+  func.func private @__sloth_fiber_error(i64) -> i64
+  func.func private @__sloth_fiber_check(i64) -> i64
+  func.func private @__sloth_fiber_resumable(i64) -> i64
+  func.func private @__sloth_fiber_cancel(i64) -> i64
+  func.func private @__sloth_fiber_cancelled() -> i64
+  func.func private @__sloth_fiber_cancel_abort() -> ()
+  func.func private @__sloth_fiber_track(i64) -> i64
+  func.func private @__sloth_fiber_untrack(i64) -> i64\n",
     );
     // multithreading extension TH-P1/P2: threads, channels, mutexes, atomics
     s.push_str(
-        "  func.func private @sloth_thread_spawn(i64, i64, i64, i64) -> i64
-  func.func private @sloth_thread_join(i64) -> i64
-  func.func private @sloth_thread_detach(i64) -> i64
-  func.func private @sloth_thread_current_id() -> i64
-  func.func private @sloth_thread_yield_now() -> i64
-  func.func private @sloth_chan_new(i64, i64) -> i64
-  func.func private @sloth_chan_send(i64, i64) -> i64
-  func.func private @sloth_chan_recv(i64, i64) -> i64
-  func.func private @sloth_chan_close(i64) -> i64
-  func.func private @sloth_mutex_new() -> i64
-  func.func private @sloth_mutex_lock(i64) -> i64
-  func.func private @sloth_mutex_unlock(i64) -> i64
-  func.func private @sloth_mutex_try_lock(i64) -> i64
-  func.func private @sloth_mutex_with(i64, i64) -> i64
-  func.func private @sloth_atomic_new(i64) -> i64
-  func.func private @sloth_atomic_load(i64) -> i64
-  func.func private @sloth_atomic_store(i64, i64) -> i64
-  func.func private @sloth_atomic_add(i64, i64) -> i64
-  func.func private @sloth_atomic_sub(i64, i64) -> i64
-  func.func private @sloth_atomic_cas(i64, i64, i64) -> i64\n",
+        "  func.func private @__sloth_thread_spawn(i64, i64, i64, i64) -> i64
+  func.func private @__sloth_thread_join(i64) -> i64
+  func.func private @__sloth_thread_detach(i64) -> i64
+  func.func private @__sloth_thread_current_id() -> i64
+  func.func private @__sloth_thread_yield_now() -> i64
+  func.func private @__sloth_chan_new(i64, i64) -> i64
+  func.func private @__sloth_chan_send(i64, i64) -> i64
+  func.func private @__sloth_chan_recv(i64, i64) -> i64
+  func.func private @__sloth_chan_close(i64) -> i64
+  func.func private @__sloth_mutex_new() -> i64
+  func.func private @__sloth_mutex_lock(i64) -> i64
+  func.func private @__sloth_mutex_unlock(i64) -> i64
+  func.func private @__sloth_mutex_try_lock(i64) -> i64
+  func.func private @__sloth_mutex_with(i64, i64) -> i64
+  func.func private @__sloth_atomic_new(i64) -> i64
+  func.func private @__sloth_atomic_load(i64) -> i64
+  func.func private @__sloth_atomic_store(i64, i64) -> i64
+  func.func private @__sloth_atomic_add(i64, i64) -> i64
+  func.func private @__sloth_atomic_sub(i64, i64) -> i64
+  func.func private @__sloth_atomic_cas(i64, i64, i64) -> i64\n",
     );
     s
 }
@@ -542,7 +615,7 @@ impl ModEmitter {
         ));
         let r = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_type_name_or({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_type_name_or({}, {}, {}) : (i64, i64, i64) -> i64",
             r, v, p, lc
         ));
         let t = self.r.mk(Ty::Str);
@@ -553,6 +626,10 @@ impl ModEmitter {
 
 impl ModEmitter {
     pub fn emit_module(&mut self, prog: &Program) -> Vec<Diag> {
+        // reserved `__sloth_*` gate: check the raw module before any prelude
+        // (which legitimately declares/uses reserved symbols) is injected
+        let allowed = has_sloth_import(&prog.imports);
+        self.check_reserved_module(prog, allowed);
         // stdlib Result<T,E> prelude (only injected once)
         let mut decls2: Vec<Decl> = prog.decls.clone();
         if !decls2
@@ -560,7 +637,7 @@ impl ModEmitter {
             .any(|d| d.name == "Result" && matches!(d.node, DeclNode::Class(_)))
         {
             match sloth_frontend::parser::parse(
-                "extern func sloth_panic_unwrap(): int;\n\
+                "extern func __sloth_panic_unwrap(): int;\n\
                  class Entry<T, E> {\n\
                  var key: T;\n\
                  var val: E;\n\
@@ -577,7 +654,7 @@ impl ModEmitter {
                  if flag {\n\
                  return this.v;\n\
                  }\n\
-                 { sloth_panic_unwrap(); }\n\
+                 { __sloth_panic_unwrap(); }\n\
                  return this.v;\n\
                  }\n\
                  func err(): E {\n\
@@ -595,9 +672,12 @@ impl ModEmitter {
                 }
             }
         }
+        // stdlib StrChars lazy char iterator for `s.chars()` (injected once)
+        self.inject_strchars_prelude(&mut decls2);
         let stmts2 = prog.stmts.clone();
         let imps2 = prog.imports.clone();
         inject_print_prelude(&mut decls2);
+        inject_abi_prelude(&mut decls2);
         self.inject_container_prelude(&mut decls2);
         let prog = &mut Program {
             decls: decls2,
@@ -834,27 +914,27 @@ impl ModEmitter {
 
 pub fn obj_rt_decls() -> String {
     let mut s = String::new();
-    s.push_str("  func.func private @sloth_obj_new(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_closure_new(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_field(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_set_field(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_cls_info(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_cls_name(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_type_name(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_type_name_or(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_cls_id(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_vt_new(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_vt_set(i64, i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_vt_get(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_set_vtable(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_obj_vtable(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_panic_noimpl(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_panic_divzero() -> i64\n");
-    s.push_str("  func.func private @sloth_builtin_info(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_dyn_unbox(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_dyn_to_str(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_dyn_hash(i64, i64) -> i64\n");
-    s.push_str("  func.func private @sloth_dyn_binop(i64, i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_new(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_closure_new(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_field(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_set_field(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_cls_info(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_cls_name(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_type_name(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_type_name_or(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_cls_id(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_vt_new(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_vt_set(i64, i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_vt_get(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_set_vtable(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_obj_vtable(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_panic_noimpl(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_panic_divzero() -> i64\n");
+    s.push_str("  func.func private @__sloth_builtin_info(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_dyn_unbox(i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_dyn_to_str(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_dyn_hash(i64, i64) -> i64\n");
+    s.push_str("  func.func private @__sloth_dyn_binop(i64, i64, i64, i64) -> i64\n");
     s
 }
 
@@ -867,6 +947,211 @@ impl ModEmitter {
                 pos,
                 format!("`{}` is private to its module (not `pub`)", key),
             );
+        }
+    }
+}
+
+/// Reserved namespace prefix for the runtime/prelude ABI surface. Only the
+/// compiler-injected prelude may declare these symbols; only modules carrying
+/// the `import "__sloth";` pseudo-import may call them.
+pub(crate) const RESERVED_PREFIX: &str = "__sloth_";
+
+/// Pseudo-import that grants a module the right to call `__sloth_*` symbols.
+pub(crate) const SLOTH_IMPORT: &str = "__sloth";
+
+pub(crate) fn has_sloth_import(imports: &[Import]) -> bool {
+    imports.iter().any(|i| i.path == SLOTH_IMPORT)
+}
+
+impl ModEmitter {
+    /// reserved-symbol gate: `__sloth_*` declarations are prelude-only and
+    /// `__sloth_*` uses require the `import "__sloth";` token. Must run on the
+    /// raw parsed module (before the compiler injects prelude decls that
+    /// legitimately use reserved symbols).
+    pub(crate) fn check_reserved_module(&mut self, prog: &Program, allowed: bool) {
+        for d in &prog.decls {
+            self.check_reserved_decl(d, allowed);
+        }
+        for s in &prog.stmts {
+            self.check_reserved_stmt(s, allowed);
+        }
+    }
+
+    fn check_reserved_decl(&mut self, d: &Decl, allowed: bool) {
+        self.check_reserved_name(&d.name, &d.pos);
+        match &d.node {
+            DeclNode::Func(f) => self.check_reserved_func(f, &d.pos, allowed),
+            DeclNode::Class(c) => {
+                for fd in &c.fields {
+                    self.check_reserved_name(&fd.name, &d.pos);
+                    if let Some(init) = &fd.init {
+                        self.check_reserved_expr(init, allowed);
+                    }
+                }
+                for m in &c.methods {
+                    self.check_reserved_name(&m.name, &d.pos);
+                    self.check_reserved_func(&m.fd, &d.pos, allowed);
+                }
+            }
+            DeclNode::Trait(t) => {
+                for m in &t.methods {
+                    self.check_reserved_name(&m.name, &d.pos);
+                    for p in &m.params {
+                        self.check_reserved_name(&p.name, &d.pos);
+                    }
+                    if let Some(body) = &m.body {
+                        self.check_reserved_stmt(body, allowed);
+                    }
+                }
+            }
+            DeclNode::Var { init, .. } => self.check_reserved_expr(init, allowed),
+            DeclNode::ExternType => {}
+        }
+    }
+
+    fn check_reserved_func(&mut self, f: &FuncDef, pos: &Pos, allowed: bool) {
+        for p in &f.params {
+            self.check_reserved_name(&p.name, pos);
+        }
+        if let Some(v) = &f.variadic {
+            self.check_reserved_name(&v.name, pos);
+        }
+        self.check_reserved_stmt(&f.body, allowed);
+    }
+
+    /// a declaration site (function/field/param/local/binding) of a reserved
+    /// name is always rejected — the token only enables calls
+    fn check_reserved_name(&mut self, name: &str, pos: &Pos) {
+        if name.starts_with(RESERVED_PREFIX) {
+            self.err(
+                pos,
+                format!(
+                    "reserved symbol `{}` may only be declared in the prelude",
+                    name
+                ),
+            );
+        }
+    }
+
+    fn check_reserved_use(&mut self, name: &str, pos: &Pos, allowed: bool) {
+        if !allowed && name.starts_with(RESERVED_PREFIX) {
+            self.err(
+                pos,
+                format!(
+                    "reserved symbol `{}` may only be called from a module that imports \"__sloth\"",
+                    name
+                ),
+            );
+        }
+    }
+
+    fn check_reserved_stmt(&mut self, s: &Stmt, allowed: bool) {
+        match &s.node {
+            StmtNode::Expr(e) => self.check_reserved_expr(e, allowed),
+            StmtNode::Let { name, init, .. } => {
+                self.check_reserved_name(name, &s.pos);
+                self.check_reserved_expr(init, allowed);
+            }
+            StmtNode::Assign { target, value } | StmtNode::AssignOp { target, value, .. } => {
+                self.check_reserved_expr(value, allowed);
+                for seg in target {
+                    match seg {
+                        PathSeg::Name(n) => self.check_reserved_use(n, &s.pos, allowed),
+                        PathSeg::Index(e) => self.check_reserved_expr(e, allowed),
+                    }
+                }
+            }
+            StmtNode::While { cond, body } => {
+                self.check_reserved_expr(cond, allowed);
+                self.check_reserved_stmt(body, allowed);
+            }
+            StmtNode::If { cond, then_, else_ } => {
+                self.check_reserved_expr(cond, allowed);
+                self.check_reserved_stmt(then_, allowed);
+                if let Some(els) = else_ {
+                    self.check_reserved_stmt(els, allowed);
+                }
+            }
+            StmtNode::For { var, iter, body } => {
+                self.check_reserved_name(var, &s.pos);
+                self.check_reserved_expr(iter, allowed);
+                self.check_reserved_stmt(body, allowed);
+            }
+            StmtNode::Return(Some(e)) => self.check_reserved_expr(e, allowed),
+            StmtNode::Break | StmtNode::Continue | StmtNode::Return(None) => {}
+            StmtNode::Block(ss) => {
+                for st in ss {
+                    self.check_reserved_stmt(st, allowed);
+                }
+            }
+        }
+    }
+
+    fn check_reserved_expr(&mut self, e: &Expr, allowed: bool) {
+        match &e.node {
+            ExprNode::Ident(n) => self.check_reserved_use(n, &e.pos, allowed),
+            ExprNode::Call { callee, args } | ExprNode::GenCall { callee, args, .. } => {
+                self.check_reserved_expr(callee, allowed);
+                for a in args {
+                    self.check_reserved_expr(a, allowed);
+                }
+            }
+            ExprNode::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.check_reserved_expr(k, allowed);
+                    self.check_reserved_expr(v, allowed);
+                }
+            }
+            ExprNode::List(xs) => {
+                for x in xs {
+                    self.check_reserved_expr(x, allowed);
+                }
+            }
+            ExprNode::Range { low, high, .. } => {
+                self.check_reserved_expr(low, allowed);
+                self.check_reserved_expr(high, allowed);
+            }
+            ExprNode::Pipe { lhs, rhs } | ExprNode::Elvis { lhs, rhs } => {
+                self.check_reserved_expr(lhs, allowed);
+                self.check_reserved_expr(rhs, allowed);
+            }
+            ExprNode::Is { lhs, rhs, .. } => {
+                self.check_reserved_expr(lhs, allowed);
+                self.check_reserved_expr(rhs, allowed);
+            }
+            ExprNode::Index { obj, idx } => {
+                self.check_reserved_expr(obj, allowed);
+                self.check_reserved_expr(idx, allowed);
+            }
+            ExprNode::Field { obj, name } => {
+                self.check_reserved_expr(obj, allowed);
+                self.check_reserved_use(name, &e.pos, allowed);
+            }
+            ExprNode::Arith { lhs, rhs, .. } | ExprNode::Bin { lhs, rhs, .. } => {
+                self.check_reserved_expr(lhs, allowed);
+                self.check_reserved_expr(rhs, allowed);
+            }
+            ExprNode::Un { expr, .. } => self.check_reserved_expr(expr, allowed),
+            ExprNode::Str(sp) => {
+                for p in &sp.parts {
+                    if let StrPart::ExprAst(inner) = p {
+                        self.check_reserved_expr(inner, allowed);
+                    }
+                }
+            }
+            ExprNode::Lambda(l) => {
+                for p in &l.params {
+                    self.check_reserved_name(&p.name, &e.pos);
+                }
+                self.check_reserved_stmt(&l.body, allowed);
+            }
+            ExprNode::Int(_)
+            | ExprNode::UInt(_)
+            | ExprNode::Float(_)
+            | ExprNode::Bool(_)
+            | ExprNode::Nil
+            | ExprNode::This
+            | ExprNode::Super => {}
         }
     }
 }

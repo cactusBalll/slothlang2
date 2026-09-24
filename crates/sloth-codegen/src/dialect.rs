@@ -22,7 +22,7 @@ pub(crate) fn lower_parsed(op: &Op) -> Result<(), String> {
     let r = unsafe { slothLowerModule(module) };
     if r.value == 1 {
         // second gate: printed text must contain no `sloth.` op prefix
-        // (symbol names like @sloth_rc_retain use `_`, not `.`)
+        // (symbol names like @__sloth_rc_retain use `_`, not `.`)
         let printed = op.print();
         if printed.contains("sloth.") {
             return Err("sloth dialect leak after lowering".to_string());

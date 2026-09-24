@@ -257,7 +257,7 @@ impl ModEmitter {
         // object header word 1 -> class vtable; slot -> raw fn pointer
         let vt = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_vtable({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_obj_vtable({}) : (i64) -> i64",
             vt, recv
         ));
         let slotc = fw.v();
@@ -268,7 +268,7 @@ impl ModEmitter {
         ));
         let fp = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_vt_get({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_vt_get({}, {}) : (i64, i64) -> i64",
             fp, vt, slotc
         ));
         let zero = fw.v();
@@ -334,7 +334,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", pv));
         let pz = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_panic_noimpl({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_panic_noimpl({}) : (i64) -> i64",
             pz, pv
         ));
         if let Some(slot2) = &resslot {
@@ -436,10 +436,10 @@ impl ModEmitter {
         for i in refs {
             body.push_str(&format!("    %ci{i} = arith.constant {i} : i64\n"));
             body.push_str(&format!(
-                "    %cf{i} = func.call @sloth_obj_field(%arg0, %ci{i}) : (i64, i64) -> i64\n"
+                "    %cf{i} = func.call @__sloth_obj_field(%arg0, %ci{i}) : (i64, i64) -> i64\n"
             ));
             body.push_str(&format!(
-                "    func.call @sloth_rc_release(%cf{i}) : (i64) -> i64\n"
+                "    func.call @__sloth_rc_release(%cf{i}) : (i64) -> i64\n"
             ));
         }
         self.out.push_str(&format!(
@@ -553,7 +553,7 @@ impl ModEmitter {
         _sigargs: &Vec<String>,
         pos: &Pos,
     ) -> (String, TyId) {
-        // sloth_obj_new takes the FIELD count (it adds the two metadata
+        // __sloth_obj_new takes the FIELD count (it adds the two metadata
         // words itself for the allocation); words_for_cls includes them
         let nf = words_for_cls(self, clsname) - 2;
         if !self.classes.contains_key(clsname) {
@@ -571,7 +571,7 @@ impl ModEmitter {
         ));
         let cid = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_cls_info({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_cls_info({}, {}) : (i64, i64) -> i64",
             cid, z, ids
         ));
         // register the concrete class display name for the `type_name` builtin
@@ -589,7 +589,7 @@ impl ModEmitter {
                 enc_i_lit(disp.len() as i64)
             ));
             fw.op(&format!(
-                "    func.call @sloth_cls_name({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @__sloth_cls_name({}, {}, {}) : (i64, i64, i64) -> i64",
                 cid, p, lc
             ));
         }
@@ -621,7 +621,7 @@ impl ModEmitter {
         ));
         let r2 = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_new({}, {}, {}) : (i64, i64, i64) -> i64",
             r2, cid, nfw, cascade
         ));
         // rc patch B: fresh instance = producer temp
@@ -925,7 +925,7 @@ impl ModEmitter {
             vt, builder
         ));
         fw.op(&format!(
-            "    func.call @sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
+            "    func.call @__sloth_obj_set_vtable({}, {}) : (i64, i64) -> i64",
             obj, vt
         ));
     }
@@ -979,7 +979,7 @@ impl ModEmitter {
         ));
         let vt = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_vt_new({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_vt_new({}) : (i64) -> i64",
             vt, ncap
         ));
         let mut slots: Vec<(usize, String, String)> = self
@@ -1017,7 +1017,7 @@ impl ModEmitter {
             ));
             // raw fn-pointer word in the slot
             fw.op(&format!(
-                "    func.call @sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @__sloth_vt_set({}, {}, {}) : (i64, i64, i64) -> i64",
                 vt, slotc, fp
             ));
         }
@@ -1095,7 +1095,7 @@ impl ModEmitter {
         // object header word 1 -> class vtable; slot -> fn ptr
         let vt = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_vtable({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_obj_vtable({}) : (i64) -> i64",
             vt, recv
         ));
         let slotc = fw.v();
@@ -1106,7 +1106,7 @@ impl ModEmitter {
         ));
         let fp = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_vt_get({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_vt_get({}, {}) : (i64, i64) -> i64",
             fp, vt, slotc
         ));
         let zero = fw.v();
@@ -1172,7 +1172,7 @@ impl ModEmitter {
         fw.op(&format!("    {} = arith.constant 0 : i64", pv));
         let pz = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_panic_noimpl({}) : (i64) -> i64",
+            "    {} = func.call @__sloth_panic_noimpl({}) : (i64) -> i64",
             pz, pv
         ));
         if let Some((slot2, _fl)) = &resslot {
@@ -1249,20 +1249,20 @@ impl ModEmitter {
         // store raw
         if !self.is_ref(ft) {
             fw.op(&format!(
-                "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+                "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
                 obj, idx, v
             ));
             return;
         }
         let old = fw.v();
         fw.op(&format!(
-            "    {} = func.call @sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            "    {} = func.call @__sloth_obj_field({}, {}) : (i64, i64) -> i64",
             old, obj, idx
         ));
         self.emit_release(fw, &old);
         let rv = self.emit_retain(fw, &v);
         fw.op(&format!(
-            "    func.call @sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+            "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
             obj, idx, rv
         ));
     }

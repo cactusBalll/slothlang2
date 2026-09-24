@@ -8,154 +8,116 @@
 // Ownership: `Bytes` / `EvBuf` / `EvLoop` are opaque `extern type` handles, so
 // codegen never emits ARC retain/release on them. Call the matching `*_free`
 // when done (a missed free leaks, matching the runtime discipline).
+//
+// The runtime `__sloth_*` externs are declared by the injected prelude
+// (`lib/prelude/abi.slt`); the pseudo-import below grants this stdlib module
+// the right to call those reserved symbols.
 
-extern type Bytes;
-extern type EvBuf;
-extern type EvLoop;
-
-// ---------------- byte buffers ----------------
-
-extern func sloth_bytes_new(cap: int): Bytes;
-extern func sloth_bytes_free(b: Bytes): int;
-extern func sloth_bytes_len(b: Bytes): int;
-extern func sloth_bytes_cap(b: Bytes): int;
-extern func sloth_bytes_ensure(b: Bytes, cap: int): int;
-extern func sloth_bytes_set_len(b: Bytes, n: int): int;
-extern func sloth_bytes_get(b: Bytes, i: int): int;
-extern func sloth_bytes_set(b: Bytes, i: int, v: int): int;
-extern func sloth_bytes_fill(b: Bytes, off: int, v: int, n: int): int;
-extern func sloth_bytes_append(b: Bytes, v: int): int;
-extern func sloth_bytes_copy_from_str(b: Bytes, off: int, s: str): int;
-extern func sloth_bytes_to_str(b: Bytes, off: int, len: int): str;
-extern func sloth_bytes_as_str(b: Bytes): str;
+import "__sloth";
 
 pub func bytes_new(cap: int): Bytes {
-    return sloth_bytes_new(cap);
+    return __sloth_bytes_new(cap);
 }
 
 pub func bytes_free(b: Bytes): unit {
-    sloth_bytes_free(b);
+    __sloth_bytes_free(b);
 }
 
 pub func bytes_len(b: Bytes): int {
-    return sloth_bytes_len(b);
+    return __sloth_bytes_len(b);
 }
 
 pub func bytes_cap(b: Bytes): int {
-    return sloth_bytes_cap(b);
+    return __sloth_bytes_cap(b);
 }
 
 pub func bytes_ensure(b: Bytes, cap: int): int {
-    return sloth_bytes_ensure(b, cap);
+    return __sloth_bytes_ensure(b, cap);
 }
 
 pub func bytes_set_len(b: Bytes, n: int): unit {
-    sloth_bytes_set_len(b, n);
+    __sloth_bytes_set_len(b, n);
 }
 
 pub func bytes_get(b: Bytes, i: int): int {
-    return sloth_bytes_get(b, i);
+    return __sloth_bytes_get(b, i);
 }
 
 pub func bytes_set(b: Bytes, i: int, v: int): unit {
-    sloth_bytes_set(b, i, v);
+    __sloth_bytes_set(b, i, v);
 }
 
 pub func bytes_fill(b: Bytes, off: int, v: int, n: int): unit {
-    sloth_bytes_fill(b, off, v, n);
+    __sloth_bytes_fill(b, off, v, n);
 }
 
 pub func bytes_append(b: Bytes, v: int): int {
-    return sloth_bytes_append(b, v);
+    return __sloth_bytes_append(b, v);
 }
 
 pub func bytes_copy_from_str(b: Bytes, off: int, s: str): int {
-    return sloth_bytes_copy_from_str(b, off, s);
+    return __sloth_bytes_copy_from_str(b, off, s);
 }
 
 pub func bytes_to_str(b: Bytes, off: int, len: int): str {
-    return sloth_bytes_to_str(b, off, len);
+    return __sloth_bytes_to_str(b, off, len);
 }
 
 pub func bytes_as_str(b: Bytes): str {
-    return sloth_bytes_as_str(b);
+    return __sloth_bytes_as_str(b);
 }
 
 // ---------------- clock + errno ----------------
 
-extern func sloth_now_ms(): int;
-extern func sloth_sleep_ms(ms: int): int;
-extern func sloth_io_errno(): int;
-extern func sloth_io_would_block(r: int): int;
-extern func sloth_io_conn_closed(r: int): int;
-
 /// milliseconds from a monotonic clock (only differences are meaningful)
 pub func now_ms(): int {
-    return sloth_now_ms();
+    return __sloth_now_ms();
 }
 
 pub func sleep_ms(ms: int): unit {
-    sloth_sleep_ms(ms);
+    __sloth_sleep_ms(ms);
 }
 
 /// last raw errno (positive)
 pub func errno(): int {
-    return sloth_io_errno();
+    return __sloth_io_errno();
 }
 
 /// did a `-errno` syscall result mean "try again later"?
 pub func would_block(r: int): bool {
-    return sloth_io_would_block(r) != 0;
+    return __sloth_io_would_block(r) != 0;
 }
 
 /// did a `-errno` syscall result mean the peer went away?
 pub func conn_closed(r: int): bool {
-    return sloth_io_conn_closed(r) != 0;
+    return __sloth_io_conn_closed(r) != 0;
 }
 
 // ---------------- event backend ----------------
-
-extern func sloth_ev_available(kind: int): int;
-extern func sloth_ev_backend_name(kind: int): str;
-extern func sloth_ev_new(kind: int): EvLoop;
-extern func sloth_ev_free(ev: EvLoop): int;
-extern func sloth_ev_wakeup(ev: EvLoop): int;
-extern func sloth_ev_ctl(ev: EvLoop, op: int, fd: int, events: int, token: int): int;
-extern func sloth_ev_poll(ev: EvLoop, timeout_ms: int, out: EvBuf): int;
-extern func sloth_evbuf_new(cap: int): EvBuf;
-extern func sloth_evbuf_free(b: EvBuf): int;
-extern func sloth_evbuf_count(b: EvBuf): int;
-extern func sloth_evbuf_token(b: EvBuf, i: int): int;
-extern func sloth_evbuf_events(b: EvBuf, i: int): int;
 
 // ---------------- async completion (cross-thread) ----------------
 // A worker OS thread signals an eventfd when a task finishes; the event loop
 // watches the fd and wakes the waiting fiber. Safe to signal before the watch
 // is registered (the counter keeps the fd readable until drained).
 
-extern func sloth_async_new(): int;
-extern func sloth_async_signal(fd: int): int;
-extern func sloth_async_drain(fd: int): int;
-extern func sloth_async_free(fd: int): int;
-
 /// create a completion fd (eventfd), or <0 on error
 pub func async_new(): int {
-    return sloth_async_new();
+    return __sloth_async_new();
 }
 
 /// signal a completion fd from any thread
 pub func async_signal(fd: int): int {
-    return sloth_async_signal(fd);
+    return __sloth_async_signal(fd);
 }
 
 /// reset a completion fd (nonblocking)
 pub func async_drain(fd: int): int {
-    return sloth_async_drain(fd);
+    return __sloth_async_drain(fd);
 }
 
 /// close a completion fd
 pub func async_free(fd: int): int {
-    return sloth_async_free(fd);
+    return __sloth_async_free(fd);
 }
 
 // backend kinds
@@ -202,73 +164,67 @@ pub func ev_hup(): int {
 
 /// is `kind` compiled in and usable on this host?
 pub func backend_available(kind: int): bool {
-    return sloth_ev_available(kind) != 0;
+    return __sloth_ev_available(kind) != 0;
 }
 
 pub func backend_name(kind: int): str {
-    return sloth_ev_backend_name(kind);
+    return __sloth_ev_backend_name(kind);
 }
 
 /// open a backend loop (0 on failure)
 pub func ev_new(kind: int): EvLoop {
-    return sloth_ev_new(kind);
+    return __sloth_ev_new(kind);
 }
 
 pub func ev_free(ev: EvLoop): unit {
-    sloth_ev_free(ev);
+    __sloth_ev_free(ev);
 }
 
 pub func ev_wakeup(ev: EvLoop): unit {
-    sloth_ev_wakeup(ev);
+    __sloth_ev_wakeup(ev);
 }
 
 pub func ev_ctl(ev: EvLoop, op: int, fd: int, events: int, token: int): int {
-    return sloth_ev_ctl(ev, op, fd, events, token);
+    return __sloth_ev_ctl(ev, op, fd, events, token);
 }
 
 pub func ev_poll(ev: EvLoop, timeout_ms: int, out: EvBuf): int {
-    return sloth_ev_poll(ev, timeout_ms, out);
+    return __sloth_ev_poll(ev, timeout_ms, out);
 }
 
 pub func evbuf_new(cap: int): EvBuf {
-    return sloth_evbuf_new(cap);
+    return __sloth_evbuf_new(cap);
 }
 
 pub func evbuf_free(b: EvBuf): unit {
-    sloth_evbuf_free(b);
+    __sloth_evbuf_free(b);
 }
 
 pub func evbuf_count(b: EvBuf): int {
-    return sloth_evbuf_count(b);
+    return __sloth_evbuf_count(b);
 }
 
 pub func evbuf_token(b: EvBuf, i: int): int {
-    return sloth_evbuf_token(b, i);
+    return __sloth_evbuf_token(b, i);
 }
 
 pub func evbuf_events(b: EvBuf, i: int): int {
-    return sloth_evbuf_events(b, i);
+    return __sloth_evbuf_events(b, i);
 }
 
 // raw string helpers shared with the HTTP parser
-extern func sloth_str_find(hay: str, needle: str, from: int): int;
-extern func sloth_str_starts_with(s: str, prefix: str): int;
-extern func sloth_str_slice(s: str, start: int, len: int): str;
-extern func sloth_str_byte(s: str, i: int): int;
-extern func sloth_str_of_byte(v: int): str;
-extern func sloth_str_cmp(a: str, b: str): int;
 
 /// first index of `needle` in `hay` at/after `from`, or -1
 pub func str_find(hay: str, needle: str, from: int): int {
-    return sloth_str_find(hay, needle, from);
+    return __sloth_str_find(hay, needle, from);
 }
 
 pub func str_starts_with(s: str, prefix: str): bool {
-    return sloth_str_starts_with(s, prefix) != 0;
+    return __sloth_str_starts_with(s, prefix) != 0;
 }
 
 pub func str_slice(s: str, start: int, len: int): str {
-    return sloth_str_slice(s, start, len);
+    return __sloth_str_slice(s, start, len);
 }
 
 pub func str_len(s: str): int {
@@ -276,13 +232,13 @@ pub func str_len(s: str): int {
 }
 
 pub func str_byte(s: str, i: int): int {
-    return sloth_str_byte(s, i);
+    return __sloth_str_byte(s, i);
 }
 
 pub func str_of_byte(v: int): str {
-    return sloth_str_of_byte(v);
+    return __sloth_str_of_byte(v);
 }
 
 pub func str_cmp(a: str, b: str): int {
-    return sloth_str_cmp(a, b);
+    return __sloth_str_cmp(a, b);
 }

@@ -6,7 +6,7 @@
 //! and never confuses with nil. Callers encode/decode at the codec boundary,
 //! so a box is a plain word cell.
 //!
-//! The C-ABI faces `sloth_box_new`/`sloth_box_get` are self-hosted in
+//! The C-ABI faces `__sloth_box_new`/`__sloth_box_get` are self-hosted in
 //! `lib/prelude/core.slt`; the functions below are the Rust-internal
 //! equivalents (fiber/channel construction, `any` rendering) over the same
 //! frozen `[payload]` layout — keep both sides in sync.

@@ -25,9 +25,9 @@ pub(crate) const OBJ_FIELD_OFFSET: isize = 2;
 /// but is unused: hierarchy is a compile-time concern and the runtime dispatch
 /// key is `cls_id_w`.
 #[no_mangle]
-pub extern "C" fn sloth_cls_info(_super_w: i64, cls_id_w: i64) -> i64 {
+pub extern "C" fn __sloth_cls_info(_super_w: i64, cls_id_w: i64) -> i64 {
     unsafe {
-        let o = crate::alloc::sloth_rt_alloc(std::mem::size_of::<ObjInfo>()) as *mut ObjInfo;
+        let o = crate::alloc::__sloth_rt_alloc(std::mem::size_of::<ObjInfo>()) as *mut ObjInfo;
         (*o).cls_id = cls_id_w;
         (*o).name = std::ptr::null();
         (*o).name_len = 0;
@@ -40,7 +40,7 @@ pub extern "C" fn sloth_cls_info(_super_w: i64, cls_id_w: i64) -> i64 {
 /// untracked). Called by codegen at instance construction and by the builtin
 /// value-box builder; the bytes live in a codegen-emitted global.
 #[no_mangle]
-pub extern "C" fn sloth_cls_name(info_w: i64, ptr_w: i64, len_w: i64) -> i64 {
+pub extern "C" fn __sloth_cls_name(info_w: i64, ptr_w: i64, len_w: i64) -> i64 {
     if info_w != 0 {
         unsafe {
             let o = w_unref(info_w) as *mut ObjInfo;
@@ -57,7 +57,7 @@ pub extern "C" fn sloth_cls_name(info_w: i64, ptr_w: i64, len_w: i64) -> i64 {
 /// none); it is installed as the header's `sdtor` and releases exactly the
 /// reference fields, after which the chunk is freed.
 #[no_mangle]
-pub extern "C" fn sloth_obj_new(info_w: i64, n_fields_w: i64, cascade_w: i64) -> i64 {
+pub extern "C" fn __sloth_obj_new(info_w: i64, n_fields_w: i64, cascade_w: i64) -> i64 {
     unsafe {
         let n_fields = n_fields_w.max(0);
         let info = w_unref(info_w);
@@ -76,7 +76,7 @@ pub extern "C" fn sloth_obj_new(info_w: i64, n_fields_w: i64, cascade_w: i64) ->
 /// (not an rc handle), so closure boxes get a dedicated dtor that releases
 /// only the environment field.
 #[no_mangle]
-pub extern "C" fn sloth_closure_new(fnptr_w: i64, env_w: i64) -> i64 {
+pub extern "C" fn __sloth_closure_new(fnptr_w: i64, env_w: i64) -> i64 {
     unsafe {
         let o = rc_addr((2 + 2) * 8, Some(closure_dtor)) as *mut i64;
         *o = 0;
@@ -93,13 +93,13 @@ fn closure_dtor(p: usize, _aux: u64) {
         let o = p as *mut i64;
         let env = *o.offset(OBJ_FIELD_OFFSET + 1);
         if env != 0 {
-            crate::rc::sloth_rc_release(env);
+            crate::rc::__sloth_rc_release(env);
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_obj_field(obj_w: i64, idx_w: i64) -> i64 {
+pub extern "C" fn __sloth_obj_field(obj_w: i64, idx_w: i64) -> i64 {
     unsafe {
         let o = w_unref(obj_w) as *mut i64;
         *o.offset(idx_w as isize + OBJ_FIELD_OFFSET)
@@ -107,7 +107,7 @@ pub extern "C" fn sloth_obj_field(obj_w: i64, idx_w: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn sloth_obj_set_field(obj_w: i64, idx_w: i64, val: i64) -> i64 {
+pub extern "C" fn __sloth_obj_set_field(obj_w: i64, idx_w: i64, val: i64) -> i64 {
     unsafe {
         let o = w_unref(obj_w) as *mut i64;
         *o.offset(idx_w as isize + OBJ_FIELD_OFFSET) = val;
@@ -120,7 +120,7 @@ pub extern "C" fn sloth_obj_set_field(obj_w: i64, idx_w: i64, val: i64) -> i64 {
 /// +1). Used by `type_name` on non-class reference types and reference
 /// optionals, whose concrete type is known to the compiler.
 #[no_mangle]
-pub extern "C" fn sloth_type_name_or(w: i64, ptr_w: i64, len_w: i64) -> i64 {
+pub extern "C" fn __sloth_type_name_or(w: i64, ptr_w: i64, len_w: i64) -> i64 {
     if w == 0 {
         crate::strings::intern_bytes(b"nil".as_ptr() as usize, 3)
     } else {
@@ -130,7 +130,7 @@ pub extern "C" fn sloth_type_name_or(w: i64, ptr_w: i64, len_w: i64) -> i64 {
 
 /// runtime class id of an object (raw from the type header)
 #[no_mangle]
-pub extern "C" fn sloth_obj_cls_id(obj_w: i64) -> i64 {
+pub extern "C" fn __sloth_obj_cls_id(obj_w: i64) -> i64 {
     if obj_w == 0 {
         return 0;
     }
@@ -147,7 +147,7 @@ pub extern "C" fn sloth_obj_cls_id(obj_w: i64) -> i64 {
 /// runtime display name of an object's concrete class as a fresh owned `str`
 /// (+1). nil → `"nil"`; missing metadata/name → empty string.
 #[no_mangle]
-pub extern "C" fn sloth_obj_type_name(obj_w: i64) -> i64 {
+pub extern "C" fn __sloth_obj_type_name(obj_w: i64) -> i64 {
     unsafe {
         if obj_w == 0 {
             return crate::strings::intern_bytes(b"nil".as_ptr() as usize, 3);

@@ -3,7 +3,7 @@
 //! only differences are meaningful.
 
 #[no_mangle]
-pub extern "C" fn sloth_now_ms() -> i64 {
+pub extern "C" fn __sloth_now_ms() -> i64 {
     unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
@@ -13,7 +13,7 @@ pub extern "C" fn sloth_now_ms() -> i64 {
 
 /// sleep `ms` milliseconds (interruptible by signals)
 #[no_mangle]
-pub extern "C" fn sloth_sleep_ms(ms: i64) -> i64 {
+pub extern "C" fn __sloth_sleep_ms(ms: i64) -> i64 {
     if ms <= 0 {
         return 0;
     }
