@@ -14,6 +14,8 @@ let z = "hi";     // 不可变绑定
 - 内层块可**遮蔽**外层同名变量。
 - 赋值面会做词面兼容检查：把一个 `str` 赋给推断为 `int` 的变量报
   `type mismatch in assignment to `x``。
+- 复合赋值 `+=` / `-=` 等价于 `x = x op rhs`，且左值只求值一次（`a[i()] += 1`
+  只调用一次 `i()`，见 §7.1）。
 
 ## 6.2 模块级全局变量
 
@@ -39,9 +41,9 @@ let z = "hi";     // 不可变绑定
 观察：
 
 - 顶部两条 `memref.global` 是全局 `g` / `fixed` 的存储；`@sloth_main__ginit` 把
-  `20`（即 `10 << 1`）与 `6`（即 `3 << 1`）分别 store 进去。
+  `10` 与 `3`（去 tag 后的原生 i64 初值）分别 store 进去。
 - 局部 `a` / `b` 各自是 `memref.alloca() : memref<1xi64>` 栈槽。
 - 对 `str` 局部 `b` 的绑定是经典的 **copy-in / overwrite-out**：
-  `sloth_rc_retain` 存入、随后 `sloth_rc_release` 释放生产者的临时量；
-  作用域退出时对槽本身再 `sloth_rc_release`（见 §23）。
+  `__sloth_rc_retain` 存入、随后 `__sloth_rc_release` 释放生产者的临时量；
+  作用域退出时对槽本身再 `__sloth_rc_release`（见 §23）。
 - 块级遮蔽的内层 `a` 是**另一个** alloca 槽，与外层 `a` 互不影响。

@@ -116,7 +116,7 @@ $$
 在 `Weights.wk` 等访问器里已经吸收（`llama.slt:153`）。
 
 **精度。** checkpoint 是 `f32`，但 sloth2 的 `Tensor<float, R>` 元素是 `f64`
-编码。`load_weights` 用 `view_as_f32`（→ `sloth_tensor_from_f32_ptr`）**一次性加宽**
+编码。`load_weights` 用 `view_as_f32`（→ `__sloth_tensor_from_f32_ptr`）**一次性加宽**
 整块权重为 `f64` 张量（`tensors.rs:516`），此后全部算术在 `f64` 满精度下进行。
 
 ## 26.3 算子一：Token Embedding（查表）
@@ -138,7 +138,7 @@ s.x[0..dim] = w.token_embedding_table()[token];
 
 `token_embedding_table()` 是 `matrix_view(data, 0, V, d)`，即把扁平权重视为
 `(V, d)`；`[token]` 生成降 rank 的 rank-1 视图（零拷贝）；左侧 `s.x[0..dim]` 是保
-rank 切片视图。赋值落成 `sloth_tensor_copy_into`，把这一行元素拷进 `x` 的缓冲区
+rank 切片视图。赋值落成 `__sloth_tensor_copy_into`，把这一行元素拷进 `x` 的缓冲区
 （`tensors.rs:248`），MLIR 见 §25.9.1。之所以是拷贝而非别名，是因为 `x` 后面要作为
 残差流被原地累加，不能与只读权重共享存储。
 
@@ -210,8 +210,8 @@ $$
 **sloth 实现。** 内建 `tensor.matvec(w: Tensor<float,2>, x: Tensor<float,1>)` 走
 **通道 B**（`irgen/tensor.rs:475`）：
 
-1. 运行期断言 `dim(w,1) == dim(x,0)`（`sloth_tensor_dim_eq`）；
-2. 用 `sloth_tensor_basis_f64` 把张量句柄变成 rank-1 memref 描述符；
+1. 运行期断言 `dim(w,1) == dim(x,0)`（`__sloth_tensor_dim_eq`）；
+2. 用 `__sloth_tensor_basis_f64` 把张量句柄变成 rank-1 memref 描述符；
 3. 用 `memref.reinterpret_cast` 带上**运行期**的 size/stride 变成 `memref<?x?xf64>`；
 4. 发 `linalg.matvec`，由 LLVM `-O3` 完成向量化/分块。
 
@@ -362,7 +362,7 @@ while h < cfg.n_heads {
 | \\( /\sqrt{d_h} \\) | `float_sqrt` + `/` | 标量 libm |
 | \\( \alpha_t = \mathrm{softmax}(s_0..s_p) \\) | `tensor.softmax_into(att_h[0..=pos])` | 三段 `scf.for`（§26.8） |
 | \\( \sum_t \alpha_t v_t \\) | `tensor.add_scaled_into(xb_h, v_t, α_t)` | 融合 `linalg.generic` |
-| KV cache 写 | 视图赋值 | `sloth_tensor_copy_into` |
+| KV cache 写 | 视图赋值 | `__sloth_tensor_copy_into` |
 
 `att_h = s.att[h]` 是长度为 `S` 的暂存行，`att_h[0..=pos]` 只把**当前有效长度**
 交给 softmax，因此每步的 softmax 是定长 `pos+1` 的子段；`fill_zero(xb_h)` 清掉上一
@@ -408,7 +408,7 @@ pass 3:  out[i] = out[i] / Σ
 
 第二、三趟直接在输出缓冲上原地读写；`softmax_into` 时输出就是输入，省掉一次分配。
 注意力里作用在 `att_h[0..=pos]` 这个**运行期长度**的子段上——发射器用
-`sloth_tensor_dim` 取运行期长度，因此支持动态长度归约。
+`__sloth_tensor_dim` 取运行期长度，因此支持动态长度归约。
 
 ## 26.9 算子七：SwiGLU 前馈网络
 
@@ -570,7 +570,7 @@ func sample_mult(x, n, coin): int {
 1. **权重只读共享**：`Weights.data` 是一整块加宽后的 `f64` 张量，所有 `wq(l)`/`wk(l)`/…
    都是它的 reshape 视图，只读、不拷贝。
 2. **KV cache 就地写**：`key_cache[l][pos] = kt` 是视图赋值 → `copy_into`，写进
-   cache 缓冲；`tensor.view` 只改 shape/stride/data 指针并 retain 父句柄，不拷贝。
+   cache 缓冲；`__sloth_tensor_view` 只改 shape/stride/data 指针并 retain 父句柄，不拷贝。
 3. **累加与归一化就地**：`add_into` / `add_scaled_into` / `softmax_into` /
    `silu_mul_into` / `fill_zero` / `div_scalar_into` 全部原地，避免每 token 的中间分配。
 

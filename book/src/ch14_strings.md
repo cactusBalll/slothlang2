@@ -4,11 +4,11 @@
 
 - `str` 是 UTF-8、**不可变**的。**不做 interning/池化**：每次构造（字面量、
   拼接、切片、取字符……）都在堆上新分配一个 `StrT`，内容相等的两个字符串是
-  **不同对象**。因此 `==` 走 `sloth_str_eq` 的**内容**比较（len + memcmp），
+  **不同对象**。因此 `==` 走 `__sloth_str_eq` 的**内容**比较（len + memcmp），
   不能依赖句柄相等；`Map<str, …>` 的键同样按内容哈希/比较。
 - `len(s)` / `s.len()` 返回**字节长度**（不是字符数）：`"héllo".len() == 6`。
 - 迭代 `for c in s` 按 **Unicode 字符**（scalar）产出子串，非 ASCII 不会产生非法
-  UTF-8 片段（`sloth_str_clen` 数字符、`sloth_str_char` 取第 i 个字符）。
+  UTF-8 片段（`__sloth_str_clen` 数字符、`__sloth_str_char` 取第 i 个字符）。
 - 拼接用 `+`：`"a" + "b"`，结果是一个**新分配**的字符串（同样不共享/去重）。
 - 转义与插值见 §4。
 
@@ -56,8 +56,8 @@ it.next();   // 20013
 it.next();   // nil
 ```
 
-- `chars()` 惰性求值、不预先物化整个字符串；底层用 `sloth_str_clen`（字符数）
-  与 `sloth_str_codepoint`（第 i 个码点）。迭代器 `StrChars` 由编译器自动注入
+- `chars()` 惰性求值、不预先物化整个字符串；底层用 `__sloth_str_clen`（字符数）
+  与 `__sloth_str_codepoint`（第 i 个码点）。迭代器 `StrChars` 由编译器自动注入
   （源码形态 `lib/prelude/strchars.slt`）。
 - 与 `for c in s` 的区别：`for c in s` 每轮产出一个**单字符 `str` 子串**；
   `chars()` 每轮产出一个**码点 `int`**，且可作为迭代器值传递 / 手动 `next()`。
@@ -122,13 +122,13 @@ func main(): unit {
 
 要点：
 
-- 字面量按 8 字节打包成 `i64` 常量，经 `sloth_str_push` 入构建器、
-  `sloth_str_finish` 收口为一个新分配的 `str`（`sloth_str_intern` 是历史命名，
+- 字面量按 8 字节打包成 `i64` 常量，经 `__sloth_str_push` 入构建器、
+  `__sloth_str_finish` 收口为一个新分配的 `str`（`__sloth_str_intern` 是历史命名，
   并不做驻留）。
-- 拼接走 `sloth_str_concat`，结果也是新分配（因此 `"ab" == "a" + "b"` 为真靠的是
+- 拼接走 `__sloth_str_concat`，结果也是新分配（因此 `"ab" == "a" + "b"` 为真靠的是
   内容比较，而非句柄同一）。
-- 逐字符迭代用 `sloth_str_clen`（字符数）+ `sloth_str_char`（第 i 个字符子串），
+- 逐字符迭代用 `__sloth_str_clen`（字符数）+ `__sloth_str_char`（第 i 个字符子串），
   每轮产出的是 owned 临时量，在迭代末（含 `break`）结算。
-- 字节下标 / 切片走 `sloth_str_byte` / `sloth_str_slice`；`chars()` 走
-  `sloth_str_clen` + `sloth_str_codepoint`（注入的 `StrChars` 类实现
+- 字节下标 / 切片走 `__sloth_str_byte` / `__sloth_str_slice`；`chars()` 走
+  `__sloth_str_clen` + `__sloth_str_codepoint`（注入的 `StrChars` 类实现
   `iter()`/`next(): int?`，惰性产出码点）。

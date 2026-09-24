@@ -18,7 +18,7 @@ v1.1 实现中内嵌的单线程假设，真正的硬改动只有一处：
 | --- | --- | --- | --- |
 | **ARC 计数**（`Hdr.cnt`） | `retain`/`release` 普通读写 | 并发增减 → 计数错乱 → 悬垂/滞留 | **原子化**（§28.2，核心） |
 | `Weak<T>` 弱链 | 目标归零沿链置零 | `upgrade` 与析构竞态 | CAS upgrade（§28.2） |
-| 诊断计数 `rc_live`/`rc_drops` | 全局普通计数 | 并发抖动 | 原子计数，断言改为「join 后归零」 |
+| 诊断计数 `sloth_rc_live`/`sloth_rc_drops` | 全局普通计数 | 并发抖动 | 原子计数，断言改为「join 后归零」 |
 | 容器 / 张量 / 模块全局 | 无内部同步 | 并发读写缓冲/字段 | 不隐式加锁；文档化为数据竞争（UB），安全用法走 `Mutex`/`Channel` |
 | Fiber `prev` 链 | 隐式全局 | 跨线程 resume 栈 → 灾难 | **线程封闭** + `owner_tid` 校验（§28.5） |
 
@@ -116,7 +116,7 @@ Fiber 的线程封闭由运行时兜底：每个 `FiberObj` 记录 `owner_tid`�
 | --- | --- |
 | `sloth-frontend` | 无（表面都是普通调用；`JoinHandle<R>`/`Channel<T>` 复用泛型类型语法） |
 | `sloth-codegen/ty` | 注册 `Ty::JoinHandle(R)` / `Ty::Channel(T)` / `Mutex` / `AtomicInt`；`Send` 自动满足判定 |
-| `sloth-codegen/irgen` | 识别 `thread.*` / `channel.*` / `mutex.*` / `atomic.*` → 发射 `@sloth_thread_*` / `@sloth_chan_*` / `@sloth_mutex_*` / `@sloth_atomic_*`；spawn 载荷与 join 结果的转移插桩；`Send` 约束检查 |
+| `sloth-codegen/irgen` | 识别 `thread.*` / `channel.*` / `mutex.*` / `atomic.*` → 发射 `@__sloth_thread_*` / `@__sloth_chan_*` / `@__sloth_mutex_*` / `@__sloth_atomic_*`；spawn 载荷与 join 结果的转移插桩；`Send` 约束检查 |
 | pass 管线 | 无新增 pass |
 
 ## 28.8 示例与验收

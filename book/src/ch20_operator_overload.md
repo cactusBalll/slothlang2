@@ -15,8 +15,8 @@
 - **缺重载即编译错误**：对没有 `__eq__` 的类比较报
   `comparison `EqEq` on classes `A` and `B` requires a `__eq__` overload`；
   索引一个没有 `__index__` 的对象报 `requires an `__index__` overload`。
-- `str` 的 `+`（拼接）、`Array<T>` 的 `+` 是内置语义，不受影响；`int`/`float`/`str`
-  的词比较也走内置路径。
+- `str` 的 `+`（拼接）是内置语义，不受影响（`Array<T>` 无 `+`，拼接用标准库
+  `array_concat`/`array_extend`）；`int`/`float`/`str` 的词比较也走内置路径。
 - 重载方法体可以复用其它重载/普通方法。
 
 ## 20.1 示例

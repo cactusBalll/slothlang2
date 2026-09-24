@@ -1,8 +1,8 @@
 # 23. 内存管理：ARC 所有权协议
 
 运行时**没有 GC**：引用类型走**引用计数 + `Weak<T>` 破环**。分配器是 malloc 基
-确定性链（`sloth_rt_alloc`/`realloc`）；对象头带内承载计数；归零即析构级联并
-`free`。漏插 `release` 只会退化为**内存滞留**（泄漏），不会悬垂。
+确定性链（`__sloth_rt_alloc`/`__sloth_rt_realloc`）；对象头带内承载计数；归零即
+析构级联并 `free`。漏插 `release` 只会退化为**内存滞留**（泄漏），不会悬垂。
 
 ## 23.1 所有权状态与规则
 
@@ -49,18 +49,18 @@
 `(payload, aux) -> i64`」，运行时不读取任何对象布局信息：
 
 - **用户类（含对象级联）**：codegen 为每个对象的类发射一个 `@...__cascade` 例程，
-  内容 =（若有）调用用户 `func __dispose__(): unit` + 逐个 `sloth_rc_release` 引用
-  字段。该地址在 `sloth_obj_new(cls_id, n_fields, cascade)` 时登记为 `sdtor`。
+  内容 =（若有）调用用户 `func __dispose__(): unit` + 逐个 `__sloth_rc_release` 引用
+  字段。该地址在 `__sloth_obj_new(cls_id, n_fields, cascade)` 时登记为 `sdtor`。
   继承链上的 `__dispose__` 按普通方法解析；泛型实例同样支持。**运行时不再有
-  `ObjInfo.refmask` 或 `sloth_cls_refmask`**——布局活在生成代码里。
-- **自举容器**：`lib/prelude/containers.slt` 的 `sloth_arr_dispose` / `sloth_map_dispose`
+  `ObjInfo.refmask` 或 `__sloth_cls_refmask`**——布局活在生成代码里。
+- **自举容器**：`lib/prelude/containers.slt` 的 `__sloth_arr_dispose` / `__sloth_map_dispose`
   完成「按 `elref`/`kflag` 释放引用元素 + free 缓冲」。容器的 rc 分配经
 
 ```sloth
-extern func sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
+extern func __sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
 ```
 
-完成，`dtor` 是 `fn_addr(sloth_arr_dispose / sloth_map_dispose)` 给出的原始函数地址
+完成，`dtor` 是 `fn_addr(__sloth_arr_dispose / __sloth_map_dispose)` 给出的原始函数地址
 （`fn_addr(f)` 返回编译期函数的裸地址词）。`aux` 承载编译期引用性标志：数组的
 `elref`、Map 的 `kflag`。
 
@@ -78,7 +78,7 @@ extern func sloth_rc_new(nbytes: int, aux: int, dtor: int): int;
 ```
 
 在 MLIR 里，`churn` 的每一轮对 `h` 的字段读取之后，循环体末尾能看到作用域结算：
-`sloth_rc_release` 依次释放在本层声明的槽。`main` 里 `sloth_rc_live() == base` 为
+`__sloth_rc_release` 依次释放在本层声明的槽。`main` 里 `sloth_rc_live() == base` 为
 `true` 说明没有泄漏。
 
 ## 23.4 已知残余

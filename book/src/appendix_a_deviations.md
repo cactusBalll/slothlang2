@@ -8,7 +8,8 @@
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
 | §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后由单一发射器**一趟融合**完成符号收集、局部推断、约束检查、单态化与 MLIR 生成 | 定案 |
-| §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | 仅一个**最小** `sloth` dialect（TableGen/C++，ARC `sloth.rc_retain`/`sloth.rc_release`）；解析后由单点 lowering 全部降为标准方言（`func.call @sloth_*`），对外 IR 仍无 `sloth.*`。完整类型/GC 方言（`!sloth.string`、`sloth.gc_alloc`）不实现 | 部分解冻（2026-09-23，见 `PLAN-sloth-dialect.md`） |
+| §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | 仅一个**最小** `sloth` dialect（TableGen/C++，ARC `sloth.rc_retain`/`sloth.rc_release`）；解析后由单点 lowering 全部降为标准方言（`func.call @__sloth_*`），对外 IR 仍无 `sloth.*`。完整类型/GC 方言（`!sloth.string`、`sloth.gc_alloc`）不实现 | 部分解冻（2026-09-23，见 `PLAN-sloth-dialect.md`） |
+| （设计未列的运行时命名空间） | 运行时/prelude ABI 统一使用保留前缀 `__sloth_*`（`lib/prelude/abi.slt` 唯一声明）；普通模块声明保留符号报错，调用需伪导入 `import "__sloth";` | 增补（2026-09-24，提交 430f0e3） |
 | §4.1 循环依赖通过依赖图拓扑检测 | `resolve_program` 在按 `import` 递归装配时用 DFS 栈比对规范化路径，命中即报 `circular import`（`crates/sloth-codegen/src/irgen/mod.rs:205`）；`done` 集合去重。无独立依赖图/拓扑排序阶段 | 定案（等价检测，无独立阶段） |
 | §4.2 闭包捕获结构体 + 逃逸性分析 | 闭包统一为 2 词 `{ fnptr, env }` 对象；捕获语义见 §10 | 等价实现 |
 
@@ -18,6 +19,7 @@
 | --- | --- | --- |
 | `int` 为 i64 | `int` 为原生 i64（词面无 tag，64-bit 环绕） | 已对齐 |
 | `float` 为 f64 | `float` 为原生 f64（bitcast 进 i64 词面，满精度） | 已对齐 |
+| （设计未列）定宽/无符号整数 | `int8/int16/int32`、`uint/uint8/uint16/uint32/uint64`（别名 `i8/u8/…`）；显式转换、按宽度环绕、同型才可混算，`is` 精确到宽度 | 增补（c51164a，§5.6） |
 | `T?`（值型）用 `{payload, has_value}` 标签布局（16 字节 `int?`） | 值型 `T?` 是 rc 跟踪的一词 payload 盒；槽仍 1 词，`0` = `nil` | 定案（ABI 简化） |
 | `dyn Trait` 为"数据指针 + 虚表指针"两字 fat pointer | `dyn` 是单字段（虚表指针）+ class-id，运行时等价 | 定案 |
 | `range` 是两 `i64` 值类型 | `range` 是 rc 双词盒 `{lo, hi}` 的**引用词** | 偏离 |
@@ -44,7 +46,7 @@
 | §5.4 `extern func`（设计已声明） | 已实现；`EBNF §3.9` 原未列，现补入 `extern func` / `extern type` |
 | §2.2 "函数无返回标注且体仅单个 `return` 时可推断返回类型" | **不推断**：省略返回标注即 `unit`；`return expr;` 在 unit 函数里静默丢弃，不报错 |
 | §3.4 运算符重载以 trait 参数化（`Add<Rhs,Out>` 等） | 直接用魔术方法名（`__add__`/`__eq__`/…），不做 trait 参数化 |
-| §4.3.2 `sloth.string_literal` 等高层操作 | 字符串字面量内联为 8 字节打包的 `i64` 常量 + `sloth_str_push`/`str_finish` |
+| §4.3.2 `sloth.string_literal` 等高层操作 | 字符串字面量内联为 8 字节打包的 `i64` 常量 + `__sloth_str_push`/`__sloth_str_finish` |
 
 ## A.4 尚未实现 / 受限
 
@@ -61,7 +63,7 @@
 ## A.5 标准库与方法解析
 
 - §5.3 "基础类型方法解析为 stdlib 泛型函数"：实现改为**直接发射运行时调用**
-  （`arr.len()` → `sloth_arr_len` 等），不生成 stdlib 泛型函数。
+  （`arr.len()` → `__sloth_arr_len` 等），不生成 stdlib 泛型函数。
 - `Result<T,E>` 与 `Entry<K,V>` 由编译器**自动注入**为标准库类（源码形态见 §17）。
 - `Hashable` 类若无 `__hash__` 家族方法会回退到指针恒等，并给编译期提示。
 - 迭代协议是**结构化**的（提供 `iter()`/`next()` 即可），不要求显式 `impl Iterable`。
@@ -78,11 +80,11 @@
 
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
-| §5.1 自定义 `!sloth.tensor` / `sloth.tensor_*` | 标准 `tensor`/`linalg`/`memref`/`scf`/`math` 组合 + `sloth_tensor_*` C-ABI 助手 | 定案 |
+| §5.1 自定义 `!sloth.tensor` / `sloth.tensor_*` | 标准 `tensor`/`linalg`/`memref`/`scf`/`math` 组合 + `__sloth_tensor_*` C-ABI 助手 | 定案 |
 | §5.1 数据区免 GC 扫描 + mmap 外部根 | 无 GC；`Tensor` = ARC 描述符（7 词）+ 非追踪 `calloc` 数据缓冲，视图用 `owner` 保活（无扫描器，数据区天然不参与） | 定案（架构改向） |
-| §4.4 `view_as_f32` 零拷贝 f32 视图 | 元素是 f64，checkpoint 是 f32 → **一次性加宽拷贝**（`sloth_tensor_from_f32_ptr`），内存 ×2；真零拷贝需后续 `Tensor<f32,R>` | 定案 |
+| §4.4 `view_as_f32` 零拷贝 f32 视图 | 元素是 f64，checkpoint 是 f32 → **一次性加宽拷贝**（`__sloth_tensor_from_f32_ptr`），内存 ×2；真零拷贝需后续 `Tensor<f32,R>` | 定案 |
 | rank 作为泛型整型常量参数 | `Ty::Tensor(TyId, u32)`，仅整数字面量；parser 接受 0..=8（`parser.rs:374`），语义限 rank 1..=3（`tensor.rs::tensor_rank_ok`），**独立通道**不进泛型单态化帧 | 定案（受控扩展） |
-| 广播逐元素运算 | 要求 rank 与各轴完全同形，否则运行期 panic（`sloth_tensor_shape_eq`） | 受限 |
+| 广播逐元素运算 | 要求 rank 与各轴完全同形，否则运行期 panic（`__sloth_tensor_shape_eq`） | 受限 |
 | `sort_desc_index`/`cumsum`/`sample_topp` 作内置 | 排序/前缀扫描/采样在手写 `.slt` 中实现（`tokenizer.slt`/`llama.slt`） | 等价实现 |
 | top-p/multinomial 依赖 stdlib 排序 | `sample_topp` 手写插入排序 + CDF；`argmax` 手写扫描 | 等价实现 |
 | run.c 权重指针算术 | 整块加宽为扁平张量 + `reshape` 共享视图按层切 `(dim,dim)` | 定案 |
@@ -94,11 +96,11 @@
 
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
-| §4.3 载荷按「转移」语义做发射器插桩（owned 临时不插 release；借用值先 retain 再转移） | 载荷按普通 **borrowed 实参**递交，由运行时 `sloth_fiber_*` 在接收侧 `retain`；`yield`/`resume` 的引用返回仍走规则 4/5 的 +1 交付 | 定案（消除设计稿风险 #2「转移插桩遗漏」） |
-| §4.3.5 / §4.4 弃置或取消时，跳过帧的 `release` 不执行、引用滞留 | 局部槽**逐帧登记**（发射器在 ref 局部声明/退出处插入 `@sloth_fiber_track`/`@sloth_fiber_untrack`，仅协程上下文生效）：错误经 `terminate`、取消经 `cancel_abort` 在**栈仍有效时**释放所有在册槽，弃置则在析构处释放。跳过帧不再泄漏引用（temp 级极端情形除外） | 定案（完整拆栈） |
+| §4.3 载荷按「转移」语义做发射器插桩（owned 临时不插 release；借用值先 retain 再转移） | 载荷按普通 **borrowed 实参**递交，由运行时 `__sloth_fiber_*` 在接收侧 `retain`；`yield`/`resume` 的引用返回仍走规则 4/5 的 +1 交付 | 定案（消除设计稿风险 #2「转移插桩遗漏」） |
+| §4.3.5 / §4.4 弃置或取消时，跳过帧的 `release` 不执行、引用滞留 | 局部槽**逐帧登记**（发射器在 ref 局部声明/退出处插入 `@__sloth_fiber_track`/`@__sloth_fiber_untrack`，仅协程上下文生效）：错误经 `terminate`、取消经 `cancel_abort` 在**栈仍有效时**释放所有在册槽，弃置则在析构处释放。跳过帧不再泄漏引用（temp 级极端情形除外） | 定案（完整拆栈） |
 | §4.4 `fiber.cancel` 用 `setjmp`/`longjmp` 直达入口 | 同左；差别在于出栈前先结算在册局部槽，再 `longjmp`（`longjmp` 会重置栈指针，必须先于其完成释放） | 定案 |
 | §4.1 仅保存 x86_64 的 `rsp/rbp/rbx/r12-r15`、aarch64 的 `x19-x30/sp/lr` | aarch64 额外保存 AAPCS64 被调用者保存的 `d8-d15`（设计稿遗漏） | 修正 |
-| §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline` 为 crate 内 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |
+| §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline`（crate 内部符号，非 ABI）为 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |
 
 ## A.9 多线程扩展（TH-P0–TH-P3）
 
@@ -127,8 +129,8 @@
 | §3 API 表面选 `extern func` + `.slt` | 全部走 extern；无新内建、前端/`Ty` 零改动 | 已对齐 |
 | §3 事件队列用 sloth 实现 | `lib/sloth/event.slt` 的 `EventLoop` reactor（token 代际、定时器链表） | 已对齐 |
 | §6.5 io_uring 裸 syscall | `io_uring_setup/enter` + 三次 `mmap`；一次性 `POLL_ADD` + gen 重挂；等待用 `poll(ring_fd)` | 已对齐 |
-| §6.6 kqueue 保留 | Linux 上 `available(kqueue)` 恒假，不广告不可用后端 | 已知限制 |
-| §7.7 计算卸载 `run_blocking` | 独立 eventfd（`sloth_async_*`）+ `thread.spawn`；结果经 `JoinHandle` 取回 | IO-P6 增值项 |
+| §6.6 kqueue 保留 | Linux 上 `io.backend_available(io.kind_kqueue())` 恒假，不广告不可用后端 | 已知限制 |
+| §7.7 计算卸载 `run_blocking` | 独立 eventfd（`__sloth_async_*`）+ `thread.spawn`；结果经 `JoinHandle` 取回 | IO-P6 增值项 |
 | §11 风险 #5 extern 句柄生命周期 | 非 ARC，显式 `*_free`；漏 free 退化为泄漏不悬垂 | 定案 |
 | §10 无 TLS/HTTP2/chunked、无 DNS | 均为非目标，文档化 | 受限 |
 | 设计 §10 未列的多项 codegen 真 bug | 过程中修掉 8 项（keys 元素类型、lambda 捕获模块限定/插值、内建句柄字段类型、`Ty::Fn` 重建、泛型函数实参推断、`tp_mangled` 泄漏、跨模块泛型单态化），见第 29 章 §29.8 | 修复 |

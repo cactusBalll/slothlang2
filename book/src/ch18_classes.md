@@ -30,7 +30,7 @@ class Counter {
 ## 18.3 虚分派
 
 - 通过基类引用调用方法时，若该方法在**全程序任意继承体系**中被 override，调用点经
-  对象头**虚表**按方法名槽间接分派（`sloth_obj_vtable` → `sloth_vt_get` →
+  对象头**虚表**按方法名槽间接分派（`__sloth_obj_vtable` → `__sloth_vt_get` →
   `llvm.call`）；派生类的虚表槽由其 per-class builder 解析到最派生实现。
 - 全程序无覆盖时在 irgen 层**消虚**为直接调用（MLIR 管线当前无 inliner）。
   `super.m()` 恒直接调用；构造器 `__init__` / 析构钩子 `__dispose__` 不参与虚派发。
@@ -40,9 +40,9 @@ class Counter {
 
 ## 18.4 对象表示
 
-- 实例是 rc 追踪的堆对象：`sloth_obj_new(cls_id, n_fields, cascade)`，字段按索引
-  访问（`sloth_obj_field` / `sloth_obj_set_field`）。
-- 类信息（仅 class-id + 显示名）经 `sloth_cls_info` / `sloth_cls_name` 登记。
+- 实例是 rc 追踪的堆对象：`__sloth_obj_new(cls_id, n_fields, cascade)`，字段按索引
+  访问（`__sloth_obj_field` / `__sloth_obj_set_field`）。
+- 类信息（仅 class-id + 显示名）经 `__sloth_cls_info` / `__sloth_cls_name` 登记。
   运行时**不携带对象布局信息**：每类的死亡级联由 codegen 发射为
   `(payload, aux) -> i64` 例程（`@...__cascade`），经分配时的第三个参数注册为
   header `sdtor`。虚表按类**全局缓存**，不再每对象重建。
@@ -65,6 +65,6 @@ class Counter {
 
 要点：`Dog` 的构造器先调 `@sloth_main_Animal____init__` 再写自身字段；`a.who()`
 （`a: Animal`，运行时是 `Dog`）经对象头虚表槽间接分派到 `@sloth_main_Dog__who`；
-`a is Dog` 仍用 `sloth_obj_cls_id` 判定，通过后 `a.loud` 直接按 `Dog` 字段布局读。
+`a is Dog` 仍用 `__sloth_obj_cls_id` 判定，通过后 `a.loud` 直接按 `Dog` 字段布局读。
 数组字面量 `[Animal(1), Dog(2)]` 经 LUB 上转，元素类型是 `Animal`；
-引用元素写入数组时 `sloth_arr_set` 伴随 `sloth_rc_retain`。
+引用元素写入数组时 `__sloth_arr_set` 伴随 `__sloth_rc_retain`。

@@ -15,7 +15,8 @@ a.pop();        // 尾部弹出（返回被移除元素）
   上转为公共基类）。
 - 空字面量 `[]` 需要**上下文类型**：`var a: Array<float> = [];`。否则默认
   `Array<int>`。
-- 越界访问在发射期插入边界守卫，命中走运行时 panic（`sloth_panic_oob`）。
+- 越界访问由预置的 `__sloth_arr_get`/`__sloth_arr_set` 做边界守卫，命中走运行时
+  panic（`__sloth_panic_oob`）。
 - 元素赋值有词面检查：`a[0] = "x"`（`a: Array<int>`）报
   `type mismatch in array element assignment`。
 - **区间切片（新副本）**：`a[lo..hi]` 取 `[lo, hi)`、`a[lo..=hi]` 取闭区间，
@@ -48,11 +49,14 @@ a.pop();        // 尾部弹出（返回被移除元素）
 {{#include examples/arrays.mlir}}
 ```
 
-对应运行时符号：`sloth_arr_new`（建数组，参数是元素种类 `k`，用于区分值/引用
-元素的级联释放）、`sloth_arr_push`/`sloth_arr_pop`/`sloth_arr_get`/`sloth_arr_set`/
-`sloth_arr_len`、`sloth_arr_slice`/`sloth_arr_slice_set`（区间读副本 / 区间写）。
-字面量 `[1,2,3]` 发射为 `sloth_arr_new_k` + 逐元素 `sloth_arr_set`。
-`sloth_rc_retain`/`sloth_rc_release` 出现在把引用元素写入/别名绑定时。
+对应运行时符号：`__sloth_arr_new`（建数组，参数是**常量长度**）、
+`__sloth_arr_push`/`__sloth_arr_pop`/`__sloth_arr_get`/`__sloth_arr_set`/
+`__sloth_arr_len`、`__sloth_arr_slice`/`__sloth_arr_slice_set`（区间读副本 / 区间写）。
+`__sloth_arr_new_k(len, k)` 是同时接收长度与元素种类 `k` 的通用变体
+（`__sloth_arr_new` 即 `_new_k(len, 0)`）；`k` 用于区分值/引用元素的级联释放，
+引用元素字面量（如 `[[1,2],[3,4]]` 的外层）走它。
+字面量 `[1,2,3]` 发射为 `__sloth_arr_new` + 逐元素 `__sloth_arr_set`。
+`__sloth_rc_retain`/`__sloth_rc_release` 出现在把引用元素写入/别名绑定时。
 
 > 自举：这些符号由注入的 `lib/prelude/containers.slt` 用 sloth 自身实现
 > （`libsloth_rt.so` 只提供裸分配/字级内存/rc）。数组头 `[len,cap,buf]` 与

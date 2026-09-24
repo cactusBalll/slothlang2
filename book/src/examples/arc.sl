@@ -20,7 +20,7 @@ func churn(n: int): int {
 }
 
 func main() {
-    let _ = churn(50);                    // 预热 intern 池
+    let _ = churn(50);                    // 预热/稳定计数
     let base = sloth_rc_live();
     let r = churn(1000);
     print(r > 0);                         // true

@@ -15,9 +15,9 @@ module @main {
     %alloca = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca[%c0] : memref<1xi64>
     %0 = memref.load %alloca[%c0] : memref<1xi64>
-    %1 = call @sloth_rt_write(%0) : (i64) -> i64
-    call @sloth_rt_puts(%1) : (i64) -> ()
-    %2 = call @sloth_rc_release(%1) : (i64) -> i64
+    %1 = call @__sloth_rt_write(%0) : (i64) -> i64
+    call @__sloth_rt_puts(%1) : (i64) -> ()
+    %2 = call @__sloth_rc_release(%1) : (i64) -> i64
     cf.br ^bb1
   ^bb1:  // pred: ^bb0
     return
@@ -25,7 +25,7 @@ module @main {
   func.func @sloth_main__announce(%arg0: i64) -> i64 {
     %c1_i64 = arith.constant 1 : i64
     %c0_i64 = arith.constant 0 : i64
-    %c6_i64 = arith.constant 6 : i64
+    %c8_i64 = arith.constant 8 : i64
     %c0 = arith.constant 0 : index
     %alloca = memref.alloca() : memref<1xi64>
     %alloca_0 = memref.alloca() : memref<1xi64>
@@ -33,8 +33,8 @@ module @main {
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
     %0 = memref.load %alloca_1[%c0] : memref<1xi64>
     %alloca_2 = memref.alloca() : memref<1xi64>
-    %1 = call @sloth_obj_vtable(%0) : (i64) -> i64
-    %2 = call @sloth_vt_get(%1, %c6_i64) : (i64, i64) -> i64
+    %1 = call @__sloth_obj_vtable(%0) : (i64) -> i64
+    %2 = call @__sloth_vt_get(%1, %c8_i64) : (i64, i64) -> i64
     %3 = arith.cmpi ne, %2, %c0_i64 : i64
     cf.cond_br %3, ^bb1, ^bb2
   ^bb1:  // pred: ^bb0
@@ -43,7 +43,7 @@ module @main {
     memref.store %5, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb2:  // pred: ^bb0
-    %6 = call @sloth_panic_noimpl(%c0_i64) : (i64) -> i64
+    %6 = call @__sloth_panic_noimpl(%c0_i64) : (i64) -> i64
     memref.store %c0_i64, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb3:  // 2 preds: ^bb1, ^bb2
@@ -56,12 +56,12 @@ module @main {
     return %8 : i64
   }
   func.func private @sloth_vtb_main_Cat() -> i64 {
-    %c6_i64 = arith.constant 6 : i64
-    %0 = llvm.mlir.addressof @sloth_main_Cat__say : !llvm.ptr
-    %c5_i64 = arith.constant 5 : i64
-    %c3_i64 = arith.constant 3 : i64
-    %1 = llvm.mlir.addressof @sloth_main_Cat__name : !llvm.ptr
     %c8_i64 = arith.constant 8 : i64
+    %0 = llvm.mlir.addressof @sloth_main_Cat__say : !llvm.ptr
+    %c7_i64 = arith.constant 7 : i64
+    %c5_i64 = arith.constant 5 : i64
+    %1 = llvm.mlir.addressof @sloth_main_Cat__name : !llvm.ptr
+    %c10_i64 = arith.constant 10 : i64
     %c0_i64 = arith.constant 0 : i64
     %c0 = arith.constant 0 : index
     %2 = memref.get_global @sloth_main_g_vtb_Cat : memref<1xi64>
@@ -69,13 +69,13 @@ module @main {
     %4 = arith.cmpi eq, %3, %c0_i64 : i64
     cf.cond_br %4, ^bb1, ^bb2
   ^bb1:  // pred: ^bb0
-    %5 = call @sloth_vt_new(%c8_i64) : (i64) -> i64
+    %5 = call @__sloth_vt_new(%c10_i64) : (i64) -> i64
     %6 = llvm.ptrtoint %1 : !llvm.ptr to i64
-    %7 = call @sloth_vt_set(%5, %c3_i64, %6) : (i64, i64, i64) -> i64
+    %7 = call @__sloth_vt_set(%5, %c5_i64, %6) : (i64, i64, i64) -> i64
     %8 = llvm.ptrtoint %1 : !llvm.ptr to i64
-    %9 = call @sloth_vt_set(%5, %c5_i64, %8) : (i64, i64, i64) -> i64
+    %9 = call @__sloth_vt_set(%5, %c7_i64, %8) : (i64, i64, i64) -> i64
     %10 = llvm.ptrtoint %0 : !llvm.ptr to i64
-    %11 = call @sloth_vt_set(%5, %c6_i64, %10) : (i64, i64, i64) -> i64
+    %11 = call @__sloth_vt_set(%5, %c8_i64, %10) : (i64, i64, i64) -> i64
     memref.store %5, %2[%c0] : memref<1xi64>
     cf.br ^bb2
   ^bb2:  // 2 preds: ^bb0, ^bb1
@@ -83,15 +83,15 @@ module @main {
     return %12 : i64
   }
   func.func private @sloth_vtb_main_Dog() -> i64 {
+    %c9_i64 = arith.constant 9 : i64
+    %c8_i64 = arith.constant 8 : i64
+    %0 = llvm.mlir.addressof @sloth_main_Dog__say : !llvm.ptr
     %c7_i64 = arith.constant 7 : i64
     %c6_i64 = arith.constant 6 : i64
-    %0 = llvm.mlir.addressof @sloth_main_Dog__say : !llvm.ptr
-    %c5_i64 = arith.constant 5 : i64
-    %c4_i64 = arith.constant 4 : i64
     %1 = llvm.mlir.addressof @sloth_main_Dog__to_str : !llvm.ptr
-    %c3_i64 = arith.constant 3 : i64
+    %c5_i64 = arith.constant 5 : i64
     %2 = llvm.mlir.addressof @sloth_main_Dog__name : !llvm.ptr
-    %c8_i64 = arith.constant 8 : i64
+    %c10_i64 = arith.constant 10 : i64
     %c0_i64 = arith.constant 0 : i64
     %c0 = arith.constant 0 : index
     %3 = memref.get_global @sloth_main_g_vtb_Dog : memref<1xi64>
@@ -99,17 +99,17 @@ module @main {
     %5 = arith.cmpi eq, %4, %c0_i64 : i64
     cf.cond_br %5, ^bb1, ^bb2
   ^bb1:  // pred: ^bb0
-    %6 = call @sloth_vt_new(%c8_i64) : (i64) -> i64
+    %6 = call @__sloth_vt_new(%c10_i64) : (i64) -> i64
     %7 = llvm.ptrtoint %2 : !llvm.ptr to i64
-    %8 = call @sloth_vt_set(%6, %c3_i64, %7) : (i64, i64, i64) -> i64
+    %8 = call @__sloth_vt_set(%6, %c5_i64, %7) : (i64, i64, i64) -> i64
     %9 = llvm.ptrtoint %1 : !llvm.ptr to i64
-    %10 = call @sloth_vt_set(%6, %c4_i64, %9) : (i64, i64, i64) -> i64
+    %10 = call @__sloth_vt_set(%6, %c6_i64, %9) : (i64, i64, i64) -> i64
     %11 = llvm.ptrtoint %2 : !llvm.ptr to i64
-    %12 = call @sloth_vt_set(%6, %c5_i64, %11) : (i64, i64, i64) -> i64
+    %12 = call @__sloth_vt_set(%6, %c7_i64, %11) : (i64, i64, i64) -> i64
     %13 = llvm.ptrtoint %0 : !llvm.ptr to i64
-    %14 = call @sloth_vt_set(%6, %c6_i64, %13) : (i64, i64, i64) -> i64
+    %14 = call @__sloth_vt_set(%6, %c8_i64, %13) : (i64, i64, i64) -> i64
     %15 = llvm.ptrtoint %1 : !llvm.ptr to i64
-    %16 = call @sloth_vt_set(%6, %c7_i64, %15) : (i64, i64, i64) -> i64
+    %16 = call @__sloth_vt_set(%6, %c9_i64, %15) : (i64, i64, i64) -> i64
     memref.store %6, %3[%c0] : memref<1xi64>
     cf.br ^bb2
   ^bb2:  // 2 preds: ^bb0, ^bb1
@@ -117,44 +117,45 @@ module @main {
     return %17 : i64
   }
   func.func @sloth_main() attributes {llvm.emit_c_interface} {
-    %c6_i64 = arith.constant 6 : i64
+    %c8_i64 = arith.constant 8 : i64
     %c0 = arith.constant 0 : index
     %c1_i64 = arith.constant 1 : i64
-    %0 = llvm.mlir.addressof @sloth_tynm_1 : !llvm.ptr
-    %c3_i64 = arith.constant 3 : i64
-    %1 = llvm.mlir.addressof @sloth_tynm_0 : !llvm.ptr
     %c2_i64 = arith.constant 2 : i64
+    %0 = llvm.mlir.addressof @sloth_tynm_1 : !llvm.ptr
+    %c4_i64 = arith.constant 4 : i64
+    %1 = llvm.mlir.addressof @sloth_tynm_0 : !llvm.ptr
+    %c3_i64 = arith.constant 3 : i64
     %c0_i64 = arith.constant 0 : i64
     call @sloth_main__anyinit() : () -> ()
     call @sloth_main__ginit() : () -> ()
-    %2 = call @sloth_cls_info(%c0_i64, %c2_i64) : (i64, i64) -> i64
+    %2 = call @__sloth_cls_info(%c0_i64, %c3_i64) : (i64, i64) -> i64
     %3 = llvm.ptrtoint %1 : !llvm.ptr to i64
-    %4 = call @sloth_cls_name(%2, %3, %c3_i64) : (i64, i64, i64) -> i64
-    %5 = call @sloth_obj_new(%2, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
+    %4 = call @__sloth_cls_name(%2, %3, %c3_i64) : (i64, i64, i64) -> i64
+    %5 = call @__sloth_obj_new(%2, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
     %6 = call @sloth_vtb_main_Cat() : () -> i64
-    %7 = call @sloth_obj_set_vtable(%5, %6) : (i64, i64) -> i64
-    %8 = call @sloth_cls_info(%c0_i64, %c3_i64) : (i64, i64) -> i64
+    %7 = call @__sloth_obj_set_vtable(%5, %6) : (i64, i64) -> i64
+    %8 = call @__sloth_cls_info(%c0_i64, %c4_i64) : (i64, i64) -> i64
     %9 = llvm.ptrtoint %0 : !llvm.ptr to i64
-    %10 = call @sloth_cls_name(%8, %9, %c3_i64) : (i64, i64, i64) -> i64
-    %11 = call @sloth_obj_new(%8, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
+    %10 = call @__sloth_cls_name(%8, %9, %c3_i64) : (i64, i64, i64) -> i64
+    %11 = call @__sloth_obj_new(%8, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
     %12 = call @sloth_vtb_main_Dog() : () -> i64
-    %13 = call @sloth_obj_set_vtable(%11, %12) : (i64, i64) -> i64
-    %14 = call @sloth_arr_new_k(%c2_i64, %c1_i64) : (i64, i64) -> i64
-    %15 = call @sloth_rc_retain(%5) : (i64) -> i64
-    %16 = call @sloth_arr_set(%14, %c0_i64, %15) : (i64, i64, i64) -> i64
-    %17 = call @sloth_rc_retain(%11) : (i64) -> i64
-    %18 = call @sloth_arr_set(%14, %c1_i64, %17) : (i64, i64, i64) -> i64
+    %13 = call @__sloth_obj_set_vtable(%11, %12) : (i64, i64) -> i64
+    %14 = call @__sloth_arr_new_k(%c2_i64, %c1_i64) : (i64, i64) -> i64
+    %15 = call @__sloth_rc_retain(%5) : (i64) -> i64
+    %16 = call @__sloth_arr_set(%14, %c0_i64, %15) : (i64, i64, i64) -> i64
+    %17 = call @__sloth_rc_retain(%11) : (i64) -> i64
+    %18 = call @__sloth_arr_set(%14, %c1_i64, %17) : (i64, i64, i64) -> i64
     %alloca = memref.alloca() : memref<1xi64>
-    %19 = call @sloth_rc_retain(%14) : (i64) -> i64
+    %19 = call @__sloth_rc_retain(%14) : (i64) -> i64
     memref.store %19, %alloca[%c0] : memref<1xi64>
     %intptr = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
     %20 = arith.index_cast %intptr : index to i64
-    %21 = call @sloth_fiber_track(%20) : (i64) -> i64
-    %22 = call @sloth_rc_release(%5) : (i64) -> i64
-    %23 = call @sloth_rc_release(%11) : (i64) -> i64
-    %24 = call @sloth_rc_release(%14) : (i64) -> i64
+    %21 = call @__sloth_fiber_track(%20) : (i64) -> i64
+    %22 = call @__sloth_rc_release(%5) : (i64) -> i64
+    %23 = call @__sloth_rc_release(%11) : (i64) -> i64
+    %24 = call @__sloth_rc_release(%14) : (i64) -> i64
     %25 = memref.load %alloca[%c0] : memref<1xi64>
-    %26 = call @sloth_arr_len(%25) : (i64) -> i64
+    %26 = call @__sloth_arr_len(%25) : (i64) -> i64
     %alloca_0 = memref.alloca() : memref<1xi64>
     memref.store %c0_i64, %alloca_0[%c0] : memref<1xi64>
     cf.br ^bb1
@@ -163,13 +164,13 @@ module @main {
     %28 = arith.cmpi slt, %27, %26 : i64
     cf.cond_br %28, ^bb2, ^bb7
   ^bb2:  // pred: ^bb1
-    %29 = call @sloth_arr_get(%25, %27) : (i64, i64) -> i64
+    %29 = call @__sloth_arr_get(%25, %27) : (i64, i64) -> i64
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %29, %alloca_1[%c0] : memref<1xi64>
     %30 = memref.load %alloca_1[%c0] : memref<1xi64>
     %alloca_2 = memref.alloca() : memref<1xi64>
-    %31 = call @sloth_obj_vtable(%30) : (i64) -> i64
-    %32 = call @sloth_vt_get(%31, %c6_i64) : (i64, i64) -> i64
+    %31 = call @__sloth_obj_vtable(%30) : (i64) -> i64
+    %32 = call @__sloth_vt_get(%31, %c8_i64) : (i64, i64) -> i64
     %33 = arith.cmpi ne, %32, %c0_i64 : i64
     cf.cond_br %33, ^bb3, ^bb4
   ^bb3:  // pred: ^bb2
@@ -178,7 +179,7 @@ module @main {
     memref.store %35, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb5
   ^bb4:  // pred: ^bb2
-    %36 = call @sloth_panic_noimpl(%c0_i64) : (i64) -> i64
+    %36 = call @__sloth_panic_noimpl(%c0_i64) : (i64) -> i64
     memref.store %c0_i64, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb5
   ^bb5:  // 2 preds: ^bb3, ^bb4
@@ -186,62 +187,149 @@ module @main {
     %38 = memref.get_global @sloth_anyd_0 : memref<11xi64>
     %intptr_3 = memref.extract_aligned_pointer_as_index %38 : memref<11xi64> -> index
     %39 = arith.index_cast %intptr_3 : index to i64
-    %40 = call @sloth_any_from(%39, %37) : (i64, i64) -> i64
+    %40 = call @__sloth_any_from(%39, %37) : (i64, i64) -> i64
     call @sloth_main__print(%40) : (i64) -> ()
-    %41 = call @sloth_rc_release(%40) : (i64) -> i64
-    %42 = call @sloth_rc_release(%37) : (i64) -> i64
+    %41 = call @__sloth_rc_release(%40) : (i64) -> i64
+    %42 = call @__sloth_rc_release(%37) : (i64) -> i64
     cf.br ^bb6
   ^bb6:  // pred: ^bb5
     %43 = arith.addi %27, %c1_i64 : i64
     memref.store %43, %alloca_0[%c0] : memref<1xi64>
     cf.br ^bb1
   ^bb7:  // pred: ^bb1
-    %44 = call @sloth_cls_info(%c0_i64, %c3_i64) : (i64, i64) -> i64
+    %44 = call @__sloth_cls_info(%c0_i64, %c4_i64) : (i64, i64) -> i64
     %45 = llvm.ptrtoint %0 : !llvm.ptr to i64
-    %46 = call @sloth_cls_name(%44, %45, %c3_i64) : (i64, i64, i64) -> i64
-    %47 = call @sloth_obj_new(%44, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
+    %46 = call @__sloth_cls_name(%44, %45, %c3_i64) : (i64, i64, i64) -> i64
+    %47 = call @__sloth_obj_new(%44, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
     %48 = call @sloth_vtb_main_Dog() : () -> i64
-    %49 = call @sloth_obj_set_vtable(%47, %48) : (i64, i64) -> i64
+    %49 = call @__sloth_obj_set_vtable(%47, %48) : (i64, i64) -> i64
     %50 = call @sloth_main__announce(%47) : (i64) -> i64
     %51 = memref.get_global @sloth_anyd_0 : memref<11xi64>
     %intptr_4 = memref.extract_aligned_pointer_as_index %51 : memref<11xi64> -> index
     %52 = arith.index_cast %intptr_4 : index to i64
-    %53 = call @sloth_any_from(%52, %50) : (i64, i64) -> i64
+    %53 = call @__sloth_any_from(%52, %50) : (i64, i64) -> i64
     call @sloth_main__print(%53) : (i64) -> ()
-    %54 = call @sloth_rc_release(%47) : (i64) -> i64
-    %55 = call @sloth_rc_release(%53) : (i64) -> i64
-    %56 = call @sloth_rc_release(%50) : (i64) -> i64
-    %57 = call @sloth_cls_info(%c0_i64, %c3_i64) : (i64, i64) -> i64
+    %54 = call @__sloth_rc_release(%47) : (i64) -> i64
+    %55 = call @__sloth_rc_release(%53) : (i64) -> i64
+    %56 = call @__sloth_rc_release(%50) : (i64) -> i64
+    %57 = call @__sloth_cls_info(%c0_i64, %c4_i64) : (i64, i64) -> i64
     %58 = llvm.ptrtoint %0 : !llvm.ptr to i64
-    %59 = call @sloth_cls_name(%57, %58, %c3_i64) : (i64, i64, i64) -> i64
-    %60 = call @sloth_obj_new(%57, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
+    %59 = call @__sloth_cls_name(%57, %58, %c3_i64) : (i64, i64, i64) -> i64
+    %60 = call @__sloth_obj_new(%57, %c0_i64, %c0_i64) : (i64, i64, i64) -> i64
     %61 = call @sloth_vtb_main_Dog() : () -> i64
-    %62 = call @sloth_obj_set_vtable(%60, %61) : (i64, i64) -> i64
+    %62 = call @__sloth_obj_set_vtable(%60, %61) : (i64, i64) -> i64
     %63 = memref.get_global @sloth_anyd_1 : memref<11xi64>
     %intptr_5 = memref.extract_aligned_pointer_as_index %63 : memref<11xi64> -> index
     %64 = arith.index_cast %intptr_5 : index to i64
-    %65 = call @sloth_any_from(%64, %60) : (i64, i64) -> i64
-    %66 = call @sloth_rt_write(%65) : (i64) -> i64
-    %67 = call @sloth_str_pushp(%c0_i64, %66) : (i64, i64) -> i64
-    %68 = call @sloth_str_finish(%67) : (i64) -> i64
+    %65 = call @__sloth_any_from(%64, %60) : (i64, i64) -> i64
+    %66 = call @__sloth_rt_write(%65) : (i64) -> i64
+    %67 = call @__sloth_str_pushp(%c0_i64, %66) : (i64, i64) -> i64
+    %68 = call @__sloth_str_finish(%67) : (i64) -> i64
     %69 = memref.get_global @sloth_anyd_0 : memref<11xi64>
     %intptr_6 = memref.extract_aligned_pointer_as_index %69 : memref<11xi64> -> index
     %70 = arith.index_cast %intptr_6 : index to i64
-    %71 = call @sloth_any_from(%70, %68) : (i64, i64) -> i64
+    %71 = call @__sloth_any_from(%70, %68) : (i64, i64) -> i64
     call @sloth_main__print(%71) : (i64) -> ()
-    %72 = call @sloth_rc_release(%60) : (i64) -> i64
-    %73 = call @sloth_rc_release(%65) : (i64) -> i64
-    %74 = call @sloth_rc_release(%66) : (i64) -> i64
-    %75 = call @sloth_rc_release(%68) : (i64) -> i64
-    %76 = call @sloth_rc_release(%71) : (i64) -> i64
+    %72 = call @__sloth_rc_release(%60) : (i64) -> i64
+    %73 = call @__sloth_rc_release(%65) : (i64) -> i64
+    %74 = call @__sloth_rc_release(%66) : (i64) -> i64
+    %75 = call @__sloth_rc_release(%68) : (i64) -> i64
+    %76 = call @__sloth_rc_release(%71) : (i64) -> i64
     %77 = memref.load %alloca[%c0] : memref<1xi64>
-    %78 = call @sloth_rc_release(%77) : (i64) -> i64
+    %78 = call @__sloth_rc_release(%77) : (i64) -> i64
     %intptr_7 = memref.extract_aligned_pointer_as_index %alloca : memref<1xi64> -> index
     %79 = arith.index_cast %intptr_7 : index to i64
-    %80 = call @sloth_fiber_untrack(%79) : (i64) -> i64
+    %80 = call @__sloth_fiber_untrack(%79) : (i64) -> i64
     cf.br ^bb8
   ^bb8:  // pred: ^bb7
     return
+  }
+  func.func @sloth_main_StrChars____init__(%arg0: i64, %arg1: i64) {
+    %c2_i64 = arith.constant 2 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %c0_i64 = arith.constant 0 : i64
+    %c0 = arith.constant 0 : index
+    %alloca = memref.alloca() : memref<1xi64>
+    %alloca_0 = memref.alloca() : memref<1xi64>
+    memref.store %arg0, %alloca_0[%c0] : memref<1xi64>
+    %alloca_1 = memref.alloca() : memref<1xi64>
+    memref.store %arg1, %alloca_1[%c0] : memref<1xi64>
+    %0 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %1 = memref.load %alloca_0[%c0] : memref<1xi64>
+    %2 = call @__sloth_obj_field(%1, %c0_i64) : (i64, i64) -> i64
+    %3 = call @__sloth_rc_release(%2) : (i64) -> i64
+    %4 = call @__sloth_rc_retain(%0) : (i64) -> i64
+    %5 = call @__sloth_obj_set_field(%1, %c0_i64, %4) : (i64, i64, i64) -> i64
+    %6 = memref.load %alloca_0[%c0] : memref<1xi64>
+    %7 = call @__sloth_obj_set_field(%6, %c1_i64, %c0_i64) : (i64, i64, i64) -> i64
+    %8 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %9 = call @__sloth_str_clen(%8) : (i64) -> i64
+    %10 = memref.load %alloca_0[%c0] : memref<1xi64>
+    %11 = call @__sloth_obj_set_field(%10, %c2_i64, %9) : (i64, i64, i64) -> i64
+    memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
+    cf.br ^bb1
+  ^bb1:  // pred: ^bb0
+    return
+  }
+  llvm.func @sloth_main_StrChars__iter(%arg0: i64) -> i64 {
+    %c1_i64 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : index
+    %alloca = memref.alloca() : memref<1xi64>
+    %alloca_0 = memref.alloca() : memref<1xi64>
+    %alloca_1 = memref.alloca() : memref<1xi64>
+    memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
+    %0 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %1 = func.call @__sloth_rc_retain(%0) : (i64) -> i64
+    memref.store %1, %alloca_0[%c0] : memref<1xi64>
+    memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
+    cf.br ^bb1
+  ^bb1:  // pred: ^bb0
+    %2 = memref.load %alloca_0[%c0] : memref<1xi64>
+    llvm.return %2 : i64
+  }
+  llvm.func @sloth_main_StrChars__next(%arg0: i64) -> i64 {
+    %c0_i64 = arith.constant 0 : i64
+    %c2_i64 = arith.constant 2 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : index
+    %alloca = memref.alloca() : memref<1xi64>
+    %alloca_0 = memref.alloca() : memref<1xi64>
+    %alloca_1 = memref.alloca() : memref<1xi64>
+    memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
+    %0 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %1 = func.call @__sloth_obj_field(%0, %c1_i64) : (i64, i64) -> i64
+    %2 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %3 = func.call @__sloth_obj_field(%2, %c2_i64) : (i64, i64) -> i64
+    %4 = arith.cmpi sge, %1, %3 : i64
+    cf.cond_br %4, ^bb1, ^bb2
+  ^bb1:  // pred: ^bb0
+    %5 = func.call @__sloth_rc_retain(%c0_i64) : (i64) -> i64
+    memref.store %5, %alloca_0[%c0] : memref<1xi64>
+    memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
+    cf.br ^bb4
+  ^bb2:  // pred: ^bb0
+    cf.br ^bb3
+  ^bb3:  // pred: ^bb2
+    %6 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %7 = func.call @__sloth_obj_field(%6, %c0_i64) : (i64, i64) -> i64
+    %8 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %9 = func.call @__sloth_obj_field(%8, %c1_i64) : (i64, i64) -> i64
+    %10 = func.call @__sloth_str_codepoint(%7, %9) : (i64, i64) -> i64
+    %alloca_2 = memref.alloca() : memref<1xi64>
+    memref.store %10, %alloca_2[%c0] : memref<1xi64>
+    %11 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %12 = func.call @__sloth_obj_field(%11, %c1_i64) : (i64, i64) -> i64
+    %13 = arith.addi %12, %c1_i64 : i64
+    %14 = memref.load %alloca_1[%c0] : memref<1xi64>
+    %15 = func.call @__sloth_obj_set_field(%14, %c1_i64, %13) : (i64, i64, i64) -> i64
+    %16 = memref.load %alloca_2[%c0] : memref<1xi64>
+    %17 = func.call @__sloth_box_new(%16) : (i64) -> i64
+    memref.store %17, %alloca_0[%c0] : memref<1xi64>
+    memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
+    cf.br ^bb4
+  ^bb4:  // 2 preds: ^bb1, ^bb3
+    %18 = memref.load %alloca_0[%c0] : memref<1xi64>
+    llvm.return %18 : i64
   }
   llvm.func @sloth_main_Cat__name(%arg0: i64) -> i64 {
     %c1_i64 = arith.constant 1 : i64
@@ -253,8 +341,8 @@ module @main {
     %alloca_0 = memref.alloca() : memref<1xi64>
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
-    %0 = func.call @sloth_str_push(%c0_i64, %c7627107_i64, %c3_i64) : (i64, i64, i64) -> i64
-    %1 = func.call @sloth_str_finish(%0) : (i64) -> i64
+    %0 = func.call @__sloth_str_push(%c0_i64, %c7627107_i64, %c3_i64) : (i64, i64, i64) -> i64
+    %1 = func.call @__sloth_str_finish(%0) : (i64) -> i64
     memref.store %1, %alloca_0[%c0] : memref<1xi64>
     memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
     cf.br ^bb1
@@ -264,6 +352,7 @@ module @main {
   }
   llvm.func @sloth_main_Cat__say(%arg0: i64) -> i64 {
     %c1_i64 = arith.constant 1 : i64
+    %c7_i64 = arith.constant 7 : i64
     %c5_i64 = arith.constant 5 : i64
     %c139274035273_i64 = arith.constant 139274035273 : i64
     %c0_i64 = arith.constant 0 : i64
@@ -272,11 +361,11 @@ module @main {
     %alloca_0 = memref.alloca() : memref<1xi64>
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
-    %0 = func.call @sloth_str_push(%c0_i64, %c139274035273_i64, %c5_i64) : (i64, i64, i64) -> i64
+    %0 = func.call @__sloth_str_push(%c0_i64, %c139274035273_i64, %c5_i64) : (i64, i64, i64) -> i64
     %1 = memref.load %alloca_1[%c0] : memref<1xi64>
     %alloca_2 = memref.alloca() : memref<1xi64>
-    %2 = func.call @sloth_obj_vtable(%1) : (i64) -> i64
-    %3 = func.call @sloth_vt_get(%2, %c5_i64) : (i64, i64) -> i64
+    %2 = func.call @__sloth_obj_vtable(%1) : (i64) -> i64
+    %3 = func.call @__sloth_vt_get(%2, %c7_i64) : (i64, i64) -> i64
     %4 = arith.cmpi ne, %3, %c0_i64 : i64
     cf.cond_br %4, ^bb1, ^bb2
   ^bb1:  // pred: ^bb0
@@ -285,7 +374,7 @@ module @main {
     memref.store %6, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb2:  // pred: ^bb0
-    %7 = func.call @sloth_panic_noimpl(%c0_i64) : (i64) -> i64
+    %7 = func.call @__sloth_panic_noimpl(%c0_i64) : (i64) -> i64
     memref.store %c0_i64, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb3:  // 2 preds: ^bb1, ^bb2
@@ -293,15 +382,15 @@ module @main {
     %9 = memref.get_global @sloth_anyd_0 : memref<11xi64>
     %intptr = memref.extract_aligned_pointer_as_index %9 : memref<11xi64> -> index
     %10 = arith.index_cast %intptr : index to i64
-    %11 = func.call @sloth_any_from(%10, %8) : (i64, i64) -> i64
-    %12 = func.call @sloth_rt_write(%11) : (i64) -> i64
-    %13 = func.call @sloth_str_pushp(%0, %12) : (i64, i64) -> i64
-    %14 = func.call @sloth_str_finish(%13) : (i64) -> i64
+    %11 = func.call @__sloth_any_from(%10, %8) : (i64, i64) -> i64
+    %12 = func.call @__sloth_rt_write(%11) : (i64) -> i64
+    %13 = func.call @__sloth_str_pushp(%0, %12) : (i64, i64) -> i64
+    %14 = func.call @__sloth_str_finish(%13) : (i64) -> i64
     memref.store %14, %alloca_0[%c0] : memref<1xi64>
     memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
-    %15 = func.call @sloth_rc_release(%11) : (i64) -> i64
-    %16 = func.call @sloth_rc_release(%12) : (i64) -> i64
-    %17 = func.call @sloth_rc_release(%8) : (i64) -> i64
+    %15 = func.call @__sloth_rc_release(%11) : (i64) -> i64
+    %16 = func.call @__sloth_rc_release(%12) : (i64) -> i64
+    %17 = func.call @__sloth_rc_release(%8) : (i64) -> i64
     cf.br ^bb4
   ^bb4:  // pred: ^bb3
     %18 = memref.load %alloca_0[%c0] : memref<1xi64>
@@ -317,8 +406,8 @@ module @main {
     %alloca_0 = memref.alloca() : memref<1xi64>
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
-    %0 = func.call @sloth_str_push(%c0_i64, %c6778724_i64, %c3_i64) : (i64, i64, i64) -> i64
-    %1 = func.call @sloth_str_finish(%0) : (i64) -> i64
+    %0 = func.call @__sloth_str_push(%c0_i64, %c6778724_i64, %c3_i64) : (i64, i64, i64) -> i64
+    %1 = func.call @__sloth_str_finish(%0) : (i64) -> i64
     memref.store %1, %alloca_0[%c0] : memref<1xi64>
     memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
     cf.br ^bb1
@@ -336,8 +425,8 @@ module @main {
     %alloca_0 = memref.alloca() : memref<1xi64>
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
-    %0 = func.call @sloth_str_push(%c0_i64, %c176771526468_i64, %c5_i64) : (i64, i64, i64) -> i64
-    %1 = func.call @sloth_str_finish(%0) : (i64) -> i64
+    %0 = func.call @__sloth_str_push(%c0_i64, %c176771526468_i64, %c5_i64) : (i64, i64, i64) -> i64
+    %1 = func.call @__sloth_str_finish(%0) : (i64) -> i64
     memref.store %1, %alloca_0[%c0] : memref<1xi64>
     memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
     cf.br ^bb1
@@ -347,6 +436,7 @@ module @main {
   }
   llvm.func @sloth_main_Dog__say(%arg0: i64) -> i64 {
     %c1_i64 = arith.constant 1 : i64
+    %c7_i64 = arith.constant 7 : i64
     %c5_i64 = arith.constant 5 : i64
     %c139274035273_i64 = arith.constant 139274035273 : i64
     %c0_i64 = arith.constant 0 : i64
@@ -355,11 +445,11 @@ module @main {
     %alloca_0 = memref.alloca() : memref<1xi64>
     %alloca_1 = memref.alloca() : memref<1xi64>
     memref.store %arg0, %alloca_1[%c0] : memref<1xi64>
-    %0 = func.call @sloth_str_push(%c0_i64, %c139274035273_i64, %c5_i64) : (i64, i64, i64) -> i64
+    %0 = func.call @__sloth_str_push(%c0_i64, %c139274035273_i64, %c5_i64) : (i64, i64, i64) -> i64
     %1 = memref.load %alloca_1[%c0] : memref<1xi64>
     %alloca_2 = memref.alloca() : memref<1xi64>
-    %2 = func.call @sloth_obj_vtable(%1) : (i64) -> i64
-    %3 = func.call @sloth_vt_get(%2, %c5_i64) : (i64, i64) -> i64
+    %2 = func.call @__sloth_obj_vtable(%1) : (i64) -> i64
+    %3 = func.call @__sloth_vt_get(%2, %c7_i64) : (i64, i64) -> i64
     %4 = arith.cmpi ne, %3, %c0_i64 : i64
     cf.cond_br %4, ^bb1, ^bb2
   ^bb1:  // pred: ^bb0
@@ -368,7 +458,7 @@ module @main {
     memref.store %6, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb2:  // pred: ^bb0
-    %7 = func.call @sloth_panic_noimpl(%c0_i64) : (i64) -> i64
+    %7 = func.call @__sloth_panic_noimpl(%c0_i64) : (i64) -> i64
     memref.store %c0_i64, %alloca_2[%c0] : memref<1xi64>
     cf.br ^bb3
   ^bb3:  // 2 preds: ^bb1, ^bb2
@@ -376,24 +466,24 @@ module @main {
     %9 = memref.get_global @sloth_anyd_0 : memref<11xi64>
     %intptr = memref.extract_aligned_pointer_as_index %9 : memref<11xi64> -> index
     %10 = arith.index_cast %intptr : index to i64
-    %11 = func.call @sloth_any_from(%10, %8) : (i64, i64) -> i64
-    %12 = func.call @sloth_rt_write(%11) : (i64) -> i64
-    %13 = func.call @sloth_str_pushp(%0, %12) : (i64, i64) -> i64
-    %14 = func.call @sloth_str_finish(%13) : (i64) -> i64
+    %11 = func.call @__sloth_any_from(%10, %8) : (i64, i64) -> i64
+    %12 = func.call @__sloth_rt_write(%11) : (i64) -> i64
+    %13 = func.call @__sloth_str_pushp(%0, %12) : (i64, i64) -> i64
+    %14 = func.call @__sloth_str_finish(%13) : (i64) -> i64
     memref.store %14, %alloca_0[%c0] : memref<1xi64>
     memref.store %c1_i64, %alloca[%c0] : memref<1xi64>
-    %15 = func.call @sloth_rc_release(%11) : (i64) -> i64
-    %16 = func.call @sloth_rc_release(%12) : (i64) -> i64
-    %17 = func.call @sloth_rc_release(%8) : (i64) -> i64
+    %15 = func.call @__sloth_rc_release(%11) : (i64) -> i64
+    %16 = func.call @__sloth_rc_release(%12) : (i64) -> i64
+    %17 = func.call @__sloth_rc_release(%8) : (i64) -> i64
     cf.br ^bb4
   ^bb4:  // pred: ^bb3
     %18 = memref.load %alloca_0[%c0] : memref<1xi64>
     llvm.return %18 : i64
   }
   llvm.func @sloth_anydisp_1(%arg0: i64) -> i64 {
-    %c7_i64 = arith.constant 7 : i64
-    %0 = func.call @sloth_obj_vtable(%arg0) : (i64) -> i64
-    %1 = func.call @sloth_vt_get(%0, %c7_i64) : (i64, i64) -> i64
+    %c9_i64 = arith.constant 9 : i64
+    %0 = func.call @__sloth_obj_vtable(%arg0) : (i64) -> i64
+    %1 = func.call @__sloth_vt_get(%0, %c9_i64) : (i64, i64) -> i64
     %2 = llvm.inttoptr %1 : i64 to !llvm.ptr
     %3 = llvm.call %2(%arg0) : !llvm.ptr, (i64) -> i64
     llvm.return %3 : i64

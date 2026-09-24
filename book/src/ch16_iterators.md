@@ -57,6 +57,6 @@ class Range3 {
 ```
 
 `for x in r`（自定义类型）发射为 `r.iter()` 取迭代器、每轮 `iter.next()` 判空；
-Map 迭代先用 `sloth_map_keys` 取键快照数组，再逐键 `sloth_map_get`/`sloth_map_str_get`
+Map 迭代先用 `__sloth_map_keys` 取键快照数组，再逐键 `__sloth_map_get`/`__sloth_map_str_get`
 组装 Entry；**字面量** range（如 `0..=3`）被内联为计数循环，只有一等 range 值才走
-`sloth_range_lo`/`sloth_range_hi`（见 §7）。
+`__sloth_range_lo`/`__sloth_range_hi`（见 §7）。

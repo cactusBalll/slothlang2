@@ -38,8 +38,8 @@ let n = i ?: 7;                 // Elvis：nil 时取 7
 {{#include examples/optionals.mlir}}
 ```
 
-可观察到的运行时面：值型 optional 用 `sloth_box_new`/`sloth_box_get`；
-print/插值把 optional 装箱为 `any` 后交给 `sloth_rt_write`（nil-aware：`nil`
+可观察到的运行时面：值型 optional 用 `__sloth_box_new`/`__sloth_box_get`；
+print/插值把 optional 装箱为 `any` 后交给 `__sloth_rt_write`（nil-aware：`nil`
 打印为 `nil`，盒中的 `0`/`false` 正常显示）；`is nil` 是对词面是否为 `0` 的判定。
 
 ## 15.4 `Weak<T>`
@@ -69,5 +69,5 @@ var strong = w.upgrade();         // -> Node?（死目标为 nil）
 {{#include examples/weak.mlir}}
 ```
 
-`w = tmp` 发射 `sloth_weak_new`（不 retain `tmp`）；`w.upgrade()` 发射
-`sloth_weak_upgrade`，返回的 `T?` 再做 nil 判定。目标死亡后 `upgrade()` 得到 `0`。
+`w = tmp` 发射 `__sloth_weak_new`（不 retain `tmp`）；`w.upgrade()` 发射
+`__sloth_weak_upgrade`，返回的 `T?` 再做 nil 判定。目标死亡后 `upgrade()` 得到 `0`。

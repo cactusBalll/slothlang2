@@ -6,7 +6,8 @@
 | --- | --- | --- |
 | 单元 | `unit` | 空返回类型 |
 | 布尔 | `bool` | 仅 `bool` 可作条件 |
-| 数值 | `int`（64-bit）、`float`（f64） | **无隐式互转**，用 `int()`/`float()` |
+| 数值 | `int`（有符号 64-bit）、`float`（f64） | **无隐式互转**，用 `int()`/`float()` |
+| 定宽整数 | `int8`/`int16`/`int32`、`uint`/`uint8`/`uint16`/`uint32`/`uint64`（别名 `i8`/`u8`/…） | 显式转换、按宽度环绕；不同宽度不可直接混算（见 §5.6） |
 | 字符串 | `str` | UTF-8，不可变；无 interning，`==` 按内容比较 |
 | 范围 | `range` | `a..b` / `a..=b`，元素 `int` |
 | 数组 | `Array<T>` | 同构动态数组 |
@@ -38,6 +39,7 @@ header `sdtor`），其余种类各带编译期标志（数组 `elref`、Map `kf
 | --- | --- | --- |
 | 引用句柄 | 裸 payload 指针（`0` = nil） | 直接使用 |
 | `int` | 原生 `i64`（**64-bit**，环绕） | 直接使用 |
+| 定宽整数 | 原生 `i64`，运算前按声明宽度**截断/环绕** | 直接使用（按有无符号解释） |
 | `float` | 原生 `f64` 位模式（bitcast 到 `i64`） | `i64` bitcast 回 `f64` |
 | `bool` | `0` / `1` | `!= 0` |
 | `nil` | `0` | `0` |
@@ -52,8 +54,8 @@ no-op。值词不会被 `retain`/`release`（它们本就不是 rc 句柄）。
 
 ## 5.3 值类型 vs 引用类型
 
-- **值类型**：`unit` / `bool` / `int` / `float` / `range`（`range` 在实现里是
-  `{lo,hi}` 盒的引用词）。赋值/传参为复制。
+- **值类型**：`unit` / `bool` / `int` / `float` / 定宽整数 / `range`（`range` 在
+  实现里是 `{lo,hi}` 盒的引用词）。赋值/传参为复制。
 - **引用类型**：`str` / `Array` / `Map` / 类实例 / 闭包 / `dyn`。赋值/传参为
   引用共享（语义上是别名）。
 
@@ -91,6 +93,39 @@ no-op。值词不会被 `retain`/`release`（它们本就不是 rc 句柄）。
 {{#include examples/wordplane.mlir}}
 ```
 
-对着这段 MLIR 可以读到整形的完整解码-运算-编码序列：`arith.shrsi` 解出原始
-`int`、`arith.addi` 相加、`arith.shli` 重新编码；比较用 `arith.cmpi`，结果经
-`arith.extui` 变成 `bool` 词（`true` = `2`）。
+对着这段 MLIR 可以读到无 tag 词面的形态：`1 + 2` 直接是 `arith.constant 3 : i64`
+（常量折叠）或 `arith.addi`；`float` 只在标量域出现——`llvm.bitcast : i64 to f64`
+取出 `f64`、`arith.addf` 相加、`llvm.bitcast : f64 to i64` 收回词面；`3 < 4` 用
+`arith.cmpi`，结果经 `arith.extui : i1 to i64` 得到 `bool` 词（`true` = `1`，不再
+是去 tag 前的 `2`）；`nil` 就是常量 `0`。
+
+## 5.6 定宽与无符号整数
+
+在默认的 `int`（有符号 64-bit）之外，语言提供一族定宽整数（对齐设计 §3.3 的
+位运算扩展）：
+
+| 有符号 | 无符号 | 位宽 |
+| --- | --- | --- |
+| `int8`（`i8`） | `uint8`（`u8`） | 8 |
+| `int16`（`i16`） | `uint16`（`u16`） | 16 |
+| `int32`（`i32`） | `uint32`（`u32`） | 32 |
+| `int`（唯一名称） | `uint`（`uint64`/`u64`） | 64 |
+
+语义要点：
+
+- **显式转换**：`int8(x)` / `uint32(x)` / `uint(x)` … 把操作数截断到目标宽度
+  （按二补码环绕）：`int8(300) == 44`、`uint8(250) + 10 == 4`、`uint(-1)` 是
+  `18446744073709551615`。
+- **不隐式加宽**：不同定宽操作数混算/比较报
+  `type mismatch in arithmetic operand` / `…comparison operand`，需显式转换；
+  `int` 字面量会自动采用另一操作数的宽度。
+- **有/无符号运算符**：`/`、`%`、`>>`、`< <= > >=` 按操作数的有无符号选择
+  `divsi/divui`、`remsi/remui`、`shrsi/shrui`、`slt/ult` 等（见 §7）。
+- **`is` 按宽度判定**：`int8(5) is int8` 为 `true`，`is int` 为 `false`；在 `any`
+  上同样精确到具体宽度。
+- **提升到 float**：`uint`/`uint8`/… 转 `float` 用无符号提升，保留量值
+  （`float(uint(-1)) > 1.0e18` 为 `true`）。
+- **字面量**：`5u` 强制无符号；超过 `i64::MAX` 的十进制字面量是 `uint`（见 §4.2）。
+
+> 别名只在**类型位置**可用；有符号 64-bit 没有别名，其类型名就是 `int`
+> （`int64`/`i64` 不是可声明的类型名）。

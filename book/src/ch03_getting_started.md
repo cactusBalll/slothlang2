@@ -49,18 +49,25 @@ hello, sloth!
 这段 MLIR 值得逐块读一遍：
 
 - `@sloth_main__ginit` 是**模块初始化函数**：顶层 `var`/`let` 的初值在这里写入
-  全局 cell。没有全局变量时它是空体。
+  全局 cell。**没有全局变量时它也不再是空体**——它至少调用
+  `@sloth_main__anyinit`，后者初始化 `any` 的结构化类型描述符
+  （`memref.global @sloth_anyd_N`）。
+- 编译器还会为每个模块注入一批前导定义：`@sloth_main__print`、字符串迭代器
+  `@sloth_main_StrChars____init__`/`__iter`/`__next`、`@sloth_main__anyinit`
+  以及 `any` 的类型名字符串（`llvm.mlir.global @sloth_tynm_N`）。即使源码
+  没有用到，`hello` 也带着它们。
 - `@sloth_main` 是脚本入口，带 `llvm.emit_c_interface`，由 JIT 的
   `invokePacked` 调用。
 - 字符串字面量被**内联为 8 字节一组的 `i64` 常量**，经
-  `sloth_str_push(builder, word, len)` 拼进字符串构建器，
-  最后 `sloth_str_finish` 收口分配出一个 `str` 句柄（不做驻留）。
-- `${name}` 插值把值装箱为 `any`，经 `sloth_rt_write(any)` 渲染成 `str`，
-  再用 `sloth_str_pushp` 推进构建器。
-- 插值结果交给 stdlib `print`，其内部 `sloth_rt_puts(write(v))` 打印后立即
-  `sloth_rc_release`——这是 ARC 的**语句级临时量结算**（见 §23）。
+  `__sloth_str_push(builder, word, len)` 拼进字符串构建器，
+  最后 `__sloth_str_finish` 收口分配出一个 `str` 句柄（不做驻留）。
+- `${name}` 插值把值装箱为 `any`，经 `__sloth_rt_write(any)` 渲染成 `str`，
+  再用 `__sloth_str_pushp` 推进构建器。
+- 插值结果交给 stdlib `print`，其内部 `__sloth_rt_puts(write(v))` 打印后立即
+  `__sloth_rc_release`——这是 ARC 的**语句级临时量结算**（见 §23）。
 - 局部变量 `name` 存放在 `memref<1xi64>` 的栈槽里；绑定那一刻发出
-  `sloth_rc_retain`，作用域退出时 `sloth_rc_release`。
+  `__sloth_rc_retain`，作用域退出时 `__sloth_rc_release`（引用局部量另用
+  `__sloth_fiber_track`/`__sloth_fiber_untrack` 登记/注销）。
 
 完整的（**未剥离前导**）模块见[附录 B](appendix_b_mlir.md)。
 

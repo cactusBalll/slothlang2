@@ -8,7 +8,7 @@
 | --- | --- |
 | `sloth-frontend` | 词法分析、递归下降 + Pratt 语法分析、AST、类型表示（`ty.rs`） |
 | `sloth-codegen` | 发射器（`irgen/`）把 AST 直接转成 MLIR；`pass.rs`/`jit.rs` 走 LLVM 管线并 JIT 执行；`module.rs`/`context.rs` 是 MLIR C API 封装 |
-| `sloth-rt` | 运行时 `libsloth_rt.so`：分配器、ARC、字符串、容器、对象/虚表、panic、extern 示例 |
+| `sloth-rt` | 运行时 `libsloth_rt.so`：裸分配、ARC/弱引用、字符串、对象/虚表、panic，以及 I/O/网络/张量/协程/线程的 C-ABI 入口与 extern 示例（Array/Map/range/值盒的实现改由自举 prelude 提供） |
 | `slothc` | 命令行前端（`check` / `ir` / `run` / `build`） |
 
 ## 2.2 实际流水线
@@ -28,19 +28,32 @@ AST（Program { imports, decls, stmts }）
    │   ├─ 收集符号 / 类 / trait / 模块依赖（collect.rs, module.rs）
    │   ├─ 局部类型推断 + 词面（word-class）surface 兼容检查（tybind.rs）
    │   ├─ 泛型函数/类的单态化实例缓存（emit_gfunc_call）
-   │   └─ 直接拼接 MLIR 文本（func/arith/cf/memref/llvm）
+   │   └─ 拼接 MLIR 文本：ARC 发射 sloth.rc_retain/release，其余标准 dialect
    ▼
-MLIR（标准 dialect + 对 libsloth_rt 的调用）
-   │  PassManager: canonicalize, cse, convert-{func,arith,index,cf}-to-llvm,
-   │              finalize-memref-to-llvm, reconcile-unrealized-casts
+含 sloth.* 的 MLIR
+   │  单点 lowering（dialect.rs::lower_parsed / slothLowerModule）
+   ▼
+MLIR（标准 dialect + 对 libsloth_rt / 自举 prelude 的调用）
+   │  PassManager: canonicalize, cse, one-shot-bufferize,
+   │              linalg-fuse-elementwise-ops, convert-linalg-to-loops,
+   │              convert-scf-to-cf, convert-math-to-llvm, convert-func-to-llvm,
+   │              convert-arith-to-llvm, convert-index-to-llvm,
+   │              convert-cf-to-llvm, finalize-memref-to-llvm,
+   │              reconcile-unrealized-casts
    ▼
 LLVM IR ──► JIT（`run`）或 目标文件（`build`，经 mlir-opt/mlir-translate/clang）
 ```
 
 要点：
 
-- **没有独立的 `sloth` dialect**。发射器只使用标准 dialect，运行时能力通过
-  `func.func private @sloth_*` 的 C-ABI 调用表达。
+- **`sloth` dialect 只是一个最小语义层**：ARC 的 `sloth.rc_retain` /
+  `sloth.rc_release` 在 parse 后被**单点 lowering** 为标准 `func.call
+  @__sloth_rc_*`；完成 lowering 后 IR 中不再出现任何 `sloth.*`（JIT/AOT 双路径
+  均有泄漏闸门）。其余发射全部使用标准 dialect，运行时能力通过
+  `func.func private @__sloth_*` 的 C-ABI 调用表达。
+- **自举 prelude**：`lib/prelude/{containers,core}.slt` 以 Sloth 自身实现
+  Array/Map/range/值盒，编译期注入根模块，因此在生成的模块里这些
+  `@__sloth_arr_*` / `@__sloth_map_*` 等是被**定义**的函数而非外部声明。
 - **诊断批量收集**：发射器不 fail-fast，一次编译尽量报多个错误（`Diag` 列表）。
 - **引用计数的插入点在发射期静态确定**（见 §23），因此无需栈图 / statepoint。
 
@@ -52,6 +65,7 @@ LLVM IR ──► JIT（`run`）或 目标文件（`build`，经 mlir-opt/mlir-t
 | 源码类型 | MLIR 类型 | 运行时词面编码 |
 | --- | --- | --- |
 | `int` | `i64` | 原生 i64（64-bit，环绕） |
+| `int8`/`int16`/`int32`、`uint`/`uint8`/`uint16`/`uint32`/`uint64` | `i64` | 原生 i64，按声明宽度截断/环绕；无符号按位模式解释 |
 | `float` | `i64`（调用边界转 `f64`） | 原生 f64 位模式（bitcast） |
 | `bool` | `i64` | `0` / `1` |
 | `nil` | `i64` | `0` |
@@ -68,8 +82,14 @@ LLVM IR ──► JIT（`run`）或 目标文件（`build`，经 mlir-opt/mlir-t
 
 ## 2.4 运行时符号面
 
-发射器会为每个模块补充一份**固定前导**：约 60 条 `func.func private @sloth_*`
-声明，覆盖 ARC（`rc_retain`/`rc_release`/`rc_live`/`rc_drops`）、弱引用
-（`weak_new`/`weak_upgrade`）、值型 optional 盒（`box_new`/`box_get`）、
-字符串与构建器、数组、Map、对象与虚表、panic 通道。完整清单见
-[附录 B](appendix_b_mlir.md)。示例 MLIR 中这份前导已被剥离。
+发射器会为每个模块补充一份**固定前导**：空程序约有 200 条
+`func.func private @__sloth_*` 声明，来源是编译器注入的 `lib/prelude/abi.slt`
+（标准库所需的运行时 extern）与内部 prelude。它覆盖 ARC
+（`rc_retain`/`rc_release`/`rc_live`/`rc_drops`）、弱引用（`weak_*`）、值型
+optional 盒（`box_*`）、字符串与构建器、对象与虚表、panic 通道，以及
+I/O/网络/张量/协程/线程的全部 C-ABI 入口。数组/Map/range/值盒的实现函数不属于
+这份私有前导，而是由自举 prelude 在模块内定义。
+
+`__sloth_` 是**保留命名空间**：只有编译器注入的 prelude 可以声明这些符号；普通
+模块若要直接调用它们，必须带伪导入 `import "__sloth";`（见 §22.4）。完整符号
+清单见[附录 B](appendix_b_mlir.md)。示例 MLIR 中这份私有前导已被剥离。

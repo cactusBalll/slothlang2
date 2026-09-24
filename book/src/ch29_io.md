@@ -43,10 +43,10 @@ kind     : SELECT=0 POLL=1 EPOLL=2 KQUEUE=3 IOURING=4
 op       : ADD=1 MOD=2 DEL=3
 interest : READ=1 WRITE=2     revents 追加 ERR=4 HUP=8
 
-EvLoop* sloth_ev_new(kind)                     // 0 = 不支持/失败
-i64     sloth_ev_ctl(ev, op, fd, events, token)
-i64     sloth_ev_poll(ev, timeout_ms, EvBuf*)  // 就绪数或 -errno
-i64     sloth_ev_wakeup(ev)                    // eventfd 唤醒阻塞 wait
+EvLoop* __sloth_ev_new(kind)                     // 0 = 不支持/失败
+i64     __sloth_ev_ctl(ev, op, fd, events, token)
+i64     __sloth_ev_poll(ev, timeout_ms, EvBuf*)  // 就绪数或 -errno
+i64     __sloth_ev_wakeup(ev)                    // eventfd 唤醒阻塞 wait
 ```
 
 `token` 是不透明 i64，由 sloth 侧编码、rt 只回传。所有可能失败的 net/event 调用
@@ -58,7 +58,7 @@ i64     sloth_ev_wakeup(ev)                    // eventfd 唤醒阻塞 wait
 ## 29.4 五后端的实现原理
 
 所有实现都在 `crates/sloth-rt/src/event.rs`，共享同一份循环状态与注册表；后端
-差异只体现在 `sloth_ev_ctl`（如何把 fd 挂进内核/登记表）与 `sloth_ev_poll`
+差异只体现在 `__sloth_ev_ctl`（如何把 fd 挂进内核/登记表）与 `__sloth_ev_poll`
 （如何取回就绪集）这两个调用上。
 
 ### 29.4.1 共享骨架：`EvLoop`、注册表与 eventfd 唤醒
@@ -84,7 +84,7 @@ pub struct EvLoop {
 打断任意后端的阻塞 wait：
 
 ```rust
-pub extern "C" fn sloth_ev_wakeup(h: i64) -> i64 {
+pub extern "C" fn __sloth_ev_wakeup(h: i64) -> i64 {
     let ev = &*(h as *const EvLoop);
     let v: u64 = 1;
     let _ = libc::write(ev.wake_fd, &v as *const u64 as *const libc::c_void, 8);
@@ -92,12 +92,12 @@ pub extern "C" fn sloth_ev_wakeup(h: i64) -> i64 {
 }
 ```
 
-三个入口的分发也非常薄：`sloth_ev_ctl` 对 epoll 直接转发 `epoll_ctl`，对注册表
-后端维护 `regs`/`by_token`（io_uring 额外 `arm`）；`sloth_ev_poll` 按 `kind`
+三个入口的分发也非常薄：`__sloth_ev_ctl` 对 epoll 直接转发 `epoll_ctl`，对注册表
+后端维护 `regs`/`by_token`（io_uring 额外 `arm`）；`__sloth_ev_poll` 按 `kind`
 调用对应 `poll_*`：
 
 ```rust
-pub extern "C" fn sloth_ev_poll(h: i64, timeout_ms: i64, out: i64) -> i64 {
+pub extern "C" fn __sloth_ev_poll(h: i64, timeout_ms: i64, out: i64) -> i64 {
     let ev = match unsafe { loop_of(h) } {
         Some(e) => e,
         None => return -(libc::EINVAL as i64),
@@ -113,7 +113,7 @@ pub extern "C" fn sloth_ev_poll(h: i64, timeout_ms: i64, out: i64) -> i64 {
 }
 ```
 
-`EvBuf` 是 `sloth_ev_poll` 的输出缓冲（`cap/count/tokens/revents`），rt 只负责
+`EvBuf` 是 `__sloth_ev_poll` 的输出缓冲（`cap/count/tokens/revents`），rt 只负责
 把 `(token, revents)` 追加进去，再由 sloth 侧解码。
 
 ### 29.4.2 select：自建 `fd_set` 位图
@@ -306,7 +306,7 @@ unsafe fn drain(&mut self, buf: &mut EvBuf, regs: &[Reg]) {
 
 `DEL` 不主动 `IORING_OP_POLL_REMOVE`：注册表移除后，陈旧 CQE 会因 `token`/`gen`
 不匹配而被忽略；fd 关闭触发的完成同样被忽略。容器/旧内核上
-`sloth_ev_available(IOURING)` 先探测 `io_uring_setup`，失败即不选用。
+`__sloth_ev_available(IOURING)` 先探测 `io_uring_setup`，失败即不选用。
 
 ### 29.4.6 kqueue（保留）
 
@@ -433,11 +433,11 @@ func main(): unit {
 | 用例 | 位置 |
 | --- | --- |
 | 无网络：字节缓冲/时钟/后端常量/地址/字符串工具 | `crates/slothc/tests/spec/119_net_api.sl` |
-| 定时器顺序 + 四后端 fiber TCP echo + `rc_live` 回落 | `120_event_queue.sl` |
+| 定时器顺序 + 四后端 fiber TCP echo | `120_event_queue.sl` |
 | HTTP 解析/响应/路由 + 四后端端到端 200 | `121_http_parse.sl` |
 | 四后端计算卸载（结果正确 + loop 未阻塞） | `122_thread_offload.sl` |
 | rt 集成（四后端 socketpair、TCP/UDP、eventfd 唤醒、无限超时） | `crates/sloth-rt/tests/net_smoke.rs` |
 | 六示例（含 AOT） | `examples/net/run.sh` |
 
 JIT（`slothc run`）与 AOT（`slothc build`，clang -O3 链接 `libsloth_rt.so`）下行为
-一致；本机四后端（select/poll/epoll/io_uring）逐项通过，`available(kqueue)==false`。
+一致；本机四后端（select/poll/epoll/io_uring）逐项通过，`backend_available(kind_kqueue()) == false`。

@@ -16,7 +16,7 @@ let ann = |x: int| -> int { return x; };// 可标注返回类型
 
 ## 10.2 表示与调用
 
-闭包统一发射为 **2 词对象 `{ fnptr, env }`**（`sloth_closure_new`，
+闭包统一发射为 **2 词对象 `{ fnptr, env }`**（`__sloth_closure_new`，
 `dtor` 只释放 env）。任何函数值调用都经过为每个目标生成的 **bridge**，ABI 为
 `(env, args...) -> word`。
 
@@ -38,7 +38,7 @@ let ann = |x: int| -> int { return x; };// 可标注返回类型
 ```
 
 注意 `make_adder`：它把捕获的形参 `n` 存进闭包环境槽（`memref.alloca` +
-`sloth_closure_new`），返回的闭包是 owned 引用值。`snap` 证明了标量捕获的快照
+`__sloth_closure_new`），返回的闭包是 owned 引用值。`snap` 证明了标量捕获的快照
 语义——`base` 改成 `0` 后 `snap(1)` 仍是 `101`。
 
 ## 10.5 方法引用

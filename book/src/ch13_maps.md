@@ -42,10 +42,10 @@ Entry 对象，因此是"活"的键值对视图。
 {{#include examples/maps.mlir}}
 ```
 
-对应运行时符号：`sloth_map_new`、读 `sloth_map_str_get`（`str` 键专用路由）/
-`sloth_map_get` + `sloth_map_get_h`（`int` 等词键，`_h` 变体带预计算哈希）、写
-`sloth_map_str_set`/`sloth_map_set`/`sloth_map_set_h`、`sloth_map_len`、以及
-`sloth_map_keys`/`sloth_map_values`。注意 `keys()`/`values()` 返回的是**新数组**
+对应运行时符号：`__sloth_map_new`、读 `__sloth_map_str_get`（`str` 键专用路由）/
+`__sloth_map_get` + `__sloth_map_get_h`（`int` 等词键，`_h` 变体带预计算哈希）、写
+`__sloth_map_str_set`/`__sloth_map_set`/`__sloth_map_set_h`、`__sloth_map_len`、以及
+`__sloth_map_keys`/`__sloth_map_values`。注意 `keys()`/`values()` 返回的是**新数组**
 （owned 生产者），调用者负责结算。
 
 > 自举：开放寻址 + 线性探测 + FNV/mix64 哈希与扩容逻辑同样在注入的

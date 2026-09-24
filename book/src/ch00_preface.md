@@ -17,14 +17,15 @@
 ```
 
 生成脚本会剥离每个模块都会原样发射的"固定运行时前导声明"
-（`func.func private @sloth_*`），以使 MLIR 可读；被剥离的前导与完整的模块
-骨架见[附录 B](appendix_b_mlir.md)。示例的 `extern func` 声明不会被剥离。
+（`func.func private @__sloth_*`）与自举 prelude 的函数体，以使 MLIR 可读；
+被剥离的前导与完整的模块骨架见[附录 B](appendix_b_mlir.md)。示例的
+`extern func` 声明不会被剥离。
 
 ## 阅读约定
 
 - 代码块标注 `sloth` 的是源程序，标注 `mlir` 的是它对应的 MLIR。
-- MLIR 使用标准 dialect（`func` / `arith` / `cf` / `memref` / `llvm`），
-  运行时调用表现为对 `libsloth_rt` 导出符号的 `func.func private @sloth_*`
-  声明。
+- MLIR 使用标准 dialect（`func` / `arith` / `cf` / `memref` / `llvm` 及张量段
+  的 `tensor`/`linalg`/`scf`/`math`），运行时调用表现为对 `libsloth_rt` 导出
+  符号的 `func.func private @__sloth_*` 声明（或自举 prelude 在模块内的定义）。
 - 本指南不保证 MLIR 文本逐字稳定（SSA 编号、常量折叠细节可能随实现演进），
   但其结构与所调用的运行时符号是有意展示的部分。

@@ -27,7 +27,7 @@ class Result<T, E> {
   `Result<_,_>` 实例——来自 `let/var` 的显式标注、函数返回注解、或赋值目标的容器
   值类型。无注解的 `let x = ok(5);` 报
   `ctor `ok` requires a declared Result target`。
-- `unwrap()` 在 `ok == false` 时走运行时 `sloth_panic_unwrap`（打印并退出）。
+- `unwrap()` 在 `ok == false` 时走运行时 `__sloth_panic_unwrap`（打印并退出）。
 - `err()` 直接返回载荷（类型 `E`）。
 
 ## 17.2 返回位置
@@ -53,5 +53,5 @@ func parse(x: int): Result<int, str> {
 
 `Result<int,str>` 与 `Result<float,int>` 各被单态化为独立类，其方法发射为
 `@sloth_main_Result_int_str__is_ok` 等。`ok`/`err` 构造在调用点内联为
-`sloth_obj_new` + `sloth_obj_set_field`（字段 `ok`/`v`/`e`）；
-`unwrap` 的非 ok 分支调用 `sloth_panic_unwrap`。
+`__sloth_obj_new` + `__sloth_obj_set_field`（字段 `ok`/`v`/`e`）；
+`unwrap` 的非 ok 分支调用 `__sloth_panic_unwrap`。

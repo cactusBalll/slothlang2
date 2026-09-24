@@ -5,14 +5,18 @@
 | 内建 | 签名 | 说明 |
 | --- | --- | --- |
 | `len(x)` | `(str\|Array\|Map) -> int` | `str` 为**字节数** |
-| `int(x)` | `(float\|int?…) -> int` | 向零截断；`int(str)` 不支持（MVP） |
-| `float(x)` | `(int\|float?…) -> float` | `float(str)` 不支持（MVP） |
+| `int(x)` | `(float\|float?…) -> int` | 向零截断；`int(str)` 不支持（MVP） |
+| `float(x)` | `(int\|int?…) -> float` | `uint` 用无符号提升；`float(str)` 不支持（MVP） |
+| `int8(x)`/`int16`/`int32`/`uint`/`uint8`/… | `(整数\|float) -> 定宽整数` | 截断到目标宽度（环绕）；见 §5.6 |
 | `keys(m)` | `(Map<K,V>) -> Array<K>` | 新数组（owned） |
 | `values(m)` | `(Map<K,V>) -> Array<V>` | 新数组（owned） |
 | `chars(s)` | `(str) -> StrChars` | 惰性码点迭代器（`next(): int?`，见 §14.3） |
 | `typeid(x)` / `type_name(x)` | `(ref\|any) -> int\|str` | 运行时类型身份 |
 | `sloth_rc_live()` | `() -> int` | ARC 存活计数 |
 | `sloth_rc_drops()` | `() -> int` | ARC 累计析构数 |
+
+> 上表 `sloth_rc_live()` / `sloth_rc_drops()` 是**源码层**名字（发射器识别为内建）；
+> 它们生成的调用是 `@__sloth_rc_live` / `@__sloth_rc_drops`。
 
 `print` **不再是编译器内建**：它由编译器自动注入的 Sloth prelude 实现
 （源码形态在 `lib/prelude/print.slt`，经 `include_str!` 嵌入），基于运行时
@@ -26,7 +30,7 @@ pub func print(v: any): unit { __sloth_rt_puts(__sloth_rt_write(v)); }
 
 任意值传入 `print`/`${}` 时会隐式装箱为 `any`（见 §5.1、§24.2），因此
 `print` 可打印数组/Map/嵌套容器/类实例，`${}` 插值也统一走
-`sloth_rt_write`（不再有逐类型的 `sloth_str_push_*` 分派）。
+`__sloth_rt_write`（不再有逐类型的 `__sloth_str_push_*` 分派）。
 
 方法形式的等价物：`a.len()`、`s.len()`、`m.len()`；`s.chars()`（等价 `chars(s)`，
 惰性码点迭代器）；`w.upgrade()`（`Weak<T>` → `T?`）。
@@ -59,8 +63,8 @@ pub func print(v: any): unit { __sloth_rt_puts(__sloth_rt_write(v)); }
 
 `typeid(x) -> int` 与 `type_name(x) -> str` 覆盖所有**引用类型**，粒度为单态：
 
-- 类实例与 `dyn`：经对象的 `ObjInfo`（构造时由 `@sloth_cls_name` 注册名字）取
-  **最派生**的具体类，`@sloth_obj_cls_id` / `@sloth_obj_type_name` 解析；
+- 类实例与 `dyn`：经对象的 `ObjInfo`（构造时由 `@__sloth_cls_name` 注册名字）取
+  **最派生**的具体类，`@__sloth_obj_cls_id` / `@__sloth_obj_type_name` 解析；
 - 其余引用类型（`str`/`Array`/`Map`/`Tensor`/`Fiber`/`Channel`/`Weak`/`range`/
   闭包/`any` 等）：编译期常量 id 与名字。`TYPEID_BASE = 2^40`，与类 id 空间不
   相交；

@@ -36,6 +36,9 @@ trait_method    ::= 'func' IDENT '(' params ')' ':' type
 
 type            ::= type_base '?'?                      (* T?? 报错 *)
 type_base       ::= 'unit' | 'int' | 'float' | 'bool' | 'str' | 'range'
+                  | ('int8' | 'i8' | 'int16' | 'i16' | 'int32' | 'i32'
+                    | 'uint' | 'uint64' | 'u64' | 'uint8' | 'u8'
+                    | 'uint16' | 'u16' | 'uint32' | 'u32')   (* 定宽整数，§5.6 *)
                   | 'Array' '<' type '>'
                   | 'Map' '<' type ',' type '>'
                   | 'Weak' '<' type '>'
@@ -97,7 +100,8 @@ lambda          ::= ( '||' | '|' params? '|' ) ( '->' type )? block
 
 ```ebnf
 IDENT   ::= [A-Za-z_][A-Za-z0-9_]*
-INT     ::= [0-9]+
+INT     ::= [0-9]+ ( 'u' | 'U' )?      (* 后缀 u 强制无符号 uint；十进制超出
+                                          i64::MAX 也归为 uint，§4.2 *)
 FLOAT   ::= [0-9]+ '.' [0-9]+ ( [eE] [+-]? [0-9]+ )?
           | [0-9]+ [eE] [+-]? [0-9]+
 STRING  ::= '"' ( 转义 | '${' expr '}' | 普通字符 )* '"'
@@ -108,7 +112,8 @@ comment ::= '//' ... '\n' | '/*' ... '*/'
 super this break continue is pub trait impl dyn as`。
 
 **上下文关键字**（仅在类型/声明位置有特殊含义，可作标识符）：`int float bool str unit
-range Array Map Weak Fiber JoinHandle Channel Tensor dyn extern`。
+range Array Map Weak Fiber JoinHandle Channel Tensor dyn extern`，以及定宽整数名
+`int8 int16 int32 uint uint8 uint16 uint32 uint64` 与别名 `i8 i16 i32 u8 u16 u32 u64`。
 `Mutex` / `AtomicInt` 为内建不透明句柄，由 `mutex.*` / `atomic.*` 内建模块使用。
 
 `&&` / `||` 是 `and` / `or` 的同义 token。范围运算符 `..` / `..=`，管道 `|>`，

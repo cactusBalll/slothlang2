@@ -3,10 +3,14 @@
 #
 # 逐文件运行 `slothc ir`，并剥离：
 #   1. "固定运行时前导声明"（每个模块都会原样发射的 `func.func private
-#      @sloth_*`），集合由空程序计算得到，因此用户自己的 `extern func`
+#      @__sloth_*`），集合由空程序计算得到，因此用户自己的 `extern func`
 #      声明会保留；
-#   2. 自举容器实现（`lib/prelude/containers.slt` 注入后发射的
-#      `@sloth_arr_*` / `@sloth_map_*` 函数体），它约 1700 行且与示例无关。
+#   2. 自举 prelude 实现（`lib/prelude/{containers,core}.slt` 注入后发射的
+#      `@__sloth_arr_*` / `@__sloth_map_*` / `@__sloth_range_*` /
+#      `@__sloth_box_*` 函数体），它们与示例无关。
+#
+# 注意：运行时 ABI 符号自 430f0e3 起统一带保留前缀 `__sloth_`（见
+# 附录 A/B），本脚本的剥离模式必须跟随该前缀。
 set -euo pipefail
 cd "$(dirname "$0")/.." # workspace 根
 
@@ -20,17 +24,17 @@ if [ ! -x "$SLOTHC" ]; then
   cargo build -p slothc >/dev/null 2>&1
 fi
 
-# 去掉一段顶层容器函数（函数头以 `@...sloth_(arr|map)_` 开头，函数体以
-# 两空格缩进的 `}` 结束）
+# 去掉一段顶层 prelude 自举函数（函数头以 `@...sloth_(arr|map|range|box)_`
+# 开头，函数体以两空格缩进的 `}` 结束）
 cat > "$TMP/strip.awk" <<'AWK'
-/^  (func[.]func|llvm[.]func) @.*sloth_(arr|map)_/ { skip = 1 }
+/^  (func[.]func|llvm[.]func) @.*sloth_(arr|map|range|box)_/ { skip = 1 }
 skip == 1 && /^  }$/ { skip = 0; next }
 skip == 1 { next }
 { print }
 AWK
 
 printf 'func main() {\n}\n' > "$TMP/base.sl"
-"$SLOTHC" ir "$TMP/base.sl" | grep '^  func.func private @sloth_' | sort -u > "$TMP/prelude.txt"
+"$SLOTHC" ir "$TMP/base.sl" | grep '^  func.func private @__sloth_' | sort -u > "$TMP/prelude.txt"
 
 n=0
 for f in "$EX"/*.sl; do
