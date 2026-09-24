@@ -791,6 +791,11 @@ impl ModEmitter {
                 self.emit_ret_flag_store(fw);
                 // rc patch B: unsettled producer temps die before the jump
                 fw.rc_flush();
+                // abandon any enclosing loop: drop its owned element (the
+                // `cont`/`brk` release is bypassed by the return)
+                for h in fw.rc_loop_elems() {
+                    self.emit_release(fw, &h);
+                }
                 self.jump_to_ret(fw);
             }
             StmtNode::Return(Some(e)) => {
@@ -1125,8 +1130,13 @@ impl ModEmitter {
             fw.rc_consume(&v);
         }
         // the frame is abandoned: settle owned locals the normal scope-exit
-        // path would have released
+        // path would have released, plus the owned per-iteration elements of
+        // any enclosing loop (the result word was transferred above, so it is
+        // safe to drop its producer here)
         fw.rc_release_scope_slots();
+        for h in fw.rc_loop_elems() {
+            self.emit_release(fw, &h);
+        }
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : index", zi));
         fw.op(&format!(
@@ -1900,6 +1910,7 @@ impl ModEmitter {
         let brk = fw.newlabel("ix");
         fw.loop_bases.push(fw.scope_decls.len());
         fw.loops.push((brk.clone(), cont.clone()));
+        fw.loop_owned_elems.push(None);
         // loop var = seq[i]
         let gtv = fw.v();
         fw.op(&format!(
@@ -1912,6 +1923,11 @@ impl ModEmitter {
             el
         };
         let _ = gety;
+        // a fresh char `str` element is owned by the loop; a `return` inside
+        // the body must release it (the `cont`/`brk` paths are not reached)
+        if kind == IdxKind::StrChar {
+            *fw.loop_owned_elems.last_mut().unwrap() = Some(gtv.clone());
+        }
         let vs = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
         fw.op(&format!(
@@ -1925,6 +1941,7 @@ impl ModEmitter {
         self.walk_body(fw, body);
         fw.loops.pop();
         fw.loop_bases.pop();
+        fw.loop_owned_elems.pop();
         fw.label_br(&cont);
         // str iteration produces a fresh char str per element (§5.1.1
         // rule 7): the loop var holds a borrow view, so the producer's +1 is
@@ -2108,6 +2125,14 @@ impl ModEmitter {
         // break must still drop the current non-boxed ref element (owned
         // next() result); boxed payloads were already dropped above
         fw.loops.push((brk.clone(), cont.clone()));
+        // the owned element must also survive a `return` from the body (which
+        // bypasses both the `cont` and `brk` releases); boxed payloads were
+        // dropped above, so they are not tracked here
+        if !el_boxed && ov_owned {
+            fw.loop_owned_elems.push(Some(ov.clone()));
+        } else {
+            fw.loop_owned_elems.push(None);
+        }
         // loop var = unwrap(next())
         let vs = fw.v();
         if el_boxed {
@@ -2137,6 +2162,7 @@ impl ModEmitter {
         self.walk_body(fw, body);
         fw.loops.pop();
         fw.loop_bases.pop();
+        fw.loop_owned_elems.pop();
         // iteration continuation: reached by fallthrough and by `continue`;
         // a ref-shaped element that stayed a borrow view is dropped here
         fw.label_br(&cont);

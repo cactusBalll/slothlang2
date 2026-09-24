@@ -1,0 +1,610 @@
+// sloth2 stdlib: str — common string processing helpers.
+//
+// `str` itself is an immutable, non-interned UTF-8 heap value (book §14): `==`
+// compares content, every construction allocates a fresh object, and the
+// compiler already offers byte subscripts (`s[i]`, `s[a..b]`), per-character
+// iteration (`for c in s`) and the lazy code-point iterator (`s.chars()`).
+//
+// This module layers the usual convenience surface on top of those primitives:
+// length / case folding / trimming / searching / splitting / joining /
+// replacing / repeating / reversing / padding / numeric parsing.
+//
+// Index conventions, following the core language:
+//   - `str_len` / `str_byte` / `str_slice` / `str_find` operate on **bytes**
+//     (raw UTF-8), matching `len(s)` and `s[i]`;
+//   - `str_clen` / `str_char_at` / `str_substr` / `str_index_of` operate on
+//     **characters** (Unicode scalar values), matching `for c in s` and
+//     `s.chars()`.
+//
+// Character predicates are byte-based ASCII tests: a one-byte character must
+// match exactly; multi-byte characters are never classified as ASCII.
+//
+// The reserved runtime string helpers (`__sloth_str_*`) are declared by the
+// injected ABI prelude (`lib/prelude/abi.slt`); the pseudo-import below grants
+// this module the right to call them.
+
+import "__sloth";
+
+// ============================ length / primitives ============================
+
+/// byte length of `s` (same as `len(s)`)
+pub func str_len(s: str): int {
+    return len(s);
+}
+
+/// number of Unicode scalar values (characters) in `s`
+pub func str_clen(s: str): int {
+    var n = 0;
+    for c in s {
+        n = n + 1;
+    }
+    return n;
+}
+
+/// is `s` the empty string?
+pub func str_is_empty(s: str): bool {
+    return len(s) == 0;
+}
+
+/// content equality (delegates to value `==`); never handle identity
+pub func str_eq(a: str, b: str): bool {
+    return a == b;
+}
+
+/// lexicographic byte compare: negative / zero / positive
+pub func str_cmp(a: str, b: str): int {
+    return __sloth_str_cmp(a, b);
+}
+
+/// i-th raw byte of `s` (0..255); panics when out of range
+pub func str_byte(s: str, i: int): int {
+    return __sloth_str_byte(s, i);
+}
+
+/// one raw byte value as a fresh one-byte `str`
+pub func str_of_byte(v: int): str {
+    return __sloth_str_of_byte(v);
+}
+
+/// byte slice `[start, start+len)` as a fresh `str`; panics when out of range
+pub func str_slice(s: str, start: int, len: int): str {
+    return __sloth_str_slice(s, start, len);
+}
+
+/// first byte index of `needle` in `hay` at/after `from`, or -1
+pub func str_find(hay: str, needle: str, from: int): int {
+    return __sloth_str_find(hay, needle, from);
+}
+
+// ============================ search predicates ============================
+
+/// does `s` start with `prefix`?
+pub func str_starts_with(s: str, prefix: str): bool {
+    return __sloth_str_starts_with(s, prefix) != 0;
+}
+
+/// does `s` end with `suffix`?
+pub func str_ends_with(s: str, suffix: str): bool {
+    let sl = len(s);
+    let nl = len(suffix);
+    if nl > sl {
+        return false;
+    }
+    return str_slice(s, sl - nl, nl) == suffix;
+}
+
+/// does `s` contain `needle`?
+pub func str_contains(s: str, needle: str): bool {
+    return __sloth_str_find(s, needle, 0) >= 0;
+}
+
+/// count non-overlapping occurrences of `needle` in `s` (0 if `needle` empty)
+pub func str_count(s: str, needle: str): int {
+    let nl = len(needle);
+    if nl == 0 {
+        return 0;
+    }
+    var n = 0;
+    var from = 0;
+    while true {
+        let idx = __sloth_str_find(s, needle, from);
+        if idx < 0 {
+            break;
+        }
+        n = n + 1;
+        from = idx + nl;
+    }
+    return n;
+}
+
+/// byte offset of the first non-ASCII boundary within `s[0..target]` counted in
+/// characters (helper for char-index search)
+func char_index_at(s: str, target: int): int {
+    var cnt = 0;
+    var off = 0;
+    for c in s {
+        if off >= target {
+            break;
+        }
+        off = off + len(c);
+        cnt = cnt + 1;
+    }
+    return cnt;
+}
+
+/// character index of the first occurrence of `needle`, or -1
+pub func str_index_of(s: str, needle: str): int {
+    let b = __sloth_str_find(s, needle, 0);
+    if b < 0 {
+        return 0 - 1;
+    }
+    return char_index_at(s, b);
+}
+
+/// character index of the last occurrence of `needle`, or -1
+pub func str_last_index_of(s: str, needle: str): int {
+    let nl = len(needle);
+    if nl == 0 {
+        return str_clen(s);
+    }
+    var last = 0 - 1;
+    var from = 0;
+    while true {
+        let idx = __sloth_str_find(s, needle, from);
+        if idx < 0 {
+            break;
+        }
+        last = idx;
+        from = idx + nl;
+    }
+    if last < 0 {
+        return 0 - 1;
+    }
+    return char_index_at(s, last);
+}
+
+// ============================ character slices ============================
+
+/// character at character index `i` as a fresh one-character `str`, or `""`
+/// when out of range
+pub func str_char_at(s: str, i: int): str {
+    if i < 0 {
+        return "";
+    }
+    var idx = 0;
+    var off = 0;
+    for c in s {
+        if idx == i {
+            return str_slice(s, off, len(c));
+        }
+        off = off + len(c);
+        idx = idx + 1;
+    }
+    return "";
+}
+
+/// `count` characters of `s` starting at character index `start` (clamped to
+/// the string bounds); `""` when `start` is past the end
+pub func str_substr(s: str, start: int, count: int): str {
+    let total = len(s);
+    if start < 0 {
+        start = 0;
+    }
+    if count < 0 {
+        count = 0;
+    }
+    var idx = 0;
+    var off = 0;
+    var begin = total;
+    var end = total;
+    var started = false;
+    for c in s {
+        if idx == start {
+            begin = off;
+            started = true;
+        }
+        if started and idx == start + count {
+            end = off;
+            break;
+        }
+        off = off + len(c);
+        idx = idx + 1;
+    }
+    if not started {
+        return "";
+    }
+    if end < begin {
+        end = begin;
+    }
+    return str_slice(s, begin, end - begin);
+}
+
+/// first `n` characters of `s`
+pub func str_take(s: str, n: int): str {
+    return str_substr(s, 0, n);
+}
+
+/// `s` without its first `n` characters
+pub func str_drop(s: str, n: int): str {
+    return str_substr(s, n, str_clen(s) - n);
+}
+
+// ============================ trimming ============================
+
+/// is `c` ASCII whitespace (space, tab, newline, CR, VT, FF)?
+pub func str_is_space(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return b == 32 or (b >= 9 and b <= 13);
+}
+
+/// `s` without leading whitespace
+pub func str_trim_start(s: str): str {
+    var off = 0;
+    for c in s {
+        if not str_is_space(c) {
+            break;
+        }
+        off = off + len(c);
+    }
+    return str_slice(s, off, len(s) - off);
+}
+
+/// `s` without trailing whitespace
+pub func str_trim_end(s: str): str {
+    var end = 0;
+    var off = 0;
+    for c in s {
+        off = off + len(c);
+        if not str_is_space(c) {
+            end = off;
+        }
+    }
+    return str_slice(s, 0, end);
+}
+
+/// `s` without leading or trailing whitespace
+pub func str_trim(s: str): str {
+    return str_trim_end(str_trim_start(s));
+}
+
+// ============================ case ============================
+
+/// ASCII uppercase of `s` (non-ASCII characters are copied unchanged)
+pub func str_to_upper(s: str): str {
+    var r = "";
+    for c in s {
+        if len(c) == 1 {
+            let b = __sloth_str_byte(c, 0);
+            if b >= 97 and b <= 122 {
+                r = r + str_of_byte(b - 32);
+            } else {
+                r = r + c;
+            }
+        } else {
+            r = r + c;
+        }
+    }
+    return r;
+}
+
+/// ASCII lowercase of `s` (non-ASCII characters are copied unchanged)
+pub func str_to_lower(s: str): str {
+    var r = "";
+    for c in s {
+        if len(c) == 1 {
+            let b = __sloth_str_byte(c, 0);
+            if b >= 65 and b <= 90 {
+                r = r + str_of_byte(b + 32);
+            } else {
+                r = r + c;
+            }
+        } else {
+            r = r + c;
+        }
+    }
+    return r;
+}
+
+// ============================ character classes ============================
+
+/// is `c` a single ASCII letter?
+pub func str_is_alpha(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122);
+}
+
+/// is `c` a single ASCII digit?
+pub func str_is_digit(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return b >= 48 and b <= 57;
+}
+
+/// is `c` a single ASCII letter or digit?
+pub func str_is_alnum(c: str): bool {
+    return str_is_alpha(c) or str_is_digit(c);
+}
+
+/// is `c` a single ASCII uppercase letter?
+pub func str_is_upper(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return b >= 65 and b <= 90;
+}
+
+/// is `c` a single ASCII lowercase letter?
+pub func str_is_lower(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return b >= 97 and b <= 122;
+}
+
+/// is `c` a single ASCII hexadecimal digit?
+pub func str_is_hex(c: str): bool {
+    if len(c) != 1 {
+        return false;
+    }
+    let b = __sloth_str_byte(c, 0);
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102);
+}
+
+/// are all characters of `s` ASCII digits (and is `s` non-empty)?
+pub func str_is_digits(s: str): bool {
+    let n = len(s);
+    if n == 0 {
+        return false;
+    }
+    var i = 0;
+    while i < n {
+        let b = __sloth_str_byte(s, i);
+        if b < 48 or b > 57 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ============================ split / join ============================
+
+/// split `s` around every non-overlapping occurrence of `sep` (byte pattern,
+/// as in `str_find`). An empty `sep` splits into individual characters.
+pub func str_split(s: str, sep: str): Array<str> {
+    var out: Array<str> = [];
+    let sl = len(sep);
+    if sl == 0 {
+        for c in s {
+            out.push(c);
+        }
+        return out;
+    }
+    let n = len(s);
+    var start = 0;
+    while true {
+        let idx = __sloth_str_find(s, sep, start);
+        if idx < 0 {
+            out.push(str_slice(s, start, n - start));
+            break;
+        }
+        out.push(str_slice(s, start, idx - start));
+        start = idx + sl;
+    }
+    return out;
+}
+
+/// split `s` on `"\n"`, dropping a trailing `"\r"` from each line (CRLF aware)
+pub func str_split_lines(s: str): Array<str> {
+    var out = str_split(s, "\n");
+    var i = 0;
+    while i < out.len() {
+        let line = out[i];
+        let ll = len(line);
+        if ll > 0 and __sloth_str_byte(line, ll - 1) == 13 {
+            out[i] = str_slice(line, 0, ll - 1);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// join `parts` with `sep` between consecutive elements
+pub func str_join(parts: Array<str>, sep: str): str {
+    var r = "";
+    var i = 0;
+    while i < parts.len() {
+        if i > 0 {
+            r = r + sep;
+        }
+        r = r + parts[i];
+        i = i + 1;
+    }
+    return r;
+}
+
+// ============================ replace / repeat / reverse ============================
+
+/// replace the first occurrence of `from` in `s` with `to`
+pub func str_replace_first(s: str, from: str, to: str): str {
+    if len(from) == 0 {
+        return s;
+    }
+    let idx = __sloth_str_find(s, from, 0);
+    if idx < 0 {
+        return s;
+    }
+    return str_slice(s, 0, idx) + to + str_slice(s, idx + len(from), len(s) - idx - len(from));
+}
+
+/// replace every non-overlapping occurrence of `from` in `s` with `to`
+pub func str_replace(s: str, from: str, to: str): str {
+    let fl = len(from);
+    if fl == 0 {
+        return s;
+    }
+    var r = "";
+    let n = len(s);
+    var start = 0;
+    while true {
+        let idx = __sloth_str_find(s, from, start);
+        if idx < 0 {
+            r = r + str_slice(s, start, n - start);
+            break;
+        }
+        r = r + str_slice(s, start, idx - start) + to;
+        start = idx + fl;
+    }
+    return r;
+}
+
+/// `s` repeated `n` times (negative `n` yields `""`)
+pub func str_repeat(s: str, n: int): str {
+    var r = "";
+    var i = 0;
+    while i < n {
+        r = r + s;
+        i = i + 1;
+    }
+    return r;
+}
+
+/// reverse `s` by Unicode scalar values
+pub func str_reverse(s: str): str {
+    var chars: Array<str> = [];
+    for c in s {
+        chars.push(c);
+    }
+    var r = "";
+    var i = chars.len() - 1;
+    while i >= 0 {
+        r = r + chars[i];
+        i = i - 1;
+    }
+    return r;
+}
+
+// ============================ padding ============================
+
+/// left-pad `s` with `pad` until it is at least `width` characters long
+pub func str_pad_start(s: str, width: int, pad: str): str {
+    if len(pad) == 0 {
+        return s;
+    }
+    var r = s;
+    while str_clen(r) < width {
+        r = pad + r;
+    }
+    return r;
+}
+
+/// right-pad `s` with `pad` until it is at least `width` characters long
+pub func str_pad_end(s: str, width: int, pad: str): str {
+    if len(pad) == 0 {
+        return s;
+    }
+    var r = s;
+    while str_clen(r) < width {
+        r = r + pad;
+    }
+    return r;
+}
+
+// ============================ numeric parsing ============================
+
+/// parse a leading optional sign and decimal digits; stops at the first
+/// non-digit and yields the value parsed so far (0 if none)
+pub func str_to_int(s: str): int {
+    let n = len(s);
+    var i = 0;
+    var neg = false;
+    if n > 0 {
+        let b0 = __sloth_str_byte(s, 0);
+        if b0 == 43 or b0 == 45 {
+            neg = b0 == 45;
+            i = 1;
+        }
+    }
+    var v = 0;
+    while i < n {
+        let b = __sloth_str_byte(s, i);
+        if b < 48 or b > 57 {
+            break;
+        }
+        v = v * 10 + (b - 48);
+        i = i + 1;
+    }
+    if neg {
+        return 0 - v;
+    }
+    return v;
+}
+
+/// like `str_to_int`, but returns `default` when `s` has no digits at all
+pub func str_to_int_or(s: str, default: int): int {
+    var has = false;
+    var i = 0;
+    while i < len(s) {
+        let b = __sloth_str_byte(s, i);
+        if b >= 48 and b <= 57 {
+            has = true;
+            break;
+        }
+        i = i + 1;
+    }
+    if not has {
+        return default;
+    }
+    return str_to_int(s);
+}
+
+/// parse an optional sign, decimal digits and an optional fractional part
+/// (`"3.14"` -> 3.14); stops at the first unexpected character
+pub func str_to_float(s: str): float {
+    let n = len(s);
+    var i = 0;
+    var neg = false;
+    if n > 0 {
+        let b0 = __sloth_str_byte(s, 0);
+        if b0 == 43 or b0 == 45 {
+            neg = b0 == 45;
+            i = 1;
+        }
+    }
+    var v = 0.0;
+    while i < n {
+        let b = __sloth_str_byte(s, i);
+        if b < 48 or b > 57 {
+            break;
+        }
+        v = v * 10.0 + float(b - 48);
+        i = i + 1;
+    }
+    if i < n and __sloth_str_byte(s, i) == 46 {
+        i = i + 1;
+        var f = 0.1;
+        while i < n {
+            let b = __sloth_str_byte(s, i);
+            if b < 48 or b > 57 {
+                break;
+            }
+            v = v + float(b - 48) * f;
+            f = f / 10.0;
+            i = i + 1;
+        }
+    }
+    if neg {
+        return 0.0 - v;
+    }
+    return v;
+}

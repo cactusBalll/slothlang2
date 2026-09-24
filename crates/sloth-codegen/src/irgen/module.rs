@@ -774,6 +774,7 @@ impl ModEmitter {
                 loops: Vec::new(),
                 loop_bases: Vec::new(),
                 loopvars: Vec::new(),
+                loop_owned_elems: Vec::new(),
                 xfer: Vec::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),

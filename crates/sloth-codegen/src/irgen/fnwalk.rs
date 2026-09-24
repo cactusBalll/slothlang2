@@ -35,6 +35,13 @@ pub(crate) struct FnWalk {
     /// borrows of container elements; overwriting them must NOT release the
     /// element the slot does not own)
     pub(crate) loopvars: Vec<String>,
+    /// parallel to `loops`: the SSA word of the loop's *owned* per-iteration
+    /// element (a fresh char `str` from `for c in s`, or an owned `next()`
+    /// result), `None` when the element is a borrow / already dropped. A
+    /// `return` abandons the frame without reaching the loop's `cont`/`brk`
+    /// release, so the return face drains these instead (the scope-exit path
+    /// never owns them).
+    pub(crate) loop_owned_elems: Vec<Option<String>>,
     /// patch 42: words whose count transferred across a callee return edge
     /// (rc_consume): the receiver binds them as slot owners WITHOUT an
     /// extra retain; consumed on first binding (exact ownership)
@@ -137,6 +144,17 @@ impl FnWalk {
             false
         }
     }
+    /// owned per-iteration elements of every enclosing loop (innermost last),
+    /// for the return face to release after the result word is transferred.
+    /// Not destructive: sibling branches each need the same list.
+    pub(crate) fn rc_loop_elems(&self) -> Vec<String> {
+        self.loop_owned_elems
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
     /// release the owned locals of the loop-body scopes about to be abandoned
     /// by a `break`/`continue` (their block pop_scope is skipped once the
     /// terminator is emitted). Scopes from the loop-body base upward are
@@ -481,6 +499,7 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         end_label: "^ginit".to_string(),
         cur_cls: None,
         loopvars: Vec::new(),
+        loop_owned_elems: Vec::new(),
         xfer: Vec::new(),
     }
 }

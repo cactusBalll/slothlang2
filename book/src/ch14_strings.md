@@ -63,7 +63,54 @@ it.next();   // nil
   `chars()` 每轮产出一个**码点 `int`**，且可作为迭代器值传递 / 手动 `next()`。
 - 迭代器协议（`iter()`/`next(): int?`）见 §16。
 
-## 14.4 示例
+## 14.4 标准库 `sloth/str.slt`
+
+`import "sloth/str.slt";` 提供一组常用的字符串处理函数（纯 Sloth，构建在
+运行时的 `__sloth_str_*` 与语言内建之上）。**所有函数都是自由函数**（`str` 是
+内建类型，不能通过 `impl` 挂方法），命名统一用 `str_` 前缀。
+
+索引约定与核心语言一致：
+
+- **字节面**（与 `len(s)` / `s[i]` / `s[a..b]` 对应）：`str_len`、`str_byte`、
+  `str_slice`、`str_find`；
+- **字符面**（与 `for c in s` / `s.chars()` 对应，按 Unicode scalar 计数）：
+  `str_clen`、`str_char_at`、`str_substr`、`str_take`、`str_drop`、
+  `str_index_of`、`str_last_index_of`。
+
+| 分类 | 函数 |
+| --- | --- |
+| 长度 / 基础 | `str_len` `str_clen` `str_is_empty` `str_eq` `str_cmp` `str_byte` `str_of_byte` `str_slice` `str_find` |
+| 查找 / 判定 | `str_starts_with` `str_ends_with` `str_contains` `str_count` `str_index_of` `str_last_index_of` |
+| 字符切片 | `str_char_at` `str_substr` `str_take` `str_drop` |
+| 修剪 | `str_is_space` `str_trim` `str_trim_start` `str_trim_end` |
+| 大小写 | `str_to_upper` `str_to_lower`（ASCII；非 ASCII 原样保留） |
+| 字符分类 | `str_is_alpha` `str_is_digit` `str_is_alnum` `str_is_upper` `str_is_lower` `str_is_hex` `str_is_digits` |
+| 分割 / 连接 | `str_split` `str_split_lines`（CRLF 感知） `str_join` |
+| 替换 / 重复 / 反转 | `str_replace` `str_replace_first` `str_repeat` `str_reverse` |
+| 填充 | `str_pad_start` `str_pad_end` |
+| 数值解析 | `str_to_int` `str_to_int_or` `str_to_float` |
+
+```sloth
+import "sloth/str.slt";
+
+func main(): unit {
+    let csv = "  alpha, beta ,gamma  ";
+    let parts = str_split(str_trim(csv), ",");   // ["alpha", " beta ", "gamma"]
+    for i in 0..parts.len() {
+        print(str_trim(parts[i]));
+    }
+    print(str_join(["a", "b", "c"], "-"));       // a-b-c
+    print(str_to_upper("héllo"));                // HéLLO（é 保留）
+    print(str_substr("aé中", 1, 2));             // é中（按字符）
+    print(str_to_int_or("nope", -1));            // -1
+}
+```
+
+> 说明：`str_slice` / `str_find` / `str_starts_with` 等与 `sloth/io.slt` 中的同名
+> 低层助手语义完全一致（两者同时导入不会产生语义分歧）；字符分类函数按 **ASCII**
+> 判定，多字节字符一律不匹配。字符串不可变，每个结果都是新分配（§14.1）。
+
+## 14.5 示例
 
 ```sloth
 {{#include examples/strings.sl}}

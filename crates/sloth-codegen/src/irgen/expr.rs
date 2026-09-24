@@ -2432,6 +2432,14 @@ impl ModEmitter {
                         csig.join(", "),
                         rt
                     ));
+                    // §5.1.1 rule 4: a sloth function's ref return carries an
+                    // owned +1 across the module edge (the callee side
+                    // transferred it); mark it so the receiver claims it
+                    // instead of retaining a second time. Raw C extern symbols
+                    // (`fs.0` unmangled) keep C ownership and are left alone.
+                    if self.is_ref(fs.1) && fs.0.as_str() != mname2.as_str() {
+                        fw.rc_mark_xfer(&r);
+                    }
                     return (r, fs.1);
                 }
                 if let Some((g, gt, _)) = self.fglobals.get(&key).cloned() {
@@ -2743,9 +2751,17 @@ impl ModEmitter {
                 if ret_int {
                     return (emit_enc_int(fw, &rr), plan.ret);
                 }
-                // `__sloth_rt_write` returns a fresh owned `str` (unlike the
-                // usual C-ownership extern): track it so the temp is released
-                if sym == "__sloth_rt_write" && self.is_ref(plan.ret) {
+                // Reserved runtime externs that return a reference type are
+                // fresh owned rc producers (`intern_bytes`/`rc_addr`, count 1):
+                // `__sloth_str_slice`/`__sloth_str_of_byte`, `__sloth_bytes_*`,
+                // `__sloth_mmap_str`, `__sloth_addr_ip`,
+                // `__sloth_ev_backend_name`, `__sloth_tensor_*`,
+                // `__sloth_rt_write`, … Track them as statement-dangling so an
+                // unclaimed temp is released at statement end instead of
+                // leaking. Ordinary user `extern func` C symbols keep C
+                // ownership (their word may be a borrowed `char*`), and opaque
+                // `extern type` handles are not `is_ref`, so both pass through.
+                if sym.starts_with(RESERVED_PREFIX) && self.is_ref(plan.ret) {
                     self.dangling_producer(fw, &rr, plan.ret);
                 }
                 return (rr, plan.ret);
@@ -2874,6 +2890,13 @@ impl ModEmitter {
                 sigargs.join(", "),
                 rt
             ));
+            // §5.1.1 rule 4: cross-module sloth ref returns are owned (+1);
+            // mark the transfer so a binding claims it (see the local-call
+            // path's `xfer_expect`). Raw C extern symbols (unmangled `fs.0`,
+            // == the call name) keep C ownership and are left alone.
+            if self.is_ref(fs.1) && fs.0.as_str() != name.as_str() {
+                fw.rc_mark_xfer(&r);
+            }
             return (r, fs.1);
         }
         // builtins
