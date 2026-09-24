@@ -473,3 +473,24 @@ fn container_symbols_not_exported() {
     assert_eq!(rc::dec_i(mem::sloth_mem_load(h, 0)), 5);
     rc::sloth_rc_release(h);
 }
+
+/// The range/box C-ABI faces are self-hosted in `lib/prelude/core.slt` and
+/// must NOT be exported by the runtime. The Rust-internal `boxopt` helpers
+/// remain for fiber/channel construction and `any` rendering, over the same
+/// frozen `[payload]` layout the sloth prelude writes.
+#[test]
+fn core_symbols_not_exported() {
+    let _serial = serial();
+    let before = rc::dec_i(rc::sloth_rc_live());
+    let h = sloth_rt::boxopt::box_new(wi(7));
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before + 1, "box rc-tracked");
+    assert_ne!(h, 0, "box handle is a real address");
+    assert_eq!(
+        sloth_rt::boxopt::box_get(h),
+        wi(7),
+        "frozen [payload] layout"
+    );
+    assert_eq!(sloth_rt::boxopt::box_get(0), 0, "nil box reads 0");
+    rc::sloth_rc_release(h);
+    assert_eq!(rc::dec_i(rc::sloth_rc_live()), before, "box drained");
+}

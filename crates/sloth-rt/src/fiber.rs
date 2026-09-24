@@ -566,7 +566,7 @@ pub extern "C" fn sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
         (*from).inbox = 0;
         if (*f).state == STATE_SUSPENDED {
             if box_w != 0 {
-                return crate::boxopt::sloth_box_new(got);
+                return crate::boxopt::box_new(got);
             }
             got
         } else {
@@ -605,7 +605,7 @@ pub extern "C" fn sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 {
         (*from).inbox = 0;
         if (*f).state == STATE_SUSPENDED {
             if box_w != 0 {
-                return crate::boxopt::sloth_box_new(got);
+                return crate::boxopt::box_new(got);
             }
             got
         } else {

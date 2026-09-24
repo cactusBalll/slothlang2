@@ -280,28 +280,55 @@ pub(crate) const CONTAINER_SYMS: &[&str] = &[
     "sloth_map_values",
 ];
 
+/// Self-hosted range/value-box runtime, embedded from `lib/prelude/core.slt`.
+/// Same mechanism as the container prelude: the hardcoded
+/// `@sloth_range_*`/`@sloth_box_*` call sites resolve here.
+pub(crate) const CORE_PRELUDE: &str = include_str!("../../../../lib/prelude/core.slt");
+
+/// core prelude ABI symbols defined by the prelude (fixed, unmangled)
+pub(crate) const CORE_SYMS: &[&str] = &[
+    "sloth_range_pack",
+    "sloth_range_lo",
+    "sloth_range_hi",
+    "sloth_box_new",
+    "sloth_box_get",
+];
+
 /// prelude `__dispose__` routines whose address is taken (`fn_addr`): emitted
 /// as `llvm.func` so `llvm.mlir.addressof` is legal
 pub(crate) const CONTAINER_DISPOSERS: &[&str] = &["sloth_arr_dispose", "sloth_map_dispose"];
 
 impl ModEmitter {
-    /// inject the container prelude into the root module (once) and register
-    /// its fixed symbols / addressable disposers
+    /// inject the container + core preludes into the root module (once) and
+    /// register their fixed symbols / addressable disposers
     pub(crate) fn inject_container_prelude(&mut self, decls: &mut Vec<Decl>) {
-        if decls.iter().any(|d| {
+        let has_container = decls.iter().any(|d| {
             matches!(d.node, DeclNode::Func(_)) && CONTAINER_SYMS.contains(&d.name.as_str())
-        }) {
-            return;
+        });
+        if !has_container {
+            if let Ok(stdp) = sloth_frontend::parser::parse(CONTAINER_PRELUDE) {
+                for s in CONTAINER_SYMS {
+                    self.fixed_syms.insert((*s).to_string());
+                }
+                for s in CONTAINER_DISPOSERS {
+                    self.addressable.insert((*s).to_string());
+                }
+                for d in stdp.decls.into_iter().rev() {
+                    decls.insert(0, d);
+                }
+            }
         }
-        if let Ok(stdp) = sloth_frontend::parser::parse(CONTAINER_PRELUDE) {
-            for s in CONTAINER_SYMS {
-                self.fixed_syms.insert((*s).to_string());
-            }
-            for s in CONTAINER_DISPOSERS {
-                self.addressable.insert((*s).to_string());
-            }
-            for d in stdp.decls.into_iter().rev() {
-                decls.insert(0, d);
+        let has_core = decls
+            .iter()
+            .any(|d| matches!(d.node, DeclNode::Func(_)) && CORE_SYMS.contains(&d.name.as_str()));
+        if !has_core {
+            if let Ok(stdp) = sloth_frontend::parser::parse(CORE_PRELUDE) {
+                for s in CORE_SYMS {
+                    self.fixed_syms.insert((*s).to_string());
+                }
+                for d in stdp.decls.into_iter().rev() {
+                    decls.insert(0, d);
+                }
             }
         }
     }
@@ -317,10 +344,9 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_weak_new(i64) -> i64\n");
     s.push_str("  func.func private @sloth_weak_upgrade(i64) -> i64\n");
     s.push_str("  func.func private @sloth_weak_release(i64) -> i64\n");
-    // patch 42: value-optional payload boxes + nil-aware print/interp faces
-    // (tag migration: the box holds one tagged word; the f64 faces are gone)
-    s.push_str("  func.func private @sloth_box_new(i64) -> i64\n");
-    s.push_str("  func.func private @sloth_box_get(i64) -> i64\n");
+    // patch 42: value-optional payload boxes + nil-aware print/interp faces.
+    // The box core (`sloth_box_new`/`sloth_box_get`) is self-hosted in
+    // `lib/prelude/core.slt` — no private declarations here.
     s.push_str("  func.func private @sloth_rt_print_opt(i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_str_push_opt(i64, i64, i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_print_i64(i64) -> i64\n");
@@ -341,11 +367,8 @@ pub fn rt_decls() -> String {
     s.push_str("  func.func private @sloth_rt_write(i64) -> i64\n");
     s.push_str("  func.func private @sloth_rt_puts(i64) -> ()\n");
     s.push_str("  func.func private @sloth_str_intern(i64, i64) -> i64\n");
-    s.push_str(
-        "  func.func private @sloth_range_pack(i64, i64) -> i64
-  func.func private @sloth_range_lo(i64) -> i64
-  func.func private @sloth_range_hi(i64) -> i64\n",
-    );
+    // range ABI (`sloth_range_pack/lo/hi`) is self-hosted in
+    // `lib/prelude/core.slt` — no private declarations here.
     s.push_str("  func.func private @sloth_str_push(i64, i64, i64) -> i64\n");
     s.push_str(
         "  func.func private @sloth_str_finish(i64) -> i64

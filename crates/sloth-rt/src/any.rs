@@ -15,7 +15,7 @@
 //!   to a fresh `str` (0 when the class has no `to_str`);
 //! - `cls_id`/`rank` are the runtime class id (objects) and tensor rank.
 
-use crate::boxopt::sloth_box_get;
+use crate::boxopt::box_get;
 use crate::rc::{dec_i, rc_addr, sloth_rc_release, sloth_rc_retain, w_ref, w_unref};
 use crate::strings::{intern_bytes, strb_append, strb_or_new, StrT};
 
@@ -390,9 +390,11 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
             if word == 0 {
                 append(p, b"nil");
             } else {
-                append_i(p, dec_i(crate::ranges::sloth_range_lo(word)));
+                // frozen range-box layout `[lo, hi]` (lib/prelude/core.slt)
+                let r = w_unref(word) as *const i64;
+                append_i(p, *r);
                 append(p, b"..");
-                append_i(p, dec_i(crate::ranges::sloth_range_hi(word)));
+                append_i(p, *r.add(1));
             }
         }
         AK_OPT => {
@@ -400,7 +402,7 @@ unsafe fn render(b: i64, desc: i64, word: i64) -> i64 {
             if word == 0 {
                 append(p, b"nil");
             } else if elem != 0 && matches!(kind_of(elem), AK_I64 | AK_U64 | AK_F64 | AK_BOOL) {
-                let payload = sloth_box_get(word);
+                let payload = box_get(word);
                 return render(w_ref(p as usize), elem, payload);
             } else {
                 return render(w_ref(p as usize), elem, word);

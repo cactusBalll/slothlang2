@@ -103,7 +103,7 @@ pub extern "C" fn sloth_chan_recv(ch_w: i64, box_w: i64) -> i64 {
         (*c).not_full.notify_one();
         drop(st);
         if box_w != 0 {
-            crate::boxopt::sloth_box_new(v)
+            crate::boxopt::box_new(v)
         } else {
             v
         }

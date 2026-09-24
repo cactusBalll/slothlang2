@@ -22,7 +22,6 @@ pub mod mmap;
 pub mod net;
 pub mod objects;
 pub mod panics;
-pub mod ranges;
 pub mod rc;
 pub mod strings;
 pub mod sync;
