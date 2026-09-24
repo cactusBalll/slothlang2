@@ -2920,6 +2920,19 @@ impl ModEmitter {
         } else {
             private_key
         };
+        // imported *generic* function (public or private helper): monomorphize
+        // in the defining module's namespace, exactly like the qualified
+        // `lib.f(...)` path above. Imported generics have no template body (only
+        // monomorphic instances are emitted), so the `cross_funcs` base symbol
+        // must never be called directly — doing so would also mishandle
+        // ref-element ARC for `Array<T>`/`T` returns.
+        if let Some((defmod, fd)) = self.foreign_func_defs.get(&cross_lookup).cloned() {
+            let saved = self.cur_mod.clone();
+            self.cur_mod = defmod;
+            let out = self.emit_gfunc_call(fw, &name, &fd, &argv, pos);
+            self.cur_mod = saved;
+            return out;
+        }
         // foreign-module function: symbol was pre-mangled at import time
         if let Some(fs) = self.cross_funcs.get(&cross_lookup).cloned() {
             let vals: Vec<String> = argv.iter().map(|x| x.0.clone()).collect();

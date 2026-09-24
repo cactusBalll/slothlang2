@@ -90,7 +90,14 @@ impl ModEmitter {
                         self.hidden.insert(d.name.clone());
                     }
                     self.cross_funcs
-                        .insert(format!("{}.{}", qname, d.name), (mangled, plan.ret));
+                        .insert(format!("{}.{}", qname, d.name), (mangled.clone(), plan.ret));
+                    // also expose the module's own name as a qualifier: nested
+                    // emission (and private-helper resolution) runs with
+                    // `cur_mod = mname` even when the import site used an alias
+                    if qname != mname {
+                        self.cross_funcs
+                            .insert(format!("{}.{}", mname, d.name), (mangled, plan.ret));
+                    }
                     // keep the def so qualified calls to an imported generic
                     // function can be monomorphized in the caller
                     if !f.is_extern && !f.type_params.is_empty() {
@@ -100,9 +107,18 @@ impl ModEmitter {
                             format!("{}.{}", qname, d.name),
                             (mname.to_string(), (**f).clone()),
                         );
+                        if qname != mname {
+                            self.foreign_func_defs.insert(
+                                format!("{}.{}", mname, d.name),
+                                (mname.to_string(), (**f).clone()),
+                            );
+                        }
                     }
                     if !d.visible {
                         self.hidden.insert(format!("{}.{}", qname, d.name));
+                        if qname != mname {
+                            self.hidden.insert(format!("{}.{}", mname, d.name));
+                        }
                     }
                 }
                 DeclNode::Class(c) => {
@@ -171,10 +187,15 @@ impl ModEmitter {
         // vt_cap must be settled before any method body is emitted: bodies can
         // construct instances, whose vtable builders bake in the capacity
         self.finalize_vt();
-        // pass 2c: emit method bodies (llvm.func decision now settled)
+        // pass 2c: emit method bodies (llvm.func decision now settled).
+        // Imported generic functions emit no template body — their monomorphic
+        // instances are emitted on demand at the (root/nested) call sites.
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
+                    if !f.type_params.is_empty() {
+                        continue;
+                    }
                     self.emit_func(&d.name, None, f, None, false);
                 }
                 DeclNode::Class(_) => {
@@ -722,9 +743,15 @@ impl ModEmitter {
                 self.name, self.name, body
             ));
         }
-        // 1) top-level funcs
+        // 1) top-level funcs. Generic functions emit no template body — only
+        // their monomorphic instances are real; emitting a template would type
+        // its body against unresolved type params (bogus nested-bound failures
+        // and wrong ref ARC). Every call site monomorphizes instead.
         for d in &prog.decls {
             if let DeclNode::Func(f) = &d.node {
+                if !f.type_params.is_empty() {
+                    continue;
+                }
                 let entry = d.name == "main";
                 self.emit_func(&d.name, None, f, f.variadic.as_ref(), entry);
             }
