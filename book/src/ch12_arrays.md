@@ -57,3 +57,66 @@ a.pop();        // 尾部弹出（返回被移除元素）
 > 自举：这些符号由注入的 `lib/prelude/containers.slt` 用 sloth 自身实现
 > （`libsloth_rt.so` 只提供裸分配/字级内存/rc）。数组头 `[len,cap,buf]` 与
 > 稳定句柄语义见附录 B.2。
+
+## 12.4 标准库 `sloth/array.slt`
+
+`import "sloth/array.slt";` 提供一组常用的 `Array<T>` 操作（纯 Sloth，构建在语言
+内建的下标 / 区间切片 / `push` / `pop` / `len` 之上）。**所有函数都是自由函数**
+（`Array<T>` 是内建类型，不能通过 `impl` 挂方法），命名统一用 `array_` 前缀。
+
+索引与越界约定：
+
+- 下标从 0 开始；`array_index_of` / `array_last_index_of` / `array_binary_search*`
+  未命中返回 `-1`；
+- “钳制”族（`array_take` / `array_drop` / `array_slice` / `array_get_or` /
+  `array_insert`）对越界参数**钳制到边界、永不 panic**；内建 `a[i]` / `a[lo..hi]`
+  仍是会 panic 的下标形式；`array_remove_at` 与 `a[i]` 一致，越界 panic。
+
+排序约定：
+
+- `T: Comparable` 的 `array_sort` / `array_min` / `array_max` / `array_is_sorted` /
+  `array_binary_search` 使用 `<` / `>`：`int` / `float` 为内容比较，类走
+  `__lt__` / `__gt__`；
+- 当前语言的 `str` `<` 是**句柄**比较，因此字符串排序请用 `array_sort_str` /
+  `array_min_str` / `array_max_str` / `array_binary_search_str`（按字节字典序，
+  底层 `__sloth_str_cmp`），或用 `array_sort_by` 传入 `sloth/str.slt` 的 `str_cmp`；
+- `array_sort_by` 接收三路比较器 `(T, T) -> int`：负 = 左前，0 = 相等，正 = 右前
+  （与 `str_cmp` 同约定）。排序**不稳定**。
+
+高阶函数接收函数值；作为谓词 / 比较器的 lambda **必须标注返回类型**
+（如 `|x: int| -> bool { … }`），未标注的 lambda 体默认按 `int` 推断。
+
+| 分类 | 函数 |
+| --- | --- |
+| 查询 | `array_is_empty` `array_index_of` `array_last_index_of` `array_contains` `array_count` `array_count_if` `array_any` `array_all` `array_first` `array_last` `array_get_or` |
+| 副本 / 切片 | `array_copy` `array_take` `array_drop` `array_slice` |
+| 组合 | `array_concat` `array_extend` `array_repeat` `array_reverse` `array_flatten` |
+| 变换 | `array_map` `array_map_indexed` `array_filter` `array_filter_map` `array_flat_map` `array_unique` |
+| 聚合 | `array_fold` `array_sum_int` `array_sum_float` `array_min` `array_max` `array_min_by` `array_max_by` `array_min_str` `array_max_str` |
+| 原地修改 | `array_insert` `array_remove_at` `array_remove` `array_remove_all` `array_clear` `array_swap` `array_reverse_in_place` |
+| 排序 / 查找 | `array_sort` `array_sort_desc` `array_sort_by` `array_sort_str` `array_is_sorted` `array_binary_search` `array_binary_search_by` `array_binary_search_str` |
+| 相等 / 生成 | `array_equals` `array_iota` `array_range` `array_range_step` |
+
+```sloth
+import "sloth/array.slt";
+
+func main(): unit {
+    var xs = [3, 1, 4, 1, 5];
+    array_sort(xs);                                            // [1, 1, 3, 4, 5]
+    print(array_unique(xs));                                   // [1, 3, 4, 5]
+    print(array_map(xs, |x: int| -> int { return x * 2; }));   // [2, 2, 6, 8, 10]
+    print(array_filter(xs, |x: int| -> bool { return x > 2; })); // [3, 4, 5]
+    print(array_fold(xs, 0, |a: int, b: int| -> int { return a + b; })); // 14
+    let f = array_first(xs);
+    if f is not nil {
+        print(f);                                              // 1
+    }
+    // 字符串按字节字典序：用专用 helpers（`str` 的 `<` 是句柄比较）
+    var names = ["banana", "apple", "cherry"];
+    array_sort_str(names);                                     // [apple, banana, cherry]
+}
+```
+
+> 说明：`array_filter_map` 的 `(T) -> U?` 会把 `nil` 结果丢弃；`array_min` /
+> `array_max` / `array_first` / `array_last` 等空数组返回 `nil`，调用侧用
+> `is not nil` 收窄（§15.2）。

@@ -1,0 +1,737 @@
+// sloth2 stdlib: array — common operations on the built-in `Array<T>`.
+//
+// `Array<T>` is the language's homogeneous dynamic array (book §12): value
+// `==`/`+` are built in, indexing (`a[i]`), range slicing (`a[lo..hi]`, a fresh
+// copy), the stable handle (growth never moves the handle), and the three
+// intrinsic methods `a.len()` / `a.push(v)` / `a.pop()` are provided by the
+// compiler. This module layers the usual convenience surface on top.
+//
+// Index conventions, following the core language:
+//   - indices are 0-based; `array_index_of` returns `-1` when absent;
+//   - the "clamping" family (`array_take` / `array_drop` / `array_slice` /
+//     `array_get_or`) never panics: out-of-range arguments clamp to the array
+//     bounds. The built-in `a[i]` and `a[lo..hi]` remain the panicking forms.
+//
+// Ordering:
+//   - `T: Comparable` functions (`array_sort`, `array_min`, …) use the `<`/`>`
+//     operators. Those are content comparisons for `int`/`float` and dispatch
+//     `__lt__`/`__gt__` for user classes that implement `Comparable`.
+//   - `str` `<` is *handle* comparison in the current language, so sorting
+//     strings by `<` is not meaningful. Use the dedicated `array_sort_str` /
+//     `array_min_str` / `array_max_str` / `array_binary_search_str` helpers, or
+//     `array_sort_by` with `str_cmp` (from `sloth/str.slt`), for lexicographic
+//     (byte order) results.
+//   - `array_sort_by` takes a three-way comparator `(T, T) -> int`: negative
+//     means the left element sorts first, zero means tie, positive means the
+//     right element sorts first (the `str_cmp` convention). Sorts are not
+//     stable.
+//
+// Higher-order helpers take function values. A lambda passed as a predicate or
+// comparator must spell its return type (e.g. `|x: int| -> bool { … }`) because
+// an unannotated lambda body defaults to `int`.
+//
+// The reserved runtime string helper (`__sloth_str_cmp`, declared by the
+// injected ABI prelude) backs the string ordering helpers; the pseudo-import
+// below grants this module the right to call reserved `__sloth_*` symbols.
+
+import "__sloth";
+
+// ============================ queries ============================
+
+/// is `a` empty?
+pub func array_is_empty<T>(a: Array<T>): bool {
+    return a.len() == 0;
+}
+
+/// index of the first element equal to `v`, or -1
+pub func array_index_of<T: Equatable>(a: Array<T>, v: T): int {
+    var i = 0;
+    while i < a.len() {
+        if a[i] == v {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+/// index of the last element equal to `v`, or -1
+pub func array_last_index_of<T: Equatable>(a: Array<T>, v: T): int {
+    var i = a.len() - 1;
+    while i >= 0 {
+        if a[i] == v {
+            return i;
+        }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+/// does `a` contain `v`?
+pub func array_contains<T: Equatable>(a: Array<T>, v: T): bool {
+    return array_index_of(a, v) >= 0;
+}
+
+/// number of elements equal to `v`
+pub func array_count<T: Equatable>(a: Array<T>, v: T): int {
+    var n = 0;
+    var i = 0;
+    while i < a.len() {
+        if a[i] == v {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// number of elements satisfying `pred`
+pub func array_count_if<T>(a: Array<T>, pred: (T) -> bool): int {
+    var n = 0;
+    var i = 0;
+    while i < a.len() {
+        if pred(a[i]) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// does at least one element satisfy `pred`? (false on empty)
+pub func array_any<T>(a: Array<T>, pred: (T) -> bool): bool {
+    var i = 0;
+    while i < a.len() {
+        if pred(a[i]) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// do all elements satisfy `pred`? (true on empty)
+pub func array_all<T>(a: Array<T>, pred: (T) -> bool): bool {
+    var i = 0;
+    while i < a.len() {
+        if not pred(a[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// first element, or `nil` when empty
+pub func array_first<T>(a: Array<T>): T? {
+    if a.len() == 0 {
+        return nil;
+    }
+    return a[0];
+}
+
+/// last element, or `nil` when empty
+pub func array_last<T>(a: Array<T>): T? {
+    let n = a.len();
+    if n == 0 {
+        return nil;
+    }
+    return a[n - 1];
+}
+
+/// element at `i`, or `default` when `i` is out of range
+pub func array_get_or<T>(a: Array<T>, i: int, default: T): T {
+    if i >= 0 and i < a.len() {
+        return a[i];
+    }
+    return default;
+}
+
+// ============================ copies / slices ============================
+
+/// fresh shallow copy of `a` (reference elements are shared, not cloned)
+pub func array_copy<T>(a: Array<T>): Array<T> {
+    return array_slice(a, 0, a.len());
+}
+
+/// fresh copy of at most the first `n` elements (clamped)
+pub func array_take<T>(a: Array<T>, n: int): Array<T> {
+    return array_slice(a, 0, n);
+}
+
+/// fresh copy of `a` without its first `n` elements (clamped)
+pub func array_drop<T>(a: Array<T>, n: int): Array<T> {
+    let total = a.len();
+    if n < 0 {
+        n = 0;
+    }
+    if n > total {
+        n = total;
+    }
+    return array_slice(a, n, total - n);
+}
+
+/// fresh copy of the `count` elements starting at `start`; `start` and `count`
+/// are clamped to the array bounds (never panics)
+pub func array_slice<T>(a: Array<T>, start: int, count: int): Array<T> {
+    let total = a.len();
+    if start < 0 {
+        start = 0;
+    }
+    if start > total {
+        start = total;
+    }
+    if count < 0 {
+        count = 0;
+    }
+    if count > total - start {
+        count = total - start;
+    }
+    return a[start..start + count];
+}
+
+// ============================ combine ============================
+
+/// fresh array with `a`'s elements followed by `b`'s
+pub func array_concat<T>(a: Array<T>, b: Array<T>): Array<T> {
+    var out: Array<T> = [];
+    var i = 0;
+    while i < a.len() {
+        out.push(a[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < b.len() {
+        out.push(b[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// append every element of `b` onto `a` in place
+pub func array_extend<T>(a: Array<T>, b: Array<T>): unit {
+    var i = 0;
+    while i < b.len() {
+        a.push(b[i]);
+        i = i + 1;
+    }
+}
+
+/// fresh array with `a`'s elements repeated `n` times (empty when `n <= 0`)
+pub func array_repeat<T>(a: Array<T>, n: int): Array<T> {
+    var out: Array<T> = [];
+    var k = 0;
+    while k < n {
+        var i = 0;
+        while i < a.len() {
+            out.push(a[i]);
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return out;
+}
+
+/// fresh array with `a`'s elements in reverse order
+pub func array_reverse<T>(a: Array<T>): Array<T> {
+    var out: Array<T> = [];
+    var i = a.len() - 1;
+    while i >= 0 {
+        out.push(a[i]);
+        i = i - 1;
+    }
+    return out;
+}
+
+/// concatenate a nested array one level deep into a fresh array
+pub func array_flatten<T>(a: Array<Array<T>>): Array<T> {
+    var out: Array<T> = [];
+    var i = 0;
+    while i < a.len() {
+        var j = 0;
+        while j < a[i].len() {
+            out.push(a[i][j]);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// ============================ transform ============================
+
+/// apply `f` to every element, collecting the results in a fresh array
+pub func array_map<T, U>(a: Array<T>, f: (T) -> U): Array<U> {
+    var out: Array<U> = [];
+    var i = 0;
+    while i < a.len() {
+        out.push(f(a[i]));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// like `array_map`, but `f` also receives the element index
+pub func array_map_indexed<T, U>(a: Array<T>, f: (int, T) -> U): Array<U> {
+    var out: Array<U> = [];
+    var i = 0;
+    while i < a.len() {
+        out.push(f(i, a[i]));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// elements satisfying `pred`, in order, in a fresh array
+pub func array_filter<T>(a: Array<T>, pred: (T) -> bool): Array<T> {
+    var out: Array<T> = [];
+    var i = 0;
+    while i < a.len() {
+        if pred(a[i]) {
+            out.push(a[i]);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// map `f` over the elements and keep only the non-`nil` results
+pub func array_filter_map<T, U>(a: Array<T>, f: (T) -> U?): Array<U> {
+    var out: Array<U> = [];
+    var i = 0;
+    while i < a.len() {
+        let u = f(a[i]);
+        if u is not nil {
+            let w: U = u;
+            out.push(w);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// map `f` to an array per element, then concatenate the results one level deep
+pub func array_flat_map<T, U>(a: Array<T>, f: (T) -> Array<U>): Array<U> {
+    var out: Array<U> = [];
+    var i = 0;
+    while i < a.len() {
+        let part = f(a[i]);
+        var j = 0;
+        while j < part.len() {
+            out.push(part[j]);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// fresh array with duplicate elements removed, preserving first occurrences
+pub func array_unique<T: Equatable>(a: Array<T>): Array<T> {
+    var out: Array<T> = [];
+    var i = 0;
+    while i < a.len() {
+        var seen = false;
+        var j = 0;
+        while j < out.len() {
+            if out[j] == a[i] {
+                seen = true;
+                break;
+            }
+            j = j + 1;
+        }
+        if not seen {
+            out.push(a[i]);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// ============================ aggregation ============================
+
+/// left fold: start from `init` and apply `f(acc, element)` in order
+pub func array_fold<T, U>(a: Array<T>, init: U, f: (U, T) -> U): U {
+    var acc = init;
+    var i = 0;
+    while i < a.len() {
+        acc = f(acc, a[i]);
+        i = i + 1;
+    }
+    return acc;
+}
+
+/// sum of all elements (0 on empty)
+pub func array_sum_int(a: Array<int>): int {
+    var s = 0;
+    var i = 0;
+    while i < a.len() {
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+/// sum of all elements (0.0 on empty)
+pub func array_sum_float(a: Array<float>): float {
+    var s = 0.0;
+    var i = 0;
+    while i < a.len() {
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+/// smallest element by `<`, or `nil` when empty
+pub func array_min<T: Comparable>(a: Array<T>): T? {
+    if a.len() == 0 {
+        return nil;
+    }
+    var m = a[0];
+    var i = 1;
+    while i < a.len() {
+        if a[i] < m {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// largest element by `>`, or `nil` when empty
+pub func array_max<T: Comparable>(a: Array<T>): T? {
+    if a.len() == 0 {
+        return nil;
+    }
+    var m = a[0];
+    var i = 1;
+    while i < a.len() {
+        if a[i] > m {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// smallest element per `cmp` (negative sorts first), or `nil` when empty
+pub func array_min_by<T>(a: Array<T>, cmp: (T, T) -> int): T? {
+    if a.len() == 0 {
+        return nil;
+    }
+    var m = a[0];
+    var i = 1;
+    while i < a.len() {
+        if cmp(a[i], m) < 0 {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// largest element per `cmp` (positive sorts first), or `nil` when empty
+pub func array_max_by<T>(a: Array<T>, cmp: (T, T) -> int): T? {
+    if a.len() == 0 {
+        return nil;
+    }
+    var m = a[0];
+    var i = 1;
+    while i < a.len() {
+        if cmp(a[i], m) > 0 {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// lexicographically smallest string, or `nil` when empty
+pub func array_min_str(a: Array<str>): str? {
+    return array_min_by(a, |x: str, y: str| -> int { return __sloth_str_cmp(x, y); });
+}
+
+/// lexicographically largest string, or `nil` when empty
+pub func array_max_str(a: Array<str>): str? {
+    return array_max_by(a, |x: str, y: str| -> int { return __sloth_str_cmp(x, y); });
+}
+
+// ============================ mutation ============================
+
+/// insert `v` at index `i` in place, shifting the tail right; `i` is clamped
+/// to `[0, len]`
+pub func array_insert<T>(a: Array<T>, i: int, v: T): unit {
+    let n = a.len();
+    if i < 0 {
+        i = 0;
+    }
+    if i > n {
+        i = n;
+    }
+    a.push(v);
+    var j = n;
+    while j > i {
+        a[j] = a[j - 1];
+        j = j - 1;
+    }
+    a[i] = v;
+}
+
+/// remove and return the element at `i`, shifting the tail left; panics when
+/// `i` is out of range (matches `a[i]`)
+pub func array_remove_at<T>(a: Array<T>, i: int): T {
+    let n = a.len();
+    let out = a[i];
+    var j = i;
+    while j < n - 1 {
+        a[j] = a[j + 1];
+        j = j + 1;
+    }
+    let dropped = a.pop();
+    return out;
+}
+
+/// remove the first element equal to `v` in place; true when one was removed
+pub func array_remove<T: Equatable>(a: Array<T>, v: T): bool {
+    let i = array_index_of(a, v);
+    if i < 0 {
+        return false;
+    }
+    let dropped = array_remove_at(a, i);
+    return true;
+}
+
+/// remove every element equal to `v` in place; returns how many were removed
+pub func array_remove_all<T: Equatable>(a: Array<T>, v: T): int {
+    let n = a.len();
+    var w = 0;
+    var r = 0;
+    while r < n {
+        if a[r] == v {
+            r = r + 1;
+        } else {
+            a[w] = a[r];
+            w = w + 1;
+            r = r + 1;
+        }
+    }
+    while a.len() > w {
+        let dropped = a.pop();
+    }
+    return n - w;
+}
+
+/// remove every element in place, leaving an empty array
+pub func array_clear<T>(a: Array<T>): unit {
+    while a.len() > 0 {
+        let dropped = a.pop();
+    }
+}
+
+/// exchange the elements at `i` and `j` in place
+pub func array_swap<T>(a: Array<T>, i: int, j: int): unit {
+    let t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+}
+
+/// reverse `a` in place
+pub func array_reverse_in_place<T>(a: Array<T>): unit {
+    var i = 0;
+    var j = a.len() - 1;
+    while i < j {
+        array_swap(a, i, j);
+        i = i + 1;
+        j = j - 1;
+    }
+}
+
+// ============================ ordering ============================
+
+// in-place quicksort by a three-way comparator (Hoare partition, middle pivot)
+func qsort_by<T>(a: Array<T>, lo: int, hi: int, cmp: (T, T) -> int): unit {
+    if lo >= hi {
+        return;
+    }
+    let pivot = a[(lo + hi) / 2];
+    var i = lo;
+    var j = hi;
+    while i <= j {
+        while cmp(a[i], pivot) < 0 {
+            i = i + 1;
+        }
+        while cmp(a[j], pivot) > 0 {
+            j = j - 1;
+        }
+        if i <= j {
+            array_swap(a, i, j);
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    if lo < j {
+        qsort_by(a, lo, j, cmp);
+    }
+    if i < hi {
+        qsort_by(a, i, hi, cmp);
+    }
+}
+
+// in-place quicksort ascending by `<` (T: Comparable)
+func qsort_asc<T: Comparable>(a: Array<T>, lo: int, hi: int): unit {
+    if lo >= hi {
+        return;
+    }
+    let pivot = a[(lo + hi) / 2];
+    var i = lo;
+    var j = hi;
+    while i <= j {
+        while a[i] < pivot {
+            i = i + 1;
+        }
+        while a[j] > pivot {
+            j = j - 1;
+        }
+        if i <= j {
+            array_swap(a, i, j);
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    if lo < j {
+        qsort_asc(a, lo, j);
+    }
+    if i < hi {
+        qsort_asc(a, i, hi);
+    }
+}
+
+/// sort `a` in place, ascending by `<` (not stable)
+pub func array_sort<T: Comparable>(a: Array<T>): unit {
+    qsort_asc(a, 0, a.len() - 1);
+}
+
+/// sort `a` in place, descending by `>` (not stable)
+pub func array_sort_desc<T: Comparable>(a: Array<T>): unit {
+    array_sort(a);
+    array_reverse_in_place(a);
+}
+
+/// sort `a` in place by a three-way comparator (not stable)
+pub func array_sort_by<T>(a: Array<T>, cmp: (T, T) -> int): unit {
+    qsort_by(a, 0, a.len() - 1, cmp);
+}
+
+/// sort `a` in place in byte-lexicographic order (`__sloth_str_cmp`)
+pub func array_sort_str(a: Array<str>): unit {
+    array_sort_by(a, |x: str, y: str| -> int { return __sloth_str_cmp(x, y); });
+}
+
+/// is `a` sorted ascending by `<`?
+pub func array_is_sorted<T: Comparable>(a: Array<T>): bool {
+    var i = 1;
+    while i < a.len() {
+        if a[i - 1] > a[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// binary search a `<`-sorted array; index of `v`, or -1 when absent
+pub func array_binary_search<T: Comparable>(a: Array<T>, v: T): int {
+    var lo = 0;
+    var hi = a.len() - 1;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if a[mid] == v {
+            return mid;
+        }
+        if a[mid] < v {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return 0 - 1;
+}
+
+/// binary search an array sorted by `cmp`; index of `v`, or -1 when absent
+pub func array_binary_search_by<T>(a: Array<T>, v: T, cmp: (T, T) -> int): int {
+    var lo = 0;
+    var hi = a.len() - 1;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let c = cmp(a[mid], v);
+        if c == 0 {
+            return mid;
+        }
+        if c < 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return 0 - 1;
+}
+
+/// binary search a byte-lexicographically sorted string array
+pub func array_binary_search_str(a: Array<str>, v: str): int {
+    return array_binary_search_by(
+        a, v, |x: str, y: str| -> int { return __sloth_str_cmp(x, y); }
+    );
+}
+
+// ============================ equality / generation ============================
+
+/// element-wise content equality (also length equality)
+pub func array_equals<T: Equatable>(a: Array<T>, b: Array<T>): bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    var i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// `[0, n)` as a fresh int array (empty when `n <= 0`)
+pub func array_iota(n: int): Array<int> {
+    return array_range(0, n);
+}
+
+/// `[start, end)` as a fresh int array (empty when `start >= end`)
+pub func array_range(start: int, end: int): Array<int> {
+    var out: Array<int> = [];
+    var i = start;
+    while i < end {
+        out.push(i);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// `start, start+step, …` up to (excluding) `end`; a zero `step` yields empty
+pub func array_range_step(start: int, end: int, step: int): Array<int> {
+    var out: Array<int> = [];
+    if step > 0 {
+        var i = start;
+        while i < end {
+            out.push(i);
+            i = i + step;
+        }
+    } else if step < 0 {
+        var i = start;
+        while i > end {
+            out.push(i);
+            i = i + step;
+        }
+    }
+    return out;
+}
