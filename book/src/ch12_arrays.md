@@ -18,6 +18,10 @@ a.pop();        // 尾部弹出（返回被移除元素）
 - 越界访问在发射期插入边界守卫，命中走运行时 panic（`sloth_panic_oob`）。
 - 元素赋值有词面检查：`a[0] = "x"`（`a: Array<int>`）报
   `type mismatch in array element assignment`。
+- **不支持区间切片**：数组只支持单下标 `a[i]` / `a[i] = v`；`a[1..3]` **不是**
+  数组切片，编译器会给出诊断（`Array does not support range slicing`）。区间切片是
+  `str` 独有的下标语法（`s[a..b]` / `s[a..=b]`，见 §14.2）；需要子数组时请用
+  显式循环 / 复制。
 
 ## 12.2 稳定句柄（重要语义）
 

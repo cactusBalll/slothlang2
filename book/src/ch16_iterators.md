@@ -31,7 +31,12 @@ class Range3 {
 | `Array<T>` | `T` |
 | `Map<K,V>` | `Entry<K,V>`（`key`/`val`） |
 | `str` | `str`（按 Unicode 字符） |
+| `str.chars()` | `int`（UTF-8 解码后的码点，惰性） |
 | `range` | `int` |
+
+> `str` 也可用 `s.chars()` 得到一个**惰性码点迭代器**（元素 `int`，见 §14.3），
+> 与 `for c in s`（元素 `str`）互补。`Array<T>` **不支持区间切片**：`a[1..3]`
+> 不是数组切片（编译期诊断），区间切片是 `str` 独有语法。
 
 ## 16.3 所有权
 

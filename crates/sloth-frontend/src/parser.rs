@@ -344,9 +344,9 @@ impl Parser {
             "bool" => Type::prim(Prim::Bool),
             "str" => Type::prim(Prim::Str),
             "range" => Type::prim(Prim::Range),
-            other if crate::ty::IntKind::from_name(other).is_some() => {
-                Type::Simple(SimpleType::FixedInt(crate::ty::IntKind::from_name(other).unwrap()))
-            }
+            other if crate::ty::IntKind::from_name(other).is_some() => Type::Simple(
+                SimpleType::FixedInt(crate::ty::IntKind::from_name(other).unwrap()),
+            ),
             "any" => Type::Simple(SimpleType::Any),
             "Array" => {
                 self.expect(Tok::Lt, "'<'")?;

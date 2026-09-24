@@ -9,6 +9,7 @@
 | `float(x)` | `(int\|float?…) -> float` | `float(str)` 不支持（MVP） |
 | `keys(m)` | `(Map<K,V>) -> Array<K>` | 新数组（owned） |
 | `values(m)` | `(Map<K,V>) -> Array<V>` | 新数组（owned） |
+| `chars(s)` | `(str) -> StrChars` | 惰性码点迭代器（`next(): int?`，见 §14.3） |
 | `typeid(x)` / `type_name(x)` | `(ref\|any) -> int\|str` | 运行时类型身份 |
 | `sloth_rc_live()` | `() -> int` | ARC 存活计数 |
 | `sloth_rc_drops()` | `() -> int` | ARC 累计析构数 |
@@ -26,7 +27,8 @@ pub func print(v: any): unit { sloth_rt_puts(sloth_rt_write(v)); }
 `print` 可打印数组/Map/嵌套容器/类实例，`${}` 插值也统一走
 `sloth_rt_write`（不再有逐类型的 `sloth_str_push_*` 分派）。
 
-方法形式的等价物：`a.len()`、`s.len()`、`m.len()`；`w.upgrade()`（`Weak<T>` → `T?`）。
+方法形式的等价物：`a.len()`、`s.len()`、`m.len()`；`s.chars()`（等价 `chars(s)`，
+惰性码点迭代器）；`w.upgrade()`（`Weak<T>` → `T?`）。
 
 值型 optional（`int?` 等）经 `any` 装箱后仍是 nil-aware：`nil` 打印为 `nil`，
 盒中的 `0`/`false` 正常显示。
