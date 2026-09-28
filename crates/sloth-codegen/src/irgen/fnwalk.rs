@@ -46,6 +46,19 @@ pub(crate) struct FnWalk {
     /// (rc_consume): the receiver binds them as slot owners WITHOUT an
     /// extra retain; consumed on first binding (exact ownership)
     pub(crate) xfer: Vec<String>,
+    /// lambda body frame: (env param name, capture name -> frame field index).
+    /// Assigning to a captured scalar writes the new value back into the frame
+    /// so it persists across calls (design §10.2, bug A4).
+    pub(crate) lambda_env: Option<(String, HashMap<String, usize>)>,
+    /// payload `Y` of the fiber entry `(Y) -> unit` currently being emitted;
+    /// lets `fiber.yield` check its argument and type the returned value
+    pub(crate) fiber_payload: Option<TyId>,
+    /// names of the (borrowed) formal parameters: assigning to one must not
+    /// release the incoming borrowed count (design §9.2/§23.1 rule 3)
+    pub(crate) params: std::collections::HashSet<String>,
+    /// params that have already been assigned an owned value (after the first
+    /// assignment the slot owns its word and normal rc rules apply)
+    pub(crate) param_owned: std::collections::HashSet<String>,
     pub(crate) ret: TyId,
     pub(crate) ret_alloca: String,
     pub(crate) ret_flag: String,
@@ -148,11 +161,7 @@ impl FnWalk {
     /// for the return face to release after the result word is transferred.
     /// Not destructive: sibling branches each need the same list.
     pub(crate) fn rc_loop_elems(&self) -> Vec<String> {
-        self.loop_owned_elems
-            .iter()
-            .flatten()
-            .cloned()
-            .collect()
+        self.loop_owned_elems.iter().flatten().cloned().collect()
     }
 
     /// release the owned locals of the loop-body scopes about to be abandoned
@@ -491,6 +500,10 @@ pub(crate) fn fresh_walk(me: &mut ModEmitter) -> FnWalk {
         dangling: Vec::new(),
         loops: Vec::new(),
         loop_bases: Vec::new(),
+        lambda_env: None,
+        fiber_payload: None,
+        params: std::collections::HashSet::new(),
+        param_owned: std::collections::HashSet::new(),
         ret: me.r.mk(Ty::Unit),
         ret_alloca: String::new(),
         ret_flag: String::new(),

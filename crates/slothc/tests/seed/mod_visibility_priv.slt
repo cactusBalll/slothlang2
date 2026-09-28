@@ -1,0 +1,14 @@
+// seed helper for mod_visibility_diag.sl (not run directly)
+func hidden_fn(): int {
+    return 1;
+}
+
+class Hidden {
+    func __init__() {
+        return;
+    }
+}
+
+pub func visible(): int {
+    return 2;
+}

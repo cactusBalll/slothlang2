@@ -552,6 +552,11 @@ pub extern "C" fn __sloth_fiber_resume(f_w: i64, v_w: i64, box_w: i64) -> i64 {
         if (*f).state != STATE_NEW && (*f).state != STATE_SUSPENDED {
             return 0;
         }
+        // a not-yet-consumed payload (e.g. the bootstrap resume that started a
+        // fiber, which no `yield` ever returns) is released before overwrite
+        if (*f).eref != 0 && (*f).inbox != 0 {
+            rc::__sloth_rc_release((*f).inbox);
+        }
         (*f).inbox = if (*f).eref != 0 && v_w != 0 {
             rc::__sloth_rc_retain(v_w)
         } else {
@@ -587,6 +592,10 @@ pub extern "C" fn __sloth_fiber_transfer(f_w: i64, v_w: i64, box_w: i64) -> i64 
         }
         if (*f).state != STATE_NEW && (*f).state != STATE_SUSPENDED {
             return 0;
+        }
+        // release any unconsumed payload before overwrite (see resume)
+        if (*f).eref != 0 && (*f).inbox != 0 {
+            rc::__sloth_rc_release((*f).inbox);
         }
         (*f).inbox = if (*f).eref != 0 && v_w != 0 {
             rc::__sloth_rc_retain(v_w)
@@ -624,10 +633,6 @@ pub extern "C" fn __sloth_fiber_yield(v_w: i64) -> i64 {
         if (*f).prev.is_null() {
             panics::panic_msg("fiber.yield outside a fiber");
         }
-        // consume the resume payload that woke us *before* suspending, so a
-        // later resume cannot overwrite an undelivered value
-        let incoming = (*f).inbox;
-        (*f).inbox = 0;
         (*f).state = STATE_SUSPENDED;
         let to = (*f).prev;
         (*to).inbox = if (*f).eref != 0 && v_w != 0 {
@@ -639,6 +644,11 @@ pub extern "C" fn __sloth_fiber_yield(v_w: i64) -> i64 {
         sloth_fiber_switch_asm(&mut (*f).ctx, &(*to).ctx);
         CUR.with(|c| c.set(f));
         (*f).state = STATE_RUNNING;
+        // deliver the payload of the resume that just resumed us: read the
+        // inbox *after* the context switch (book ch27 §27.1 — `yield` returns
+        // the value passed to the *next* resume), then clear it
+        let incoming = (*f).inbox;
+        (*f).inbox = 0;
         incoming
     }
 }
@@ -732,6 +742,11 @@ pub extern "C" fn __sloth_fiber_cancel(f_w: i64) -> i64 {
             return 0;
         }
         (*f).cancel = 1;
+        // a suspended fiber may hold an unconsumed resume payload (the value
+        // its next `yield` would have returned); release before dropping it
+        if (*f).eref != 0 && (*f).inbox != 0 {
+            rc::__sloth_rc_release((*f).inbox);
+        }
         (*f).inbox = 0;
         let from = cur();
         (*f).prev = from;

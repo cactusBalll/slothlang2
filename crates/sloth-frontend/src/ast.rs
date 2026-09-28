@@ -103,12 +103,14 @@ pub struct ClassDef {
 #[derive(Debug, Clone)]
 pub struct MethodDef {
     pub name: String,
+    pub visible: bool,
     pub fd: FuncDef,
 }
 
 #[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub mutable: bool,
+    pub visible: bool,
     pub name: String,
     pub ty: Type,
     pub init: Option<Expr>,
@@ -228,6 +230,9 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub struct Expr {
+    /// stable node id, assigned by `assign_ids` after parsing (0 = synthetic /
+    /// unassigned; ignored by the type side table)
+    pub id: u32,
     pub node: ExprNode,
     pub pos: Pos,
 }
@@ -310,6 +315,9 @@ pub struct Lambda {
 
 #[derive(Debug, Clone)]
 pub struct Stmt {
+    /// stable node id, assigned by `assign_ids` after parsing (0 = synthetic /
+    /// unassigned; ignored by the type side table)
+    pub id: u32,
     pub node: StmtNode,
     pub pos: Pos,
 }
@@ -357,4 +365,169 @@ pub enum StmtNode {
 pub enum PathSeg {
     Name(String),
     Index(Expr),
+}
+
+// ---------------- Node id assignment ----------------
+
+/// Assign a unique id to every `Expr`/`Stmt` node reachable from `prog`
+/// (pre-order). The semantic pass records expression types in a side table
+/// keyed by these ids; the emitter consults it. Synthetic nodes created during
+/// emission keep id 0 and are ignored.
+pub fn assign_ids(prog: &mut Program) {
+    let mut c = IdAssigner { next: 1 };
+    for s in &mut prog.stmts {
+        c.stmt(s);
+    }
+    for d in &mut prog.decls {
+        match &mut d.node {
+            DeclNode::Var { init, .. } => c.expr(init),
+            DeclNode::Func(f) => c.stmt(&mut f.body),
+            DeclNode::Class(cl) => {
+                for fd in &mut cl.fields {
+                    if let Some(init) = &mut fd.init {
+                        c.expr(init);
+                    }
+                }
+                for m in &mut cl.methods {
+                    c.stmt(&mut m.fd.body);
+                }
+            }
+            DeclNode::Trait(t) => {
+                for m in &mut t.methods {
+                    if let Some(b) = &mut m.body {
+                        c.stmt(b);
+                    }
+                }
+            }
+            DeclNode::ExternType => {}
+        }
+    }
+}
+
+struct IdAssigner {
+    next: u32,
+}
+
+impl IdAssigner {
+    fn fresh(&mut self, slot: &mut u32) {
+        *slot = self.next;
+        self.next += 1;
+    }
+    fn stmt(&mut self, s: &mut Stmt) {
+        self.fresh(&mut s.id);
+        match &mut s.node {
+            StmtNode::Expr(e) => self.expr(e),
+            StmtNode::Let { init, .. } => self.expr(init),
+            StmtNode::Assign { target, value } => {
+                self.path(target);
+                self.expr(value);
+            }
+            StmtNode::AssignOp { target, value, .. } => {
+                self.path(target);
+                self.expr(value);
+            }
+            StmtNode::While { cond, body } => {
+                self.expr(cond);
+                self.stmt(body);
+            }
+            StmtNode::If { cond, then_, else_ } => {
+                self.expr(cond);
+                self.stmt(then_);
+                if let Some(e) = else_ {
+                    self.stmt(e);
+                }
+            }
+            StmtNode::For { iter, body, .. } => {
+                self.expr(iter);
+                self.stmt(body);
+            }
+            StmtNode::Break | StmtNode::Continue => {}
+            StmtNode::Return(Some(e)) => self.expr(e),
+            StmtNode::Return(None) => {}
+            StmtNode::Block(ss) => {
+                for st in ss {
+                    self.stmt(st);
+                }
+            }
+        }
+    }
+    fn path(&mut self, segs: &mut [PathSeg]) {
+        for seg in segs {
+            if let PathSeg::Index(e) = seg {
+                self.expr(e);
+            }
+        }
+    }
+    fn expr(&mut self, e: &mut Expr) {
+        self.fresh(&mut e.id);
+        match &mut e.node {
+            ExprNode::Int(_)
+            | ExprNode::UInt(_)
+            | ExprNode::Float(_)
+            | ExprNode::Bool(_)
+            | ExprNode::Nil
+            | ExprNode::Ident(_)
+            | ExprNode::This
+            | ExprNode::Super => {}
+            ExprNode::Str(sp) => {
+                for p in &mut sp.parts {
+                    if let crate::lexer::StrPart::ExprAst(x) = p {
+                        self.expr(x);
+                    }
+                }
+            }
+            ExprNode::List(xs) => {
+                for x in xs {
+                    self.expr(x);
+                }
+            }
+            ExprNode::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            ExprNode::Call { callee, args } => {
+                self.expr(callee);
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            ExprNode::GenCall {
+                callee,
+                targs: _,
+                args,
+            } => {
+                self.expr(callee);
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            ExprNode::Index { obj, idx } => {
+                self.expr(obj);
+                self.expr(idx);
+            }
+            ExprNode::Field { obj, .. } => self.expr(obj),
+            ExprNode::Arith { lhs, rhs, .. } | ExprNode::Bin { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            ExprNode::Un { expr, .. } => self.expr(expr),
+            ExprNode::Lambda(l) => {
+                self.stmt(&mut l.body);
+            }
+            ExprNode::Range { low, high, .. } => {
+                self.expr(low);
+                self.expr(high);
+            }
+            ExprNode::Pipe { lhs, rhs } | ExprNode::Elvis { lhs, rhs } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            ExprNode::Is { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+        }
+    }
 }

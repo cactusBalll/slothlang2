@@ -120,20 +120,23 @@ impl ModEmitter {
                 ));
             }
         }
-        // construct the closured function body
-        let mut params: Vec<Param> = caps
-            .iter()
-            .map(|c| {
-                let ty = match fw.lookup(c) {
-                    Some((_a, t)) => syn_ty_of(self, t),
-                    None => None,
-                };
-                Param {
-                    name: c.clone(),
-                    ty,
-                }
-            })
-            .collect();
+        // construct the closured function body: a hidden env word first (for
+        // captured-scalar write-back), then the snapshot captures, then the
+        // user params — matching the bridge's target argument order
+        let mut params: Vec<Param> = vec![Param {
+            name: "__sloth_env".to_string(),
+            ty: Some(Type::prim(Prim::Int)),
+        }];
+        params.extend(caps.iter().map(|c| {
+            let ty = match fw.lookup(c) {
+                Some((_a, t)) => syn_ty_of(self, t),
+                None => None,
+            };
+            Param {
+                name: c.clone(),
+                ty,
+            }
+        }));
         params.extend(l.params.iter().cloned());
         let fd = FuncDef {
             type_params: Vec::new(),
@@ -147,7 +150,14 @@ impl ModEmitter {
         // generic instance's mangled name (`tp_mangled`), or every instantiation
         // would share one body whose ARC depends on the concrete type args
         let saved_tpm = self.tp_mangled.pop();
-        let sym = self.emit_func(&lname, None, &fd, None, false);
+        let sym = self.emit_func_env(
+            &lname,
+            None,
+            &fd,
+            None,
+            false,
+            Some(("__sloth_env".to_string(), caps.clone())),
+        );
         if let Some(m) = saved_tpm {
             self.tp_mangled.push(m);
         }

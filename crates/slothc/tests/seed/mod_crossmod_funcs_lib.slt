@@ -1,0 +1,16 @@
+// seed helper for mod_crossmod_funcs.sl (not run directly)
+import "mod_crossmod_funcs_dep.slt";
+
+pub func double(x: int): int {
+    return x * 2;
+}
+
+pub func via_dep(): int {
+    return base() + 1;
+}
+
+pub var counter = 5;
+
+pub func bump() {
+    counter = counter + 1;
+}

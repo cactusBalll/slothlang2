@@ -1,0 +1,2 @@
+// seed helper for mod_qualified_extern.sl (not run directly)
+extern func sloth_extern_floor(x: float): float;

@@ -1,0 +1,4 @@
+// seed helper for mod_crossmod_funcs_lib.slt (not run directly)
+pub func base(): int {
+    return 10;
+}

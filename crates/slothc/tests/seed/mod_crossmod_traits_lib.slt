@@ -1,0 +1,14 @@
+// seed helper for mod_crossmod_traits.sl (not run directly)
+pub trait Speaker {
+    func speak(): str;
+}
+
+pub class Robot impl Speaker {
+    func speak(): str {
+        return "beep";
+    }
+}
+
+pub func mk(): dyn Speaker {
+    return Robot();
+}

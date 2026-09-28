@@ -91,7 +91,23 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// Pass-boundary wrapper for expression lowering. Pass 1 (`check_mode`)
+    /// records each node's inferred type into the NodeId side table; Pass 2
+    /// consults it as the authoritative expression type.
     pub(crate) fn emit_expr(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
+        let (w, t) = self.emit_expr_inner(fw, e);
+        if e.id != 0 {
+            let key = (self.cur_frame.clone(), e.id);
+            if self.check_mode {
+                self.type_table.insert(key, t);
+            } else if let Some(&tt) = self.type_table.get(&key) {
+                return (w, tt);
+            }
+        }
+        (w, t)
+    }
+
+    fn emit_expr_inner(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         match &e.node {
             ExprNode::Int(v) => {
                 let r = fw.v();
@@ -789,6 +805,27 @@ impl ModEmitter {
                     return (z, self.r.mk(Ty::I64));
                 }
                 let fl = self.is_float(at) && self.is_float(bt);
+                // design §7.1 / book ch07: `+ - * / %` are numeric operators;
+                // the only non-numeric builtin operand is `str + str`
+                // (handled above). Everything else in the int route must be
+                // integer-like, otherwise pointer-word arithmetic leaks
+                // silently (Array/Map/str/bool/range/closures).
+                // `unit` is the "unknown surface" word (an unannotated global
+                // before its initializer types it) — keep those lenient.
+                let unknown_l = matches!(self.r.get(at), Ty::Unit);
+                let unknown_r = matches!(self.r.get(bt), Ty::Unit);
+                if !fl
+                    && !(self.is_int_like(at) && self.is_int_like(bt))
+                    && !unknown_l
+                    && !unknown_r
+                {
+                    let an = sloth_frontend::ty::ty_name(self.r.get(at));
+                    let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+                    self.err_diff(&e.pos, "arithmetic operand", &an, &bn);
+                    let z = fw.v();
+                    fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    return (z, self.r.mk(Ty::I64));
+                }
                 if fl {
                     // tagged words -> f64 scalars for the typed op, then back
                     let a = emit_dec_f(fw, &a);
@@ -989,21 +1026,35 @@ impl ModEmitter {
                                     fw, &defcls, "__neg__", &fd, false, &oargv, &osig, &e.pos,
                                 );
                             }
+                            // design §20: missing magic overload is a compile
+                            // error, not a raw-word negation of the object ptr
+                            self.err(
+                                &e.pos,
+                                format!(
+                                    "operator `-` on class `{}` requires a `__neg__` overload",
+                                    cls
+                                ),
+                            );
+                            return (String::new(), self.r.mk(Ty::Unit));
                         }
-                        let _z = if fl {
-                            fw.v()
-                        } else {
-                            let z2 = fw.v();
-                            let _ = z2;
-                            String::new()
-                        };
+                        if !fl && !self.is_int_like(t) {
+                            // str/Array/Map/range/bool have no unary minus
+                            let tn = sloth_frontend::ty::ty_name(self.r.get(t));
+                            self.err(
+                                &e.pos,
+                                format!("unary `-` requires a numeric operand, got `{}`", tn),
+                            );
+                            let z = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                            return (z, self.r.mk(Ty::I64));
+                        }
                         let _ = &r;
                         if fl {
+                            // IEEE negation preserves the sign of -0.0; `0.0 - x`
+                            // would collapse -0.0 to +0.0 (bug H1)
                             let vd = emit_dec_f(fw, &v);
-                            let zf = fw.v();
-                            fw.op(&format!("    {} = arith.constant 0.0 : f64", zf));
                             let nz = fw.v();
-                            fw.op(&format!("    {} = arith.subf {}, {} : f64", nz, zf, vd));
+                            fw.op(&format!("    {} = arith.negf {} : f64", nz, vd));
                             let r2 = emit_enc_f(fw, &nz);
                             return (r2, t);
                         }
@@ -1017,6 +1068,16 @@ impl ModEmitter {
                         (r, t)
                     }
                     UnOp::Not => {
+                        if !matches!(self.r.get(t), Ty::Bool) {
+                            let tn = sloth_frontend::ty::ty_name(self.r.get(t));
+                            self.err(
+                                &e.pos,
+                                format!("`not` requires a `bool` operand, got `{}`", tn),
+                            );
+                            let z = fw.v();
+                            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                            return (z, self.r.mk(Ty::Bool));
+                        }
                         // compute `1 - dec(w)` in raw ints, then encode once:
                         // (enc(1) - dec(w)) would double-encode the result
                         let one = fw.v();
@@ -1197,6 +1258,48 @@ impl ModEmitter {
             };
             return (rv, cmp_ty_id);
         }
+        // range value equality (book ch19 §19.3 lists `range` as a builtin
+        // Equatable): compare (lo, hi) content, not the box handle (bug C4/E2)
+        if matches!(op, BinOp::EqEq | BinOp::NotEq)
+            && matches!(self.r.get(at), Ty::Range)
+            && matches!(self.r.get(bt), Ty::Range)
+        {
+            let la = fw.v();
+            fw.op(&format!(
+                "    {} = func.call @__sloth_range_lo({}) : (i64) -> i64",
+                la, a
+            ));
+            let ha = fw.v();
+            fw.op(&format!(
+                "    {} = func.call @__sloth_range_hi({}) : (i64) -> i64",
+                ha, a
+            ));
+            let lb = fw.v();
+            fw.op(&format!(
+                "    {} = func.call @__sloth_range_lo({}) : (i64) -> i64",
+                lb, b
+            ));
+            let hb = fw.v();
+            fw.op(&format!(
+                "    {} = func.call @__sloth_range_hi({}) : (i64) -> i64",
+                hb, b
+            ));
+            let e1 = fw.v();
+            fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", e1, la, lb));
+            let e2 = fw.v();
+            fw.op(&format!("    {} = arith.cmpi eq, {}, {} : i64", e2, ha, hb));
+            let e3 = fw.v();
+            fw.op(&format!("    {} = arith.andi {}, {} : i1", e3, e1, e2));
+            let mut rv = ext_bool(fw, &e3);
+            if op == &BinOp::NotEq {
+                let one = fw.v();
+                fw.op(&format!("    {} = arith.constant 1 : i64", one));
+                let o = fw.v();
+                fw.op(&format!("    {} = arith.xori {}, {} : i64", o, rv, one));
+                rv = o;
+            }
+            return (rv, cmp_ty_id);
+        }
         // design §2.1: no implicit numeric conversion — comparisons require
         // both operands to share their type; int vs float is a compile error
         if self.is_float(at) != self.is_float(bt) {
@@ -1208,6 +1311,22 @@ impl ModEmitter {
             return (z, cmp_ty_id);
         }
         let fl = self.is_float(at) && self.is_float(bt);
+        // relational `< <= > >=` are numeric (design §7.1); a non-numeric
+        // surface would degrade to raw pointer-word compare (bug B1/C1).
+        // `==`/`!=` stay word/content compare for bool/str/class handles.
+        if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+            && !fl
+            && !(self.is_int_like(at) && self.is_int_like(bt))
+            && !matches!(self.r.get(at), Ty::Unit)
+            && !matches!(self.r.get(bt), Ty::Unit)
+        {
+            let an = sloth_frontend::ty::ty_name(self.r.get(at));
+            let bn = sloth_frontend::ty::ty_name(self.r.get(bt));
+            self.err_diff(pos, "comparison operand", &an, &bn);
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, cmp_ty_id);
+        }
         if fl {
             // tagged f64 words -> raw scalars for cmpf
             let a = emit_dec_f(fw, &a);
@@ -1349,6 +1468,11 @@ impl ModEmitter {
                             return self
                                 .emit_method_ref_value(fw, &defcls, name, &fd, &recv, &e.pos);
                         }
+                        // neither a field nor a method: a name miss is not part
+                        // of the surface (book §5.4) — diagnose instead of
+                        // reading one word past the object body
+                        self.err(&e.pos, format!("unknown field `{}` on class `{}`", name, c));
+                        return (String::new(), self.r.mk(Ty::Unit));
                     }
                     let idx = self.field_index(&c, name);
                     let zi = fw.v();
@@ -1452,8 +1576,19 @@ impl ModEmitter {
             } => {
                 // range as a first-class value: rc box {lo, hi(exclusive)}.
                 // Inclusive `a..=b` normalizes to hi=b+1 (encoded-word add).
-                let (lo, _lt) = self.emit_expr(fw, low);
-                let (hi, _ht) = self.emit_expr(fw, high);
+                // Bound elements are `int` (book §5.1); anything else would be
+                // reinterpreted as a raw word (float-range hang, bug B10).
+                let (lo, lt) = self.emit_expr(fw, low);
+                let (hi, ht) = self.emit_expr(fw, high);
+                for (t, side) in [(lt, "start"), (ht, "end")] {
+                    if !self.is_int_like(t) && !matches!(self.r.get(t), Ty::Unit) {
+                        let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                        self.err(
+                            &e.pos,
+                            format!("range {} must be `int`, got `{}`", side, got),
+                        );
+                    }
+                }
                 let hi2 = if *inclusive {
                     let one = fw.v();
                     fw.op(&format!(
@@ -1480,10 +1615,48 @@ impl ModEmitter {
                 // array literal: fixed-length gc allocation of i64/f64 words
                 let mut evs: Vec<String> = Vec::new();
                 let mut ets: Vec<TyId> = Vec::new();
+                // a declared element surface resolves `ok()/err()` ctor
+                // elements inside the literal (bug OPT5/E4)
+                let elem_expected =
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Array(e)) => Some(e),
+                        _ => None,
+                    };
                 for x in xs {
+                    if let Some(e) = elem_expected {
+                        if let Some((v, t)) = self.try_literal_result_ctor(fw, x, e) {
+                            evs.push(v);
+                            ets.push(t);
+                            continue;
+                        }
+                    }
                     let (v, t) = self.emit_expr(fw, x);
                     evs.push(v);
                     ets.push(t);
+                }
+                // declared `Array<T?>`: the annotation's optional element
+                // surface wins, including *reference* optionals (nil stays nil,
+                // bare scalars box up) — otherwise `[C()]` collapses to
+                // `Array<C>` and `is nil` becomes a false error (bug B9/OPT4)
+                let hint_el0 = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                    Some(Ty::Array(e)) => Some(e),
+                    _ => None,
+                };
+                if let Some(he) = hint_el0 {
+                    if matches!(self.r.get(he), Ty::Opt(_)) {
+                        for i in 0..evs.len() {
+                            let et = self.r.get(ets[i]).clone();
+                            if matches!(et, Ty::Unit) {
+                                ets[i] = he;
+                            } else if self.opt_inner(he).is_some() {
+                                let (c2, t2) = self.coerce_into_opt(fw, &evs[i], ets[i], he);
+                                evs[i] = c2;
+                                ets[i] = t2;
+                            } else {
+                                ets[i] = he;
+                            }
+                        }
+                    }
                 }
                 // design §2.1: no implicit numeric conversion — an array
                 // literal mixing int and float elements has no common element
@@ -1542,6 +1715,36 @@ impl ModEmitter {
                                     ets[i] = t2;
                                 }
                             }
+                        }
+                    }
+                }
+                // homogeneity (book ch12 §12.1): every element must share a
+                // common element surface. A declared hint wins and is checked
+                // element-wise; otherwise unrelated families (int/bool/str/
+                // unrelated classes) are a compile error rather than a silent
+                // `Array<int>` fallback that stores raw pointers (bug B5).
+                if !ets.is_empty() && !anyf {
+                    let first = ets[0];
+                    let allsame = ets.iter().all(|t| self.r.get(*t) == self.r.get(first));
+                    if !allsame {
+                        if let Some(he) = hint_el {
+                            for i in 0..ets.len() {
+                                let ht = self.r.get(he).clone();
+                                let et = self.r.get(ets[i]).clone();
+                                if !matches!(et, Ty::Unit)
+                                    && !matches!(ht, Ty::Unit)
+                                    && !self.surface_compat(&ht, &et)
+                                {
+                                    let hn = self.surface_name(&ht);
+                                    let en = self.surface_name(&et);
+                                    self.err_diff(&xs[i].pos, "array literal element", &hn, &en);
+                                }
+                            }
+                        } else if self.named_lub(&ets).is_none() {
+                            self.err(
+                                &e.pos,
+                                "array literal elements have no common type".to_string(),
+                            );
                         }
                     }
                 }
@@ -1626,37 +1829,38 @@ impl ModEmitter {
                 // map literal: reproducible open-addressing rt table
                 let mut kevs: Vec<(String, TyId)> = Vec::new();
                 let mut vevs: Vec<(String, TyId)> = Vec::new();
+                // declared value surface resolves `ok()/err()` ctor values
+                // inside the literal (bug OPT5/E4)
+                let val_expected = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone())
+                {
+                    Some(Ty::Map(_, v)) => Some(v),
+                    _ => None,
+                };
                 for (k, v) in pairs {
                     let (kv, kt) = self.emit_expr(fw, k);
-                    let (vv, vt) = self.emit_expr(fw, v);
+                    let (vv, vt) = match val_expected {
+                        Some(e) => match self.try_literal_result_ctor(fw, v, e) {
+                            Some((w, t)) => (w, t),
+                            None => self.emit_expr(fw, v),
+                        },
+                        None => self.emit_expr(fw, v),
+                    };
                     kevs.push((kv, kt));
                     vevs.push((vv, vt));
                 }
-                // key kind: str handles vs i64 words (uniform family check)
+                // key kind: str handles vs i64 words (uniform family check).
+                // Families distinguish int / bool / float / str / range / class
+                // so `@(1: …, true: …)` is rejected instead of collapsing
+                // `true` onto the int word `1` (E3/C3).
                 let kvm: Vec<TyId> = kevs.iter().map(|x| x.1).collect();
-                let anyk_str = kvm.iter().any(|t| self.is_str(*t));
-                let anyk_obj = if anyk_str {
-                    false
-                } else {
-                    kvm.iter()
-                        .any(|t| matches!(self.r.get(*t).clone(), Ty::Named(_, _)))
-                };
-                // float keys are Hashable (design §2.5) and ride the word route
-                // (bitwise-equal tagged words); mixing families stays an error
-                let anyk_float = kvm.iter().any(|t| self.is_float(*t));
-                if anyk_float && kvm.iter().any(|t| !self.is_float(*t)) {
+                let kfams: Vec<String> = kvm.iter().map(|t| self.map_key_family(*t)).collect();
+                let known: Vec<&String> = kfams.iter().filter(|f| f.as_str() != "?").collect();
+                if known.len() > 1 && known.iter().any(|f| *f != known[0]) {
                     self.err(&e.pos, "mixed map key types".to_string());
                 }
-                if anyk_str && kvm.iter().any(|t| !self.is_str(*t)) {
-                    self.err(&e.pos, "mixed map key types".to_string());
-                }
-                if anyk_obj
-                    && kvm
-                        .iter()
-                        .any(|t| !matches!(self.r.get(*t).clone(), Ty::Named(_, _)))
-                {
-                    self.err(&e.pos, "mixed map key types".to_string());
-                }
+                let anyk_str = kfams.iter().any(|f| f == "str");
+                let anyk_float = kfams.iter().any(|f| f == "float");
+                let anyk_obj = kfams.iter().any(|f| f == "class");
                 if anyk_obj {
                     for t in kvm.iter() {
                         match self.r.get(*t).clone() {
@@ -1682,17 +1886,48 @@ impl ModEmitter {
                 } else {
                     None
                 };
-                let kty = if anyk_str {
-                    self.r.mk(Ty::Str)
-                } else if anyk_obj {
-                    kvm[0]
-                } else if anyk_float {
-                    self.r.mk(Ty::F64)
+                let kty = if !kvm.is_empty() {
+                    // homogeneous surface: keep the exact key type so
+                    // `Map<bool,_>` / `Map<int8,_>` / `Map<range,_>` survive
+                    // (bug C3/E1); mixed widths collapse to i64
+                    if kvm.iter().all(|t| *t == kvm[0]) {
+                        kvm[0]
+                    } else if anyk_str {
+                        self.r.mk(Ty::Str)
+                    } else if anyk_float {
+                        self.r.mk(Ty::F64)
+                    } else if anyk_obj {
+                        kvm[0]
+                    } else {
+                        self.r.mk(Ty::I64)
+                    }
                 } else if let Some((k, _)) = hint_kv {
                     k
                 } else {
                     self.r.mk(Ty::I64)
                 };
+                // declared `Map<_, T?>`: mirror the list-literal optional
+                // element rule (reference optionals included) — bug B9/OPT4
+                let hint_v0 = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                    Some(Ty::Map(_, v)) => Some(v),
+                    _ => None,
+                };
+                if let Some(hv) = hint_v0 {
+                    if matches!(self.r.get(hv), Ty::Opt(_)) {
+                        for x in vevs.iter_mut() {
+                            let et = self.r.get(x.1).clone();
+                            if matches!(et, Ty::Unit) {
+                                x.1 = hv;
+                            } else if self.opt_inner(hv).is_some() {
+                                let (c2, t2) = self.coerce_into_opt(fw, &x.0, x.1, hv);
+                                x.0 = c2;
+                                x.1 = t2;
+                            } else {
+                                x.1 = hv;
+                            }
+                        }
+                    }
+                }
                 // value kind: no implicit numeric conversion — mixed int/float
                 // values have no common type and are a compile error
                 let nvf = vevs.iter().filter(|x| self.is_float(x.1)).count();
@@ -1731,6 +1966,31 @@ impl ModEmitter {
                     }
                 }
                 let vts: Vec<TyId> = vevs.iter().map(|x| x.1).collect();
+                // value homogeneity (book ch13 §13.1): mirrored from the list
+                // literal — unrelated value families are a compile error, not a
+                // silent `int` fallback that stores raw pointers (bug B5)
+                if !vevs.is_empty() && !anyf {
+                    let first = vevs[0].1;
+                    let allsame = vevs.iter().all(|y| self.r.get(y.1) == self.r.get(first));
+                    if !allsame {
+                        if let Some((_, hv)) = hint_kv {
+                            for x in vevs.iter() {
+                                let ht = self.r.get(hv).clone();
+                                let et = self.r.get(x.1).clone();
+                                if !matches!(et, Ty::Unit)
+                                    && !matches!(ht, Ty::Unit)
+                                    && !self.surface_compat(&ht, &et)
+                                {
+                                    let hn = self.surface_name(&ht);
+                                    let en = self.surface_name(&et);
+                                    self.err_diff(&e.pos, "map value type", &hn, &en);
+                                }
+                            }
+                        } else if self.named_lub(&vts).is_none() {
+                            self.err(&e.pos, "map literal values have no common type".to_string());
+                        }
+                    }
+                }
                 let vty = match vevs.first() {
                     Some(x) if vevs.iter().all(|y| self.r.get(y.1) == self.r.get(x.1)) => x.1,
                     _ => {
@@ -1771,6 +2031,7 @@ impl ModEmitter {
                 let kk = match self.r.get(kty).clone() {
                     Ty::Str => 1i64,
                     Ty::Named(_, _) => 2i64,
+                    Ty::Range => 3i64,
                     _ => 0i64,
                 };
                 let vref = if !anyf && self.is_ref(vty) {
@@ -1825,7 +2086,7 @@ impl ModEmitter {
                         "__sloth_map_set"
                     };
                     // rc patch B: map slots own ref-typed keys/values
-                    let kref = matches!(self.r.get(kev.1), Ty::Str | Ty::Named(_, _));
+                    let kref = matches!(self.r.get(kev.1), Ty::Str | Ty::Named(_, _) | Ty::Range);
                     if kref {
                         self.emit_retain(fw, &kev.0);
                     }
@@ -2157,8 +2418,11 @@ impl ModEmitter {
                 let fd_len = fd.as_ref().map(|f| f.type_params.len());
                 if ty_len == Some(ta.len()) {
                     // generic class ctor: register/fetch instance, then default ctor
+                    for t in ta {
+                        self.check_trait_type(t, pos);
+                    }
                     let tys: Vec<TyId> = ta.iter().map(|t| self.ty_of(t)).collect();
-                    let it = self.declare_class_inst(base, &tys);
+                    let it = self.declare_class_inst(base, &tys, pos);
                     let iname = match self.r.get(it) {
                         Ty::Named(n, _) => n.clone(),
                         _ => String::new(),
@@ -2176,6 +2440,9 @@ impl ModEmitter {
                             fd.type_params.iter().map(|p| p.name.clone()).collect();
                         let mut map: std::collections::HashMap<String, TyId> =
                             std::collections::HashMap::new();
+                        for tt in ta {
+                            self.check_trait_type(tt, pos);
+                        }
                         for (tp, tt) in fd.type_params.iter().zip(ta.iter()) {
                             map.insert(tp.name.clone(), self.ty_of(tt));
                         }
@@ -2412,6 +2679,10 @@ impl ModEmitter {
                         } else {
                             mangle(&self.cur_mod, None, fname)
                         }
+                    } else if self.fixed_syms.contains(fname) {
+                        // reserved/fixed symbol (e.g. the container prelude
+                        // disposers) injected into this module
+                        fname.clone()
                     } else if let Some((m, _)) = self.cross_funcs.get(fname) {
                         m.clone()
                     } else {
@@ -2445,6 +2716,29 @@ impl ModEmitter {
             if let ExprNode::Ident(m) = &obj.node {
                 let key = format!("{}.{}", m, mname2);
                 self.guard_hidden(m, mname2, pos);
+                // qualified generic constructor: `lib.Box<int>(…)` must build
+                // the monomorphic instance, not the unresolved template (M1)
+                if let Some(ta) = targs_in {
+                    if let Some((_dm, cdef)) = self.class_defs.get(mname2.as_str()).cloned() {
+                        let ntp = cdef.type_params.len();
+                        if ntp > 0 && ntp == ta.len() {
+                            for t in ta {
+                                self.check_trait_type(t, pos);
+                            }
+                            let tys: Vec<TyId> = ta.iter().map(|t| self.ty_of(t)).collect();
+                            let it = self.declare_class_inst(mname2, &tys, pos);
+                            let iname = match self.r.get(it) {
+                                Ty::Named(n, _) => n.clone(),
+                                _ => String::new(),
+                            };
+                            if !iname.is_empty() {
+                                let cargv: Vec<(String, TyId)> =
+                                    args.iter().map(|a| self.emit_expr(fw, a)).collect();
+                                return self.emit_new_obj(fw, &iname, &cargv, &Vec::new(), pos);
+                            }
+                        }
+                    }
+                }
                 if let Some((defmod, fd)) = self.foreign_func_defs.get(&key).cloned() {
                     // qualified call to an imported generic function: build the
                     // monomorphic instance in the defining module's namespace
@@ -2457,6 +2751,15 @@ impl ModEmitter {
                     return out;
                 }
                 if let Some(fs) = self.cross_funcs.get(&key).cloned() {
+                    // an imported `extern func` must marshal through the C ABI
+                    // (f64/i64 spellings), not the word-call route (bug M5)
+                    if let Some(fd) = self.funcs.get(mname2).cloned() {
+                        if fd.is_extern {
+                            let cargv: Vec<(String, TyId)> =
+                                args.iter().map(|a| self.emit_expr(fw, a)).collect();
+                            return self.emit_extern_call(fw, mname2, &fd, &cargv, pos);
+                        }
+                    }
                     let mut cargv: Vec<(String, TyId)> = Vec::new();
                     let mut csig: Vec<String> = Vec::new();
                     for a in args {
@@ -2579,6 +2882,24 @@ impl ModEmitter {
                         }
                         if self.is_int_like(elid) && self.is_int_like(at) {
                             v = self.coerce_int_word(fw, &v, elid);
+                        }
+                        // general element-surface check (book ch12 §12.1:
+                        // `Array<T>` is homogeneous; `push` is the same store
+                        // face as `a[i] = v` and must diagnose too)
+                        let handled = (fel && !self.is_float(at))
+                            || self.opt_inner(elid).is_some()
+                            || self.weak_inner(elid).is_some()
+                            || (self.is_int_like(elid) && self.is_int_like(at))
+                            || matches!(self.r.get(at), Ty::Unit)
+                            || matches!(self.r.get(elid), Ty::Unit);
+                        if !handled {
+                            let els = self.r.get(elid).clone();
+                            let ats = self.r.get(at).clone();
+                            if !self.surface_compat(&els, &ats) {
+                                let en = self.surface_name(&els);
+                                let an = self.surface_name(&ats);
+                                self.err_diff(pos, "push element", &en, &an);
+                            }
                         }
                         let callv = fw.v();
                         // rc patch C: the array slot owns ref-typed
@@ -2724,10 +3045,47 @@ impl ModEmitter {
             }
             let variadic = fd.variadic.clone();
             let plan = self.plan_func(&name, None, &fd, variadic.as_ref());
+            // arity: a wrong argument count is a user error, not a malformed
+            // `func.call` (variadic packs `>= fixed` args into one array)
+            let arity_ok = match &variadic {
+                None => self.check_call_arity(
+                    pos,
+                    &format!("call to `{}`", name),
+                    plan.params.len(),
+                    argv.len(),
+                ),
+                Some(_) => {
+                    let fixed = plan.params.len().saturating_sub(1);
+                    if argv.len() < fixed {
+                        self.err(
+                            pos,
+                            format!(
+                                "wrong number of arguments in call to `{}`: expected at least {}, got {}",
+                                name, fixed, argv.len()
+                            ),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+            };
+            if !arity_ok {
+                let z = fw.v();
+                fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                return (z, self.r.mk(Ty::Unit));
+            }
             // patch 42: caller-side Opt(值型)-param coercion (bare scalars
             // box up against the callee's declared parameter surfaces)
             let argv_c: Vec<(String, TyId)> = {
-                let vals = self.coerce_args_to_params(fw, &argv, &plan.params, pos);
+                // variadic: the trailing formal is the packed array, not a
+                // positional parameter, so it must not be surface-checked
+                // against the first extra argument
+                let check_params: &[(String, TyId, bool)] = match &variadic {
+                    Some(_) => &plan.params[..plan.params.len().saturating_sub(1)],
+                    None => &plan.params,
+                };
+                let vals = self.coerce_args_to_params(fw, &argv, check_params, pos, !fd.is_extern);
                 argv.iter()
                     .enumerate()
                     .map(|(i, x)| {
@@ -3035,16 +3393,35 @@ impl ModEmitter {
                 let (v, t) = argv[0].clone();
                 let ts = self.r.get(t).clone();
                 let sym = match &ts {
-                    Ty::Str => "__sloth_str_len",
-                    Ty::Array(_) => "__sloth_arr_len",
-                    Ty::Map(..) => "__sloth_map_len",
-                    _ => "__sloth_str_len",
+                    Ty::Str => Some("__sloth_str_len"),
+                    Ty::Array(_) => Some("__sloth_arr_len"),
+                    Ty::Map(..) => Some("__sloth_map_len"),
+                    // unknown (unannotated global) stays lenient
+                    Ty::Unit => Some("__sloth_str_len"),
+                    _ => None,
                 };
-                fw.op(&format!(
-                    "    {} = func.call @{}({}) : (i64) -> i64",
-                    r, sym, v
-                ));
-                (r, self.r.mk(Ty::I64))
+                match sym {
+                    Some(sym) => {
+                        fw.op(&format!(
+                            "    {} = func.call @{}({}) : (i64) -> i64",
+                            r, sym, v
+                        ));
+                        (r, self.r.mk(Ty::I64))
+                    }
+                    None => {
+                        let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                        let hint = if matches!(ts, Ty::Opt(_)) {
+                            "; narrow it with `is not nil` first"
+                        } else {
+                            ""
+                        };
+                        self.err(
+                            pos,
+                            format!("len() expects a `str`/`Array`/`Map`, got `{}`{}", got, hint),
+                        );
+                        (String::new(), self.r.mk(Ty::Unit))
+                    }
+                }
             }
             // `s.chars()` / `chars(s)`: lazy UTF-8 char iterator. Each `next()`
             // yields the Unicode scalar value of one character as an `int`
@@ -3069,7 +3446,13 @@ impl ModEmitter {
                 let (v, t) = argv[0].clone();
                 let kt = match self.r.get(t).clone() {
                     Ty::Map(k3, _v3) => k3,
-                    _ => self.r.mk(Ty::I64),
+                    // unknown (unannotated global) stays lenient
+                    Ty::Unit => self.r.mk(Ty::I64),
+                    _ => {
+                        let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                        self.err(pos, format!("keys() expects a `Map`, got `{}`", got));
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
                 };
                 fw.op(&format!(
                     "    {} = func.call @__sloth_map_keys({}) : (i64) -> i64",
@@ -3084,7 +3467,13 @@ impl ModEmitter {
                 let (v, t) = argv[0].clone();
                 let vt = match self.r.get(t).clone() {
                     Ty::Map(_k, v3) => v3,
-                    _ => self.r.mk(Ty::I64),
+                    // unknown (unannotated global) stays lenient
+                    Ty::Unit => self.r.mk(Ty::I64),
+                    _ => {
+                        let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                        self.err(pos, format!("values() expects a `Map`, got `{}`", got));
+                        return (String::new(), self.r.mk(Ty::Unit));
+                    }
                 };
                 fw.op(&format!(
                     "    {} = func.call @__sloth_map_values({}) : (i64) -> i64",
@@ -3238,7 +3627,7 @@ impl ModEmitter {
         // patch 42: caller-side Opt(值型)-param coercion against the
         // monomorphized plan surfaces (bare scalars box up)
         let argv_c: Vec<(String, TyId)> = {
-            let vals9 = self.coerce_args_to_params(fw, argv, &plan.params, pos);
+            let vals9 = self.coerce_args_to_params(fw, argv, &plan.params, pos, true);
             argv.iter()
                 .enumerate()
                 .map(|(i, x)| (vals9[i].clone(), x.1))
@@ -3511,5 +3900,96 @@ impl ModEmitter {
         let t = self.r.mk(Ty::Str);
         self.dangling_producer(fw, &fin, t);
         fin
+    }
+
+    /// `ok(x)`/`err(x)` used as a container-literal element under a declared
+    /// `Array<Result<_,_>>` / `Map<_, Result<_,_>>` surface (bug OPT5/E4).
+    /// Returns the ctor value+type, or `None` for any other expression.
+    pub(crate) fn try_literal_result_ctor(
+        &mut self,
+        fw: &mut FnWalk,
+        x: &Expr,
+        expected: TyId,
+    ) -> Option<(String, TyId)> {
+        let (callee, args) = match &x.node {
+            ExprNode::Call { callee, args } if args.len() == 1 => (callee, args),
+            _ => return None,
+        };
+        let is_ok = match &callee.node {
+            ExprNode::Ident(id) if id == "ok" => true,
+            ExprNode::Ident(id) if id == "err" => false,
+            _ => return None,
+        };
+        let inst = match self.r.get(expected).clone() {
+            Ty::Named(nm, _) if self.result_insts.contains(&nm) => nm,
+            _ => return None,
+        };
+        Some(self.emit_result_ctor(fw, &inst, &args[0], is_ok, &x.pos))
+    }
+}
+
+impl ModEmitter {
+    /// raw C-ABI call to an `extern func`: scalar words decode to their C
+    /// spelling and scalar returns re-encode into words; opaque extern-type
+    /// handles pass through. Used by the qualified cross-module path so
+    /// `mod.extern_fn(…)` marshals like the unqualified call (bug M5).
+    pub(crate) fn emit_extern_call(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        fd: &FuncDef,
+        argv: &[(String, TyId)],
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let plan = self.plan_func(name, None, fd, fd.variadic.as_ref());
+        self.coerce_args_to_params(fw, argv, &plan.params, pos, false);
+        let sym = name.to_string();
+        let mut vals: Vec<String> = Vec::new();
+        let mut tys: Vec<String> = Vec::new();
+        for (i, (v, t)) in argv.iter().enumerate() {
+            let pt = plan.params.get(i).map(|p| p.1).unwrap_or(*t);
+            let pts = self.r.get(pt).clone();
+            if self.is_float(pt) {
+                vals.push(emit_dec_f(fw, v));
+                tys.push("f64".to_string());
+            } else if matches!(pts, Ty::I64 | Ty::Bool) {
+                vals.push(emit_dec_int(fw, v));
+                tys.push("i64".to_string());
+            } else {
+                vals.push(v.clone());
+                tys.push("i64".to_string());
+            }
+        }
+        let sig = tys.join(", ");
+        if self.is_unit(plan.ret) {
+            fw.op(&format!(
+                "    func.call @{}({}) : ({}) -> ()",
+                sym,
+                vals.join(", "),
+                sig
+            ));
+            return (String::new(), plan.ret);
+        }
+        let retf = self.is_float(plan.ret);
+        let ret_int = matches!(self.r.get(plan.ret).clone(), Ty::I64 | Ty::Bool);
+        let rr = fw.v();
+        fw.op(&format!(
+            "    {} = func.call @{}({}) : ({}) -> {}",
+            rr,
+            sym,
+            vals.join(", "),
+            sig,
+            if retf { "f64" } else { "i64" }
+        ));
+        if retf {
+            return (emit_enc_f(fw, &rr), plan.ret);
+        }
+        if ret_int {
+            return (emit_enc_int(fw, &rr), plan.ret);
+        }
+        if sym.starts_with(RESERVED_PREFIX) && self.is_ref(plan.ret) {
+            self.dangling_producer(fw, &rr, plan.ret);
+        }
+        (rr, plan.ret)
     }
 }

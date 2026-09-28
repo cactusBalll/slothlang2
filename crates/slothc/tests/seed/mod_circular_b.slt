@@ -1,0 +1,5 @@
+// seed helper for mod_circular_diag.sl (not run directly)
+import "mod_circular_a.slt";
+pub func b_fn(): int {
+    return 2;
+}

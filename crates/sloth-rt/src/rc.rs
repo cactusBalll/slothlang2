@@ -350,6 +350,14 @@ pub extern "C" fn __sloth_rc_release(w: i64) -> i64 {
         let dtor = (*hdr).dtor.take();
         let sdtor = (*hdr).sdtor.take();
         let aux = (*hdr).aux;
+        // Snapshot whether any weak box existed *before* the death cascade.
+        // Ownership of the final `free` must be unique: if weak boxes exist,
+        // the last `weak_dtor` (which may itself run inside this cascade when
+        // the object owns a weak box to itself / a weak back-edge) frees the
+        // header; otherwise this path does. Reading `weak_cnt` again *after*
+        // the cascade would race with a `weak_dtor` running during it and
+        // double-free (bug A2 / OPT1).
+        let had_weak = (*hdr).weak_cnt.load(Ordering::Acquire) != 0;
         // invalidate every weak box (their own rc keeps the boxes alive).
         // The header chunk itself is retained while weak boxes exist.
         {
@@ -367,7 +375,7 @@ pub extern "C" fn __sloth_rc_release(w: i64) -> i64 {
         } else if let Some(dtor) = dtor {
             dtor(p, aux);
         }
-        if (*hdr).weak_cnt.load(Ordering::Acquire) == 0 {
+        if !had_weak {
             libc::free(hdr as *mut libc::c_void);
         }
     }

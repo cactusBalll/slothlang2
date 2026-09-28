@@ -22,6 +22,21 @@ impl ModEmitter {
         variadic: Option<&Variadic>,
         entry: bool,
     ) -> String {
+        self.emit_func_env(name, cls, f, variadic, entry, None)
+    }
+
+    /// emit a function; `lambda_env` (for generated lambda bodies) carries the
+    /// hidden env parameter name + capture order so captured-scalar writes can
+    /// be written back into the closure frame.
+    pub(crate) fn emit_func_env(
+        &mut self,
+        name: &str,
+        cls: Option<&str>,
+        f: &FuncDef,
+        variadic: Option<&Variadic>,
+        entry: bool,
+        lambda_env: Option<(String, Vec<String>)>,
+    ) -> String {
         let plan = self.plan_func(name, cls, f, variadic);
         if self.emitted_names.contains(&plan.mangled) {
             return plan.mangled;
@@ -67,6 +82,8 @@ impl ModEmitter {
             .unwrap_or(false)
             || (cls.is_none() && self.addressable.contains(name));
         self.emitted_names.push(plan.mangled.clone());
+        // scope the type side table to this function/instance frame
+        let saved_frame = std::mem::replace(&mut self.cur_frame, plan.mangled.clone());
         let mut fw = FnWalk {
             cur: String::new(),
             vcount: 1000,
@@ -79,6 +96,17 @@ impl ModEmitter {
             loopvars: Vec::new(),
             loop_owned_elems: Vec::new(),
             xfer: Vec::new(),
+            lambda_env: lambda_env.map(|(e, caps)| {
+                let m: HashMap<String, usize> = caps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.clone(), i))
+                    .collect();
+                (e, m)
+            }),
+            fiber_payload: self.pending_fiber_payload.take(),
+            params: std::collections::HashSet::new(),
+            param_owned: std::collections::HashSet::new(),
             ret: plan.ret,
             ret_alloca: String::new(),
             ret_flag: String::new(),
@@ -110,6 +138,9 @@ impl ModEmitter {
                 src, a, zi
             ));
             fw.scopes.last_mut().unwrap().insert(pn.clone(), (a, *pt));
+            // formals are borrowed: record so reassignment skips the
+            // overwrite-release of the incoming (caller-owned) count
+            fw.params.insert(pn.clone());
         }
         // emit body statements into the entry block
         self.walk_body(&mut fw, &f.body);
@@ -193,6 +224,7 @@ impl ModEmitter {
         self.out.push_str(&entry_text);
         self.out.push_str(&ret_text);
         self.out.push_str("  }\n");
+        self.cur_frame = saved_frame;
         plan.mangled
     }
 }

@@ -1,0 +1,6 @@
+// seed helper for diag_private_class.sl (not run directly)
+class Hidden {
+    var x: int;
+    func __init__() { this.x = 1; }
+    func get(): int { return this.x; }
+}

@@ -244,7 +244,7 @@ impl ModEmitter {
         let unit = self.is_unit(ret);
         // caller-side coercion against the STATIC type's parameter surface
         // (patch 42: Opt/dyn boxing must match the direct-call path)
-        let vals = self.coerce_args_to_params(fw, argv, &plan.params, pos);
+        let vals = self.coerce_args_to_params(fw, argv, &plan.params, pos, true);
         let slot = self.vt_slot(VT_METHOD_NS, mname);
         // result slot: keeps SSA dominance across the call/panic branches
         let resslot: Option<String> = if unit {
@@ -455,14 +455,13 @@ impl ModEmitter {
     /// instances emit their monomorphized methods in the root module.
     pub(crate) fn dispose_method_sym(&mut self, clsname: &str) -> Option<(String, bool)> {
         let (defcls, fd) = self.find_method(clsname, "__dispose__")?;
-        let owner = if self.class_frames.contains_key(clsname) {
-            self.name.clone()
-        } else {
-            self.cls_mod
-                .get(&defcls)
-                .cloned()
-                .unwrap_or_else(|| self.name.clone())
-        };
+        // generic instances emit their monomorphized methods under the
+        // defining module (`cls_mod`), matching the call sites
+        let owner = self
+            .cls_mod
+            .get(&defcls)
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
         let ret_unit = match &fd.ret {
             None => true,
             Some(t) => {
@@ -560,6 +559,9 @@ impl ModEmitter {
             self.err(pos, format!("unknown class `{}`", clsname));
             return (String::new(), self.r.mk(Ty::Unit));
         }
+        // an unqualified/qualified construction of an imported non-`pub` class
+        // must be rejected (bug M4)
+        self.guard_class(clsname, pos);
         let z = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : i64", z));
         let clsid = *self.class_ids.get(clsname).unwrap_or(&0);
@@ -670,6 +672,20 @@ impl ModEmitter {
                         if ftf {
                             iv = self.int_to_f64_word(fw, &iv, iit);
                         }
+                    } else if !ftf
+                        && !matches!(self.r.get(iit), Ty::Unit)
+                        && !matches!(self.r.get(ftt), Ty::Unit)
+                    {
+                        // non-float surface conflict (book ch5 §5.4): int vs
+                        // str/class/container etc. must diagnose, not store the
+                        // raw word (bug B7)
+                        let fts = self.r.get(ftt).clone();
+                        let its = self.r.get(iit).clone();
+                        if !self.surface_compat(&fts, &its) {
+                            let an = self.surface_name(&fts);
+                            let bn = self.surface_name(&its);
+                            self.err_diff(&ix.pos, "field initializer", &an, &bn);
+                        }
                     }
                     let zi = fw.v();
                     fw.op(&format!(
@@ -683,6 +699,35 @@ impl ModEmitter {
             }
         }
         let fdinit = self.find_method(clsname, "__init__");
+        // ctor arity: `argv` excludes the receiver, so it must match the
+        // declared `__init__` param count (or be empty when there is none)
+        let fdinit = match fdinit {
+            Some((defcls, fd)) => {
+                if self.check_call_arity(
+                    pos,
+                    &format!("constructor `{}`", clsname),
+                    fd.params.len(),
+                    argv.len(),
+                ) {
+                    Some((defcls, fd))
+                } else {
+                    None
+                }
+            }
+            None => {
+                if !argv.is_empty() {
+                    self.err(
+                        pos,
+                        format!(
+                            "constructor `{}` takes no arguments, got {}",
+                            clsname,
+                            argv.len()
+                        ),
+                    );
+                }
+                None
+            }
+        };
         if let Some((defcls, fd)) = fdinit {
             let saved_mod = self.cur_mod.clone();
             self.cur_mod = self
@@ -767,10 +812,22 @@ impl ModEmitter {
         let is_ll = self
             .llvm_method
             .contains(&(cls.to_string(), mname.to_string()));
+        // arity: `argv` includes the receiver, so it must match the plan's
+        // `this + declared params` count (a mismatch is a user error)
+        if !self.check_call_arity(
+            pos,
+            &format!("call to `{}.{}`", cls, mname),
+            plan.params.len(),
+            argv.len(),
+        ) {
+            let z = fw.v();
+            fw.op(&format!("    {} = arith.constant 0 : i64", z));
+            return (z, plan.ret);
+        }
         let vals: Vec<String> = {
             // patch 42: caller-side Opt-param coercion before the emission;
             // the ABI surface follows the PLAN spelling (boxes ride i64)
-            let vals2 = self.coerce_args_to_params(fw, argv, &plan.params, pos);
+            let vals2 = self.coerce_args_to_params(fw, argv, &plan.params, pos, true);
             let _sigs: Vec<String> = match plan.params.len().cmp(&argv.len()) {
                 std::cmp::Ordering::Greater => vec![],
                 _ => vec![],

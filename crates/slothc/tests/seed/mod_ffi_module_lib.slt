@@ -1,0 +1,9 @@
+// seed helper for mod_ffi_module.sl (not run directly)
+extern type Tok;
+extern func sloth_extern_tok_new(): Tok;
+extern func sloth_extern_tok_val(t: Tok): int;
+
+pub func tok_val(): int {
+    var t = sloth_extern_tok_new();
+    return sloth_extern_tok_val(t);
+}

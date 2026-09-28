@@ -246,6 +246,19 @@ impl ModEmitter {
                         self.err(pos, "channel.send requires one argument".into());
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
+                    // sent value must match the element type T (book ch28 §28.4)
+                    if !matches!(self.r.get(argv[1].1), Ty::Unit)
+                        && !self.surface_compat(self.r.get(argv[1].1), self.r.get(t))
+                    {
+                        self.err(
+                            pos,
+                            format!(
+                                "channel element type mismatch: expected {}, got {}",
+                                self.surface_name(self.r.get(t)),
+                                self.surface_name(self.r.get(argv[1].1))
+                            ),
+                        );
+                    }
                     let owned = self.transfer_arg(fw, &argv[1].0, t);
                     fw.op(&format!(
                         "    func.call @__sloth_chan_send({}, {}) : (i64, i64) -> i64",
@@ -309,6 +322,25 @@ impl ModEmitter {
                         self.err(pos, "mutex.with requires a closure argument".into());
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
+                    // `with(f)` takes a `(unit) -> unit` closure (book ch28 §28.3)
+                    match self.r.get(argv[1].1).clone() {
+                        Ty::Fn(f) => {
+                            let bad_ret = !matches!(self.r.get(f.ret), Ty::Unit);
+                            let ok_params = f.params.is_empty()
+                                || (f.params.len() == 1
+                                    && matches!(self.r.get(f.params[0]), Ty::Unit));
+                            if !ok_params || bad_ret {
+                                self.err(
+                                    pos,
+                                    "mutex.with expects a `(unit) -> unit` closure".into(),
+                                );
+                            }
+                        }
+                        Ty::Unit => {}
+                        _ => {
+                            self.err(pos, "mutex.with expects a `(unit) -> unit` closure".into());
+                        }
+                    }
                     fw.op(&format!(
                         "    func.call @__sloth_mutex_with({}, {}) : (i64, i64) -> i64",
                         recvv, argv[1].0
@@ -333,6 +365,9 @@ impl ModEmitter {
                         self.err(pos, "atomic.store requires one argument".into());
                         return Some((String::new(), self.r.mk(Ty::Unit)));
                     }
+                    if !self.is_int_like(argv[1].1) {
+                        self.err(pos, "atomic.store requires an `int` argument".into());
+                    }
                     fw.op(&format!(
                         "    func.call @__sloth_atomic_store({}, {}) : (i64, i64) -> i64",
                         recvv, argv[1].0
@@ -345,6 +380,9 @@ impl ModEmitter {
                     if argv.len() != 2 {
                         self.err(pos, format!("atomic.{} requires one argument", name));
                         return Some((String::new(), self.r.mk(Ty::I64)));
+                    }
+                    if !self.is_int_like(argv[1].1) {
+                        self.err(pos, format!("atomic.{} requires an `int` argument", name));
                     }
                     let sym = if name == "add" {
                         "__sloth_atomic_add"
@@ -365,6 +403,9 @@ impl ModEmitter {
                             "atomic.cas requires an expected and a new value".into(),
                         );
                         return Some((String::new(), self.r.mk(Ty::Bool)));
+                    }
+                    if !self.is_int_like(argv[1].1) || !self.is_int_like(argv[2].1) {
+                        self.err(pos, "atomic.cas requires `int` operands".into());
                     }
                     let out = fw.v();
                     fw.op(&format!(

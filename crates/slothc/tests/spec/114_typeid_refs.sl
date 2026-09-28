@@ -21,8 +21,8 @@ func main(): unit {
     let a: dyn Animal = Dog();
     print(typeid(a) == typeid(Dog()));          // expect: true
     print(typeid(a) == typeid(Cat()));          // expect: false
-    // most-derived through a base-class reference
-    let b: Animal = Dog();
+    // most-derived through a `dyn` reference
+    let b: dyn Animal = Dog();
     print(typeid(b) == typeid(Dog()));          // expect: true
     print(typeid(b) == typeid(Cat()));          // expect: false
     // monomorphized container/class instances are distinct types

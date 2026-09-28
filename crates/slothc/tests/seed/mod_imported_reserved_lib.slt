@@ -1,0 +1,5 @@
+// seed helper for mod_imported_reserved.sl (not run directly)
+import "__sloth";
+pub func slen(s: str): int {
+    return __sloth_str_len(s);
+}

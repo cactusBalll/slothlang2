@@ -75,6 +75,9 @@ impl ModEmitter {
             format!("%v{}", *vc)
         };
         if kind == BR_LAMBDA {
+            // the lambda body receives the env frame word first (hidden param)
+            // so captured-scalar writes can be written back into the frame
+            args.push("%p0".to_string());
             for j in 0..ncap {
                 let jw = fresh(&mut vc);
                 // the frame stores capture `j` at the *tagged* index word
@@ -203,7 +206,10 @@ impl ModEmitter {
         let is_ll = self
             .llvm_method
             .contains(&(defcls.to_string(), mname.to_string()));
-        let nargs = fd.params.len().saturating_sub(1);
+        // `fd` is the source method (no synthetic `this`); the bridge receives
+        // the receiver as %p0 plus all N declared args (%p1..%pN), and the
+        // target ABI expects `this + N` operands
+        let nargs = fd.params.len();
         let bkey = format!("meth:{}", plan.mangled);
         let bridge = self.fn_bridge(
             &bkey,

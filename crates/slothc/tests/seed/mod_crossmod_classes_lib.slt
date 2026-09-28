@@ -1,0 +1,17 @@
+// seed helper for mod_crossmod_classes.sl (not run directly)
+pub class Animal {
+    pub func __init__() {
+        return;
+    }
+    pub func kind(): str {
+        return "animal";
+    }
+    pub func describe(): str {
+        return this.kind();
+    }
+}
+
+pub func newborn(): Animal {
+    let a = Animal();
+    return a;
+}

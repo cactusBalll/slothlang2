@@ -7,7 +7,7 @@
 
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
-| §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后由单一发射器**一趟融合**完成符号收集、局部推断、约束检查、单态化与 MLIR 生成 | 定案 |
+| §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后分两个显式 Pass：Pass 1 `sem`（符号收集、局部推断、约束检查；独占诊断，产出 NodeId 类型侧表），Pass 2 `irgen`（消费该侧表、诊断静默地发射 MLIR）。两 Pass 仍共享推断引擎，主动单态化尚未抽出 | 部分对齐（2026-09，两 Pass 解耦 + NodeId 类型侧表）；跨语句流敏感推断仍不承诺 |
 | §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | 仅一个**最小** `sloth` dialect（TableGen/C++，ARC `sloth.rc_retain`/`sloth.rc_release`）；解析后由单点 lowering 全部降为标准方言（`func.call @__sloth_*`），对外 IR 仍无 `sloth.*`。完整类型/GC 方言（`!sloth.string`、`sloth.gc_alloc`）不实现 | 部分解冻（2026-09-23，见 `PLAN-sloth-dialect.md`） |
 | （设计未列的运行时命名空间） | 运行时/prelude ABI 统一使用保留前缀 `__sloth_*`（`lib/prelude/abi.slt` 唯一声明）；普通模块声明保留符号报错，调用需伪导入 `import "__sloth";` | 增补（2026-09-24，提交 430f0e3） |
 | §4.1 循环依赖通过依赖图拓扑检测 | `resolve_program` 在按 `import` 递归装配时用 DFS 栈比对规范化路径，命中即报 `circular import`（`crates/sloth-codegen/src/irgen/mod.rs:205`）；`done` 集合去重。无独立依赖图/拓扑排序阶段 | 定案（等价检测，无独立阶段） |
@@ -64,7 +64,14 @@
 
 - §5.3 "基础类型方法解析为 stdlib 泛型函数"：实现改为**直接发射运行时调用**
   （`arr.len()` → `__sloth_arr_len` 等），不生成 stdlib 泛型函数。
+- 跨模块可见性：**类级 `pub` 强制**（在另一模块构造非 `pub` 类报
+  ``class `X` is private to its module (not `pub`)``）；**类成员默认公开**——
+  `class_item` 上的 `pub` 被接受但不强制（标准库 `.slt` 依赖跨模块成员访问），
+  这是与附录 C 文法 `class_item ::= 'pub'? …` 的一种宽松解释。
 - `Result<T,E>` 与 `Entry<K,V>` 由编译器**自动注入**为标准库类（源码形态见 §17）。
+- §19.3 的四组预定义 trait（`Display`/`Hashable`/`Equatable`/`Comparable`）按
+  **名称 + 方法签名**被编译器识别，但**不自动注入声明**——需用户/标准库显式
+  `trait … {}` 声明（书中示例均如此）；未声明即 `impl` 会报 `unknown trait`。
 - `Hashable` 类若无 `__hash__` 家族方法会回退到指针恒等，并给编译期提示。
 - 迭代协议是**结构化**的（提供 `iter()`/`next()` 即可），不要求显式 `impl Iterable`。
 

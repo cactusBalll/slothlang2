@@ -1,0 +1,6 @@
+// seed helper for mod_generic_chain_main.sl (not run directly)
+pub class Box<T> {
+    var v: T;
+    func __init__(x: T) { this.v = x; }
+    func get(): T { return this.v; }
+}

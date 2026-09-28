@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 mod anydesc;
 mod class;
 mod closure;
-mod collect;
+mod coerce;
 mod dynbox;
 mod expr;
 mod fiber;
@@ -39,17 +39,18 @@ mod state;
 mod stmt;
 mod tensor;
 mod thread;
-mod tybind;
 mod util;
 
 pub use module::{obj_rt_decls, rt_decls};
 pub use state::{ClassInfo, ModEmitter};
 pub use util::WW;
 
+/// function plan (semantic surface): defined by the `sem` pass, consumed by the
+/// emitter for call/ctor ABI spellings
+pub(crate) use crate::sem::collect::FuncPlan;
+
 #[allow(unused_imports)]
 pub(crate) use class::*;
-#[allow(unused_imports)]
-pub(crate) use collect::*;
 #[allow(unused_imports)]
 pub(crate) use dynbox::*;
 #[allow(unused_imports)]
@@ -73,13 +74,18 @@ pub(crate) use tensor::*;
 #[allow(unused_imports)]
 pub(crate) use thread::*;
 #[allow(unused_imports)]
-pub(crate) use tybind::*;
-#[allow(unused_imports)]
 pub(crate) use util::*;
 
 pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
-    let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
+    let mut prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
+    sloth_frontend::ast::assign_ids(&mut prog);
+    // Pass 1: semantic analysis (inference + checking); owns diagnostics and
+    // produces the NodeId type side table.
+    let table = crate::sem::analyze_program(&prog, mod_name)?;
+    // Pass 2: emission (diagnostics suppressed — Pass 1 already validated).
     let mut me = ModEmitter::new(mod_name);
+    me.check_mode = false;
+    me.type_table = table;
     me.emit_module(&prog);
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
@@ -89,34 +95,115 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     // dialects that external tools (mlir-opt) understand
     crate::dialect::lower_text(&ir, &format!("{}.mlir", mod_name))
 }
-pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
-    let mut stack: Vec<std::path::PathBuf> = Vec::new();
-    let mut done: HashSet<std::path::PathBuf> = HashSet::new();
-    let (root, mods) = resolve_program(root_src, base_dir, &mut stack, &mut done)?;
-    let mut me = ModEmitter::new("main");
+/// build a `ModEmitter` with the root + imported modules registered and the
+/// root module emitted. `check_mode` selects Pass 1 (analysis) vs Pass 2
+/// (emission); the module assembly itself is shared by both passes.
+fn build_multimod(
+    root: &Program,
+    mods: &[(String, Program, Option<String>, bool)],
+    mod_name: &str,
+    check_mode: bool,
+) -> ModEmitter {
+    let mut me = ModEmitter::new(mod_name);
+    me.check_mode = check_mode;
     // order-independent devirtualization: index overrides across every module
     // (imports emit method bodies before root classes are registered)
     {
         let mut progs: Vec<&Program> = mods.iter().map(|(_, p, _, _)| p).collect();
-        progs.push(&root);
+        progs.push(root);
         me.register_override_index(&progs);
     }
-    for (mname, mut prog, alias, token) in mods {
+    for (mname, prog, alias, token) in mods {
+        // alias-only entry recording a duplicate import's alias (bug M7)
+        if prog.decls.is_empty() && prog.imports.is_empty() {
+            if let Some(a) = alias {
+                me.register_module_alias(mname, a);
+            }
+            continue;
+        }
         // reserved `__sloth_*` gate: run on the raw module before any prelude
         // (which itself legitimately uses reserved symbols) is injected
-        me.check_reserved_module(&prog, token);
+        me.check_reserved_module(prog, *token);
+        // imports get their own copy: the shared emitter registers each module
+        // exactly once, and both passes must observe the same prelude-injected
+        // surface
+        let mut p2 = Program {
+            imports: prog.imports.clone(),
+            decls: prog.decls.clone(),
+            stmts: prog.stmts.clone(),
+        };
         // imported modules get the same `print` prelude so bare calls resolve
-        crate::irgen::inject_print_prelude(&mut prog.decls);
+        inject_print_prelude(&mut p2.decls);
         // and the reserved runtime ABI declarations so stdlib bodies resolve
-        crate::irgen::inject_abi_prelude(&mut prog.decls);
+        inject_abi_prelude(&mut p2.decls);
+        // a module carrying `import "__sloth";` also gets the container/core
+        // prelude so the reserved container symbols resolve inside it (bug M6);
+        // fixed symbols dedup against the root's copy
+        if *token {
+            me.inject_container_prelude(&mut p2.decls);
+        }
         // `s.chars()` bodies in an imported module emit before the root is
         // collected, so the `StrChars` class must land in the first module
         // that needs it (the shared emitter registers it exactly once)
-        me.inject_strchars_prelude(&mut prog.decls);
-        me.register_import(&mname, alias.as_deref(), &prog);
+        me.inject_strchars_prelude(&mut p2.decls);
+        me.register_import(mname, alias.as_deref(), &p2);
     }
     // hmm: root module runs under @sloth_main through emit_module
-    me.emit_module(&root);
+    me.emit_module(root);
+    me
+}
+
+fn resolve_multimod(
+    root_src: &str,
+    base_dir: &std::path::Path,
+) -> Result<(Program, Vec<(String, Program, Option<String>, bool)>), String> {
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    let mut done: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut stems: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let (mut root, mut mods) =
+        resolve_program(root_src, base_dir, &mut stack, &mut done, &mut stems)?;
+    // stable NodeIds for the type side table (assigned once, shared by both
+    // passes because the resolved Programs are reused)
+    sloth_frontend::ast::assign_ids(&mut root);
+    for (_, p, _, _) in mods.iter_mut() {
+        sloth_frontend::ast::assign_ids(p);
+    }
+    Ok((root, mods))
+}
+
+/// Pass 1 for a multi-module program: resolve imports, assemble, analyse,
+/// returning the type side table for Pass 2.
+pub fn analyze_multimod_table(
+    root_src: &str,
+    base_dir: &std::path::Path,
+) -> Result<crate::sem::TypeTable, String> {
+    let (root, mods) = resolve_multimod(root_src, base_dir)?;
+    let me = build_multimod(&root, &mods, "main", true);
+    if me.diags.is_empty() {
+        Ok(me.type_table)
+    } else {
+        Err(format_diags(&me))
+    }
+}
+
+/// Pass 1 for a multi-module program (diagnostics only).
+pub fn analyze_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<(), String> {
+    analyze_multimod_table(root_src, base_dir).map(|_| ())
+}
+
+pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
+    let (root, mods) = resolve_multimod(root_src, base_dir)?;
+    // Pass 1
+    let table = {
+        let me = build_multimod(&root, &mods, "main", true);
+        if !me.diags.is_empty() {
+            return Err(format_diags(&me));
+        }
+        me.type_table
+    };
+    // Pass 2
+    let mut me = build_multimod(&root, &mods, "main", false);
+    me.type_table = table;
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }
@@ -155,11 +242,23 @@ fn find_import(dir: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// FNV-1a over the canonical path: disambiguates modules that share a file
+/// stem but are distinct files (bug M8).
+fn path_hash(p: &std::path::Path) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in p.to_string_lossy().as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 fn resolve_program(
     src: &str,
     dir: &std::path::Path,
     stack: &mut Vec<std::path::PathBuf>,
     done: &mut HashSet<std::path::PathBuf>,
+    stems: &mut HashMap<String, std::path::PathBuf>,
 ) -> Result<(Program, Vec<(String, Program, Option<String>, bool)>), String> {
     let prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     let mut mods: Vec<(String, Program, Option<String>, bool)> = Vec::new();
@@ -197,6 +296,30 @@ fn resolve_program(
             ));
         }
         if done.contains(&pb2) {
+            // the module body is already registered once; still record a second
+            // alias so `import "x" as L2;` after `import "x" as L1;` resolves
+            // (bug M7) via an alias-only entry
+            if let Some(a) = &imp.alias {
+                let mname = stems
+                    .iter()
+                    .find(|(_, p)| **p == pb2)
+                    .map(|(k, _)| k.clone())
+                    .unwrap_or_else(|| {
+                        pb2.file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "mod".to_string())
+                    });
+                mods.push((
+                    mname,
+                    Program {
+                        imports: Vec::new(),
+                        decls: Vec::new(),
+                        stmts: Vec::new(),
+                    },
+                    Some(a.clone()),
+                    false,
+                ));
+            }
             continue;
         }
         let src2 = std::fs::read_to_string(&pb2).map_err(|e| format!("read {:?}: {}", pb2, e))?;
@@ -205,13 +328,22 @@ fn resolve_program(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         stack.push(pb2.clone());
-        let (_p2, mut m2) = resolve_program(&src2, &dir2, stack, done)?;
+        let (_p2, mut m2) = resolve_program(&src2, &dir2, stack, done, stems)?;
         stack.pop();
         done.insert(pb2.clone());
-        let stem = pb2
+        let mut stem = pb2
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "mod".to_string());
+        // distinct files that share a basename must not mangle to the same
+        // symbols (`sloth_lib__ginit`); disambiguate the second occurrence with
+        // a path hash (bug M8)
+        if let Some(prev) = stems.get(&stem) {
+            if prev != &pb2 {
+                stem = format!("{}_{:08x}", stem, path_hash(&pb2));
+            }
+        }
+        stems.insert(stem.clone(), pb2.clone());
         // capture the capability token before `prog2_of` drops the import list
         let token = _p2
             .imports

@@ -42,6 +42,12 @@ func announce(s: dyn Speaker): str { return s.say(); }
 | `Equatable` | `__eq__(other)`: bool | `==` / `!=` |
 | `Comparable` | `__lt__`/`__le__`/`__gt__`/`__ge__` | 比较族 |
 
+编译器**按名识别**这四组 trait 及其方法签名（例如 `print`/插值按 `to_str`、
+`Map` 键按 `__hash__`、`==` 按 `__eq__`），但它们**不是自动注入的声明**：需要
+由用户代码或标准库显式 `trait … { … }` 声明（本章示例均如此）。未声明时
+`class C impl Display { … }` 会报 `unknown trait Display in impl`。这与附录 A
+的偏差说明一致。
+
 `int`/`float`/`bool`/`str`/`range` 内置实现 `Hashable`/`Display`。用户类若不
 `impl Display`，对它 `print` 或插值会回退为类名输出（不报错）。
 

@@ -250,6 +250,12 @@ func __sloth_map_key_hash(kkind: int, key: int): int {
     if kkind == 1 {
         return __sloth_map_hash_s(key);
     }
+    if kkind == 3 {
+        // range key: content hash from the (exclusive) bounds
+        let lo: int = __sloth_range_lo(key);
+        let hi: int = __sloth_range_hi(key);
+        return __sloth_map_mix64(lo * 1000003 + hi);
+    }
     return __sloth_map_hash_i(key);
 }
 
@@ -267,6 +273,13 @@ func __sloth_map_bucket_i(kkind: int, key: int, h: int, cap: int): int {
 func __sloth_map_key_eq(kkind: int, ka: int, kb: int): bool {
     if kkind == 1 {
         return __sloth_str_eq(ka, kb) != 0;
+    }
+    if kkind == 3 {
+        // range key: equal when both bounds match (content, not handle)
+        if __sloth_range_lo(ka) != __sloth_range_lo(kb) {
+            return false;
+        }
+        return __sloth_range_hi(ka) == __sloth_range_hi(kb);
     }
     return ka == kb;
 }

@@ -1,0 +1,6 @@
+// seed helper for mod_qualified_generic.sl (not run directly)
+pub class Box<T> {
+    var v: T;
+    func __init__(x: T) { this.v = x; }
+    func get(): T { return this.v; }
+}

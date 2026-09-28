@@ -1,5 +1,16 @@
 //! Panic entry points: all abort the process with a diagnosis on stderr.
 
+/// Terminate without running `atexit`/destructors. Detached worker threads may
+/// still be executing JIT-emitted code, and a full `process::exit` teardown
+/// unmaps the JIT session under them → intermittent SIGSEGV (bug G6). `_exit`
+/// stops the process immediately; stderr is flushed first so the diagnosis is
+/// not lost.
+fn exit_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    unsafe { libc::_exit(code) }
+}
+
 #[no_mangle]
 pub extern "C" fn __sloth_panic(msg: *const libc::c_char) -> ! {
     let s = unsafe {
@@ -10,14 +21,14 @@ pub extern "C" fn __sloth_panic(msg: *const libc::c_char) -> ! {
         }
     };
     eprintln!("sloth panic: {}", s);
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// missing map key (never returns normally)
 #[no_mangle]
 pub extern "C" fn __sloth_panic_nokey(key: i64) -> i64 {
     eprintln!("sloth panic: map key not found ({})", key);
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// dyn receiver is not an implementing class (never returns)
@@ -27,27 +38,27 @@ pub extern "C" fn __sloth_panic_noimpl(cls_id: i64) -> i64 {
         "sloth panic: no impl for trait method on receiver (cls {})",
         cls_id
     );
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// unwrap() on an err Result: unrecoverable, exit with diagnosis
 #[no_mangle]
 pub extern "C" fn __sloth_panic_unwrap() -> i64 {
     eprintln!("sloth panic: unwrap() on err Result");
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// integer division/modulo by zero: unrecoverable (design §5.5)
 #[no_mangle]
 pub extern "C" fn __sloth_panic_divzero() -> i64 {
     eprintln!("sloth panic: integer division by zero");
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// runtime panic with a fixed message (patch #34: the single exit path)
 pub fn panic_msg(msg: &str) -> ! {
     eprintln!("sloth panic: {}", msg);
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// container out-of-bounds: kind names the container ("array"/"pop" ...),
@@ -57,7 +68,7 @@ pub fn panic_oob(kind: &str, i: i64, len: i64) -> ! {
         "sloth panic: {} index {} out of bounds (len {})",
         kind, i, len
     );
-    std::process::exit(1);
+    exit_now(1);
 }
 
 /// C-ABI out-of-bounds entry for the self-hosted container prelude (array

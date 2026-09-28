@@ -1,0 +1,6 @@
+// seed helper for mod_generic_chain_main.sl (not run directly)
+import "mod_generic_chain_gen.slt";
+pub func use(): int {
+    let b = Box<int>(5);
+    return b.get();
+}

@@ -1,7 +1,7 @@
 //! Pass 1: symbol collection, fn planning, impl checks, vtable slots.
 
 #[allow(unused_imports)]
-use super::*;
+use crate::irgen::*;
 #[allow(unused_imports)]
 use sloth_frontend::ast::*;
 #[allow(unused_imports)]
@@ -41,6 +41,15 @@ impl ModEmitter {
         for d in &prog.decls {
             match &d.node {
                 DeclNode::Func(f) => {
+                    // a bare trait name in a signature is a type-position error
+                    for p in &f.params {
+                        if let Some(t) = &p.ty {
+                            self.check_trait_type(t, &d.pos);
+                        }
+                    }
+                    if let Some(r) = &f.ret {
+                        self.check_trait_type(r, &d.pos);
+                    }
                     self.funcs.insert(d.name.clone(), (**f).clone());
                 }
                 DeclNode::Var { ty, .. } => {
@@ -53,6 +62,20 @@ impl ModEmitter {
                         .insert(d.name.clone(), (sym, t, d.kind == DeclKind::Var));
                 }
                 DeclNode::Class(c) => {
+                    // type-position trait check for fields + method signatures
+                    for fd in &c.fields {
+                        self.check_trait_type(&fd.ty, &d.pos);
+                    }
+                    for m in &c.methods {
+                        for p in &m.fd.params {
+                            if let Some(t) = &p.ty {
+                                self.check_trait_type(t, &d.pos);
+                            }
+                        }
+                        if let Some(r) = &m.fd.ret {
+                            self.check_trait_type(r, &d.pos);
+                        }
+                    }
                     self.class_ids.insert(d.name.clone(), class_id);
                     self.cls_display.insert(d.name.clone(), d.name.clone());
                     if !self.class_order.contains(&d.name) {
@@ -95,7 +118,24 @@ impl ModEmitter {
         // validate `impl` surfaces after all classes are collected;
         // subclass inheritance transitively carries the trait surface
         for d in &prog.decls {
-            if let DeclNode::Class(_c) = &d.node {
+            if let DeclNode::Class(c) = &d.node {
+                // unknown/trait superclass (all classes of this pass are
+                // registered by now, so a miss is a real error)
+                if let Some(sup) = &c.superclass {
+                    if !self.classes.contains_key(sup) {
+                        if self.traits.contains_key(sup) {
+                            self.err(
+                                &d.pos,
+                                format!(
+                                    "`{}` is a trait; a class cannot inherit from it (use `impl {}`)",
+                                    sup, sup
+                                ),
+                            );
+                        } else {
+                            self.err(&d.pos, format!("unknown superclass `{}`", sup));
+                        }
+                    }
+                }
                 let mut eff: Vec<String> = Vec::new();
                 let mut cur = Some(d.name.clone());
                 while let Some(pn) = cur {

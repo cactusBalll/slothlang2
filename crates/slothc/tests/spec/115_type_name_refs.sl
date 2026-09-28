@@ -20,7 +20,7 @@ func main(): unit {
     // dynamic surfaces report the concrete runtime class
     let d: dyn Animal = Dog();
     print(type_name(d));             // expect: Dog
-    let b: Animal = Dog();
+    let b: dyn Animal = Dog();
     print(type_name(b));             // expect: Dog
     // monomorphic reference types report their full surface
     print(type_name("x"));           // expect: str

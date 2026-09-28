@@ -9,10 +9,8 @@ mod jit;
 mod module;
 pub mod pass;
 pub mod pipeline;
-
-pub fn selftest() -> Result<(), String> {
-    pass::smoke_all()
-}
+/// Pass 1 — semantic analysis (inference + checking), separate from irgen.
+pub mod sem;
 
 /// parse any textual MLIR and print back (for IR probes)
 pub fn parse_print_raw(src: &str, name: &str) -> Result<String, String> {

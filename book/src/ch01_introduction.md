@@ -43,8 +43,10 @@ sloth-lang 2.0（下称 **sloth2**）是 sloth-lang 1.0 的静态强类型重写
 编译期模块、FFI 与 ARC 均已落地；张量、协程、多线程与 I/O 扩展（§25–§29）亦已
 可用。工程面有两处与设计文档的**结构性偏差**，属定案取舍：
 
-- **没有独立的名称解析/类型检查两遍阶段**：解析后由单一发射器在生成 MLIR 的
-  过程中完成符号收集、局部推断与约束检查。
+- **两 Pass 结构**：解析后先跑独立的语义分析 Pass（`sem/`，符号收集、局部
+  推断与约束检查，并独占全部诊断），再跑发射 Pass（`irgen`，诊断静默）生成
+  MLIR。Pass 1 产出 NodeId 类型侧表供 Pass 2 消费；两 Pass 仍共享推断引擎，
+  主动单态化尚未抽出。
 - **`sloth` 自定义 dialect 仅为最小语义层**：ARC 的 `retain`/`release` 以
   `sloth.rc_retain`/`sloth.rc_release` 发射，随后在同一次编译内**单点 lowering**
   为标准 dialect（`func.call @__sloth_rc_*`）。对外 IR（`slothc ir`、AOT、本书

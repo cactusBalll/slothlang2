@@ -1,0 +1,4 @@
+// seed helper for mod_samestem.sl (not run directly)
+pub func f(): int {
+    return 200;
+}

@@ -6,7 +6,7 @@ pub func add(a: int, b: int): int {
     return a + b;
 }
 pub var g: int = 99;
-class Counter {
+pub class Counter {
     var n: int;
     func __init__(a: int) {
         this.n = a;

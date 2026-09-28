@@ -7,14 +7,14 @@
 | crate | 职责 |
 | --- | --- |
 | `sloth-frontend` | 词法分析、递归下降 + Pratt 语法分析、AST、类型表示（`ty.rs`） |
-| `sloth-codegen` | 发射器（`irgen/`）把 AST 直接转成 MLIR；`pass.rs`/`jit.rs` 走 LLVM 管线并 JIT 执行；`module.rs`/`context.rs` 是 MLIR C API 封装 |
+| `sloth-codegen` | 语义分析 Pass（`sem.rs`）：符号解析、类型推断与检查，独占诊断；发射 Pass（`irgen/`）把 AST 转成 MLIR；`pass.rs`/`jit.rs` 走 LLVM 管线并 JIT 执行；`module.rs`/`context.rs` 是 MLIR C API 封装 |
 | `sloth-rt` | 运行时 `libsloth_rt.so`：裸分配、ARC/弱引用、字符串、对象/虚表、panic，以及 I/O/网络/张量/协程/线程的 C-ABI 入口与 extern 示例（Array/Map/range/值盒的实现改由自举 prelude 提供） |
 | `slothc` | 命令行前端（`check` / `ir` / `run` / `build`） |
 
 ## 2.2 实际流水线
 
 设计文档设想的 `[3] 名称解析 → [4] 类型检查 → [5] 单态化 → [6] MLIR` 四个
-独立阶段，在当前实现中被**融合进一次发射过程**：
+独立阶段，在当前实现中落为**两个显式 Pass**：
 
 ```text
 源代码 (.sl)
@@ -24,10 +24,16 @@ Token 流
    │  语法分析 Parser（递归下降 + Pratt）
    ▼
 AST（Program { imports, decls, stmts }）
-   │  ModEmitter：一趟融合
-   │   ├─ 收集符号 / 类 / trait / 模块依赖（collect.rs, module.rs）
-   │   ├─ 局部类型推断 + 词面（word-class）surface 兼容检查（tybind.rs）
+   │  Pass 1 — 语义分析 sem/（ModEmitter, check_mode = true）
+   │   ├─ 收集符号 / 类 / trait / 模块依赖（sem/collect.rs, module.rs）
+   │   ├─ 类型注册表 + 词面（word-class）推断/兼容检查（sem/types.rs）
    │   ├─ 泛型函数/类的单态化实例缓存（emit_gfunc_call）
+   │   ├─ NodeId 类型侧表（frame, node id) → TyId）
+   │   └─ 诊断的唯一产生者（`slothc check` 只跑此 Pass）
+   ▼
+   │  Pass 2 — 发射 irgen（ModEmitter, check_mode = false，诊断静默）
+   │   ├─ 消费 Pass 1 的类型侧表（`emit_expr` 以之为权威表达式类型）
+   │   ├─ ARC/coercion 发射（coerce.rs）
    │   └─ 拼接 MLIR 文本：ARC 发射 sloth.rc_retain/release，其余标准 dialect
    ▼
 含 sloth.* 的 MLIR

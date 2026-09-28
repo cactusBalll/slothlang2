@@ -32,10 +32,11 @@ fn dispatch(args: &Vec<String>) -> Result<String, String> {
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             match mode.as_str() {
                 "check" => {
+                    // Pass 1 only: no IR is produced for `slothc check`.
                     if imports {
-                        sloth_codegen::irgen::compile_multimod(&src, &base)?;
+                        sloth_codegen::sem::check_multimod(&src, &base)?;
                     } else {
-                        sloth_codegen::irgen::compile_to_ir(&src, "main")?;
+                        sloth_codegen::sem::check_src(&src, "main")?;
                     }
                     Ok("check ok".to_string())
                 }

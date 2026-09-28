@@ -42,6 +42,9 @@ impl ModEmitter {
                 ty,
                 init,
             } => {
+                if let Some(te) = ty {
+                    self.check_trait_type(te, &s.pos);
+                }
                 // typed(s) ok()/err() ctor fast-path: Result init (annotation
                 // provides the T/E binding; absent annotation diagnosed)
                 let pre: Option<(String, TyId)> = match &init.node {
@@ -98,17 +101,54 @@ impl ModEmitter {
                 let (v, t) = if let Some(te) = ty {
                     let dt0 = self.ty_of(te);
                     if let Ty::Dyn(tn) = self.r.get(dt0).clone() {
-                        if self.value_kind(t).is_some() {
-                            if self.value_impls_trait(&tn) {
-                                let b = self.emit_dyn_box(fw, &v, t, &tn);
-                                (b, dt0)
-                            } else {
-                                let got = self.surface_name(self.r.get(t));
-                                self.err_diff(&s.pos, "initializer", &format!("dyn {}", tn), &got);
-                                (v, t)
+                        match self.r.get(t).clone() {
+                            // already dyn / nil literal pass through
+                            Ty::Dyn(_) | Ty::Unit => (v, dt0),
+                            // a concrete class must actually `impl` the trait
+                            // (design §19.4): nominal, not structural
+                            Ty::Named(c, _) => {
+                                if self.impl_chain_has(&c, &tn) {
+                                    (v, dt0)
+                                } else {
+                                    let got = self.surface_name(self.r.get(t));
+                                    self.err_diff(
+                                        &s.pos,
+                                        "initializer",
+                                        &format!("dyn {}", tn),
+                                        &got,
+                                    );
+                                    (v, t)
+                                }
                             }
-                        } else {
-                            (v, t)
+                            _ => {
+                                if self.value_kind(t).is_some() {
+                                    if self.value_impls_trait(&tn) {
+                                        let b = self.emit_dyn_box(fw, &v, t, &tn);
+                                        (b, dt0)
+                                    } else {
+                                        let got = self.surface_name(self.r.get(t));
+                                        self.err_diff(
+                                            &s.pos,
+                                            "initializer",
+                                            &format!("dyn {}", tn),
+                                            &got,
+                                        );
+                                        (v, t)
+                                    }
+                                } else {
+                                    // no dyn box for str/Array/Map/tensor/fn/...
+                                    // — reject instead of handing the dyn call
+                                    // site a raw handle with no vtable (D1)
+                                    let got = self.surface_name(self.r.get(t));
+                                    self.err_diff(
+                                        &s.pos,
+                                        "initializer",
+                                        &format!("dyn {}", tn),
+                                        &got,
+                                    );
+                                    (v, t)
+                                }
+                            }
                         }
                     } else {
                         (v, t)
@@ -304,6 +344,7 @@ impl ModEmitter {
                                 let (rv, _t) = self.emit_expr(
                                     fw,
                                     &Expr {
+                                        id: 0,
                                         pos: s.pos.clone(),
                                         node: ExprNode::This,
                                     },
@@ -329,6 +370,31 @@ impl ModEmitter {
                             }
                             None => {
                                 self.err(&s.pos, "super.x assignment outside method".to_string())
+                            }
+                        }
+                    }
+                }
+                // qualified foreign-global write `Mod.g = v`: resolve through
+                // `fglobals` and store into the foreign cell (bug M3). The head
+                // must not be a local (that would be an object-field write).
+                if target.len() == 2 {
+                    if let (PathSeg::Name(m), PathSeg::Name(g)) = (&target[0], &target[1]) {
+                        if fw.lookup(&m.clone()).is_none() {
+                            let key = format!("{}.{}", m, g);
+                            if let Some((gsym, gt, gmut)) = self.fglobals.get(&key).cloned() {
+                                self.guard_hidden(m, g, &s.pos);
+                                if !gmut {
+                                    self.err(
+                                        &s.pos,
+                                        format!(
+                                            "cannot assign to immutable `{}` (declared with `let`)",
+                                            g
+                                        ),
+                                    );
+                                }
+                                self.check_global_assign(fw, g, &gsym, gt, &v, vty, &s.pos);
+                                fw.rc_flush();
+                                return;
                             }
                         }
                     }
@@ -383,6 +449,21 @@ impl ModEmitter {
                                 self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
+                            } else if let Ty::Opt(inner) = self.r.get(rty).clone() {
+                                // `c.n = v` through an optional receiver must not
+                                // silently vanish; mirror the read-path diagnostic
+                                // (design §3.6 / book ch15 §15.2)
+                                if matches!(self.r.get(inner), Ty::Named(_, _)) {
+                                    self.err(
+                                        &s.pos,
+                                        format!(
+                                            "field `{}` on an optional receiver; narrow it with `is not nil` first (design §3.6)",
+                                            f
+                                        ),
+                                    );
+                                    fw.rc_flush();
+                                    return;
+                                }
                             }
                         }
                     }
@@ -569,18 +650,21 @@ impl ModEmitter {
                                     if self.is_int_like(el) && self.is_int_like(vty) {
                                         v = self.coerce_int_word(fw, &v, el);
                                     }
-                                    // rc patch B: release the old elem
-                                    // (scalar/nil words no-op in rt),
-                                    // retain the new one if ref-typed
+                                    // rc patch B: retain the incoming element
+                                    // FIRST, then release the evicted old one.
+                                    // Order matters for self-assignment
+                                    // `a[i] = a[i]`: releasing before retaining
+                                    // frees the value when the array is the sole
+                                    // owner → UAF/double free (bug A3).
                                     if self.is_ref(el) {
+                                        let rv2 = self.emit_retain(fw, &v);
+                                        v = rv2;
                                         let old = fw.v();
                                         fw.op(&format!(
                                                     "    {} = func.call @__sloth_arr_get({}, {}) : (i64, i64) -> i64",
                                                     old, av, iv
                                                 ));
                                         self.emit_release(fw, &old);
-                                        let rv2 = self.emit_retain(fw, &v);
-                                        v = rv2;
                                     }
                                     fw.op(&format!(
                                                 "    func.call @__sloth_arr_set({}, {}, {}) : (i64, i64, i64) -> i64",
@@ -588,6 +672,21 @@ impl ModEmitter {
                                             ));
                                 }
                                 Ty::Map(k, v2) => {
+                                    // index expression must match the map key
+                                    // surface (book ch13 §13.1): a mismatched
+                                    // key family would be stored by raw word
+                                    {
+                                        let kt = self.r.get(k).clone();
+                                        let its = self.r.get(_it).clone();
+                                        if !matches!(its, Ty::Unit)
+                                            && !matches!(kt, Ty::Unit)
+                                            && !self.surface_compat(&kt, &its)
+                                        {
+                                            let kn = self.surface_name(&kt);
+                                            let vn = self.surface_name(&its);
+                                            self.err_diff(&s.pos, "map key assignment", &kn, &vn);
+                                        }
+                                    }
                                     let kkind = matches!(self.r.get(k), Ty::Str);
                                     let vf = self.is_float(v2);
                                     // object keys: monomorphized hash()
@@ -649,7 +748,7 @@ impl ModEmitter {
                                     // Overwrite-time release of evicted
                                     // old pairs lands in patch C.
                                     let kty = self.r.get(k).clone();
-                                    let kref = matches!(kty, Ty::Str | Ty::Named(_, _));
+                                    let kref = matches!(kty, Ty::Str | Ty::Named(_, _) | Ty::Range);
                                     if kref {
                                         self.emit_retain(fw, &iv);
                                     }
@@ -810,6 +909,7 @@ impl ModEmitter {
                             let (w, ty) = self.emit_expr(fw, ix);
                             let nm = self.spill_temp(fw, &w, ty);
                             t2.push(PathSeg::Index(Expr {
+                                id: 0,
                                 pos: ix.pos.clone(),
                                 node: ExprNode::Ident(nm),
                             }));
@@ -817,6 +917,7 @@ impl ModEmitter {
                     }
                 }
                 let rhs = Expr {
+                    id: 0,
                     pos: s.pos.clone(),
                     node: ExprNode::Arith {
                         op: *op,
@@ -825,6 +926,7 @@ impl ModEmitter {
                     },
                 };
                 let desugared = Stmt {
+                    id: 0,
                     pos: s.pos.clone(),
                     node: StmtNode::Assign {
                         target: t2,
@@ -996,6 +1098,18 @@ impl ModEmitter {
                                     .to_string(),
                             );
                             return None;
+                        }
+                        // tensor keep-rank slice in a non-final assignment
+                        // position (`d[0..2][1] = row`): mirror the read path so
+                        // the slice bounds become a view, not an index (bug G8)
+                        if matches!(ix.node, ExprNode::Range { .. }) {
+                            if let Ty::Tensor(el, rank) = self.r.get(pt).clone() {
+                                if rank > 1 {
+                                    return Some(
+                                        self.emit_tensor_index(fw, &pw, el, rank, ix, pos),
+                                    );
+                                }
+                            }
                         }
                         let (iv, _) = self.emit_expr(fw, ix);
                         match self.r.get(pt).clone() {
@@ -1187,8 +1301,11 @@ impl ModEmitter {
         // carries the +1 (transfer it); a borrowed slot/field/param does not,
         // so materialize a retained +1 here. Non-ref returns just drop
         // producers. This must run before the store so the slot holds the
-        // owned word.
-        if !fl && self.is_ref(fw.ret) {
+        // owned word. A unit function discards the value entirely (book §9.1 /
+        // appendix A.3): its producer is settled by `rc_flush` below.
+        if self.is_unit(fw.ret) {
+            // no result slot: leave `v` to the dangling/xfer flush
+        } else if !fl && self.is_ref(fw.ret) {
             if !fw.rc_take_xfer(&v) && !fw.rc_consume(&v) {
                 v = self.emit_retain(fw, &v);
             }
@@ -1205,10 +1322,14 @@ impl ModEmitter {
         }
         let zi = fw.v();
         fw.op(&format!("    {} = arith.constant 0 : index", zi));
-        fw.op(&format!(
-            "    memref.store {}, {}[{}] : memref<1xi64>",
-            v, fw.ret_alloca, zi
-        ));
+        // `unit` functions have no return slot (func.rs allocates it only for
+        // non-unit returns); storing there would emit a missing-operand store
+        if !self.is_unit(fw.ret) {
+            fw.op(&format!(
+                "    memref.store {}, {}[{}] : memref<1xi64>",
+                v, fw.ret_alloca, zi
+            ));
+        }
         let st = fw.v();
         fw.op(&format!("    {} = arith.constant 1 : i64", st));
         fw.op(&format!(
@@ -1535,8 +1656,16 @@ impl ModEmitter {
                 high,
                 inclusive,
             } => {
-                let (lo, _lt) = self.emit_expr(fw, low);
-                let (hi0, _ht) = self.emit_expr(fw, high);
+                let (lo, lt) = self.emit_expr(fw, low);
+                let (hi0, ht) = self.emit_expr(fw, high);
+                // range elements are `int` (book §5.1/§8.2); a float bound
+                // would be packed as a raw word and hang the loop (bug B10)
+                for (t, side) in [(lt, "start"), (ht, "end")] {
+                    if !self.is_int_like(t) && !matches!(self.r.get(t), Ty::Unit) {
+                        let got = sloth_frontend::ty::ty_name(self.r.get(t)).to_string();
+                        self.err(pos, format!("range {} must be `int`, got `{}`", side, got));
+                    }
+                }
                 let hi = if !*inclusive {
                     hi0.clone()
                 } else {
@@ -1735,7 +1864,7 @@ impl ModEmitter {
     ) {
         let is_str = self.is_str(k);
         let vf = self.is_float(v2);
-        let et = self.declare_class_inst("Entry", &[k, v2]);
+        let et = self.declare_class_inst("Entry", &[k, v2], pos);
         let ename = match self.r.get(et) {
             Ty::Named(n, _) => n.clone(),
             _ => "Entry".to_string(),

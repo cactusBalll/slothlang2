@@ -8,3 +8,4 @@ examples/res/*.bin
 slothlang2-syntax/node_modules/
 **/sloth_app
 /.vscode/
+/test_workspace/

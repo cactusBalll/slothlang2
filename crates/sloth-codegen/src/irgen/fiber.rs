@@ -55,8 +55,21 @@ impl ModEmitter {
         sarg: Option<&Expr>,
         pos: &Pos,
     ) -> (String, TyId) {
+        // if the entry is a lambda literal, pre-compute its payload type so the
+        // body's `yield` can be type-checked (bug G2/G3)
+        let lam_y = match &farg.node {
+            ExprNode::Lambda(l) => l
+                .params
+                .first()
+                .and_then(|p| p.ty.as_ref().map(|t| self.ty_of(t))),
+            _ => None,
+        };
+        if let Some(y) = lam_y {
+            self.pending_fiber_payload = Some(y);
+        }
         let (fv, ft) = self.emit_expr(fw, farg);
-        let (iv, _it) = self.emit_expr(fw, iarg);
+        self.pending_fiber_payload = None;
+        let (iv, it) = self.emit_expr(fw, iarg);
         let y = match self.fiber_entry_payload(ft) {
             Some(y) => y,
             None => {
@@ -67,6 +80,21 @@ impl ModEmitter {
                 )
             }
         };
+        // init must match the entry payload `Y` (book ch27 §27.1); a mismatch
+        // otherwise retains an int as a reference at fiber_setup (bug G4)
+        if !matches!(self.r.get(it), Ty::Unit)
+            && !self.surface_compat(self.r.get(it), self.r.get(y))
+        {
+            return self.fiber_bail(
+                fw,
+                pos,
+                format!(
+                    "fiber payload mismatch: expected {}, got {}",
+                    self.surface_name(self.r.get(y)),
+                    self.surface_name(self.r.get(it))
+                ),
+            );
+        }
         let sym = if sarg.is_some() {
             "__sloth_fiber_create_with"
         } else {
@@ -168,9 +196,26 @@ impl ModEmitter {
         &mut self,
         fw: &mut FnWalk,
         varg: &Expr,
-        _pos: &Pos,
+        pos: &Pos,
     ) -> (String, TyId) {
         let (vv, vt) = self.emit_expr(fw, varg);
+        // the yielded value must match the entry payload `Y` (book ch27 §27.1);
+        // a mismatch otherwise retains an int as a reference (bug G2/G3)
+        if let Some(y) = fw.fiber_payload {
+            if !matches!(self.r.get(vt), Ty::Unit)
+                && !self.surface_compat(self.r.get(vt), self.r.get(y))
+            {
+                self.err(
+                    pos,
+                    format!(
+                        "fiber payload mismatch: expected {}, got {}",
+                        self.surface_name(self.r.get(y)),
+                        self.surface_name(self.r.get(vt))
+                    ),
+                );
+            }
+        }
+        let ret_t = fw.fiber_payload.unwrap_or(vt);
         let r = fw.v();
         fw.op(&format!(
             "    {} = func.call @__sloth_fiber_yield({}) : (i64) -> i64",
@@ -201,10 +246,10 @@ impl ModEmitter {
         fw.label(&lbl_cont);
         fw.dangling = saved_dangling;
         fw.xfer = saved_xfer;
-        if self.is_ref(vt) {
+        if self.is_ref(ret_t) {
             fw.rc_mark_xfer(&r);
         }
-        (r, vt)
+        (r, ret_t)
     }
 
     pub(crate) fn emit_fiber_error(&mut self, fw: &mut FnWalk, marg: &Expr) -> (String, TyId) {

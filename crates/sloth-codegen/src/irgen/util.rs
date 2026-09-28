@@ -177,6 +177,7 @@ pub(crate) fn path_to_expr(target: &[PathSeg], pos: &Pos) -> Expr {
         acc = Some(match seg {
             PathSeg::Name(n) => match &acc {
                 None => Expr {
+                    id: 0,
                     pos: pos.clone(),
                     node: match n.as_str() {
                         "this" => ExprNode::This,
@@ -185,6 +186,7 @@ pub(crate) fn path_to_expr(target: &[PathSeg], pos: &Pos) -> Expr {
                     },
                 },
                 Some(base) => Expr {
+                    id: 0,
                     pos: pos.clone(),
                     node: ExprNode::Field {
                         obj: Box::new(base.clone()),
@@ -193,9 +195,11 @@ pub(crate) fn path_to_expr(target: &[PathSeg], pos: &Pos) -> Expr {
                 },
             },
             PathSeg::Index(ix) => Expr {
+                id: 0,
                 pos: pos.clone(),
                 node: ExprNode::Index {
                     obj: Box::new(acc.take().unwrap_or(Expr {
+                        id: 0,
                         pos: pos.clone(),
                         node: ExprNode::Nil,
                     })),
@@ -205,6 +209,7 @@ pub(crate) fn path_to_expr(target: &[PathSeg], pos: &Pos) -> Expr {
         });
     }
     acc.unwrap_or(Expr {
+        id: 0,
         pos: pos.clone(),
         node: ExprNode::Nil,
     })

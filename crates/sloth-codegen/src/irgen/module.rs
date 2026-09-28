@@ -81,6 +81,11 @@ impl ModEmitter {
                         self.funcs
                             .entry("print".to_string())
                             .or_insert((**f).clone());
+                    } else if self.fixed_syms.contains(&d.name) {
+                        // injected reserved/fixed symbols (container/core
+                        // prelude) must resolve by bare name inside this module
+                        // as well, so intra-prelude calls keep the raw symbol
+                        self.funcs.entry(d.name.clone()).or_insert((**f).clone());
                     }
                     let plan = self.plan_func(&d.name, None, f, None);
                     if d.visible {
@@ -122,6 +127,12 @@ impl ModEmitter {
                     }
                 }
                 DeclNode::Class(c) => {
+                    // preserve class-level visibility (bug M4). Class members
+                    // default to public in the implementation (the stdlib relies
+                    // on cross-module member access); see appendix A.
+                    if !d.visible {
+                        self.hidden_classes.insert(d.name.clone());
+                    }
                     let cid: i64 = 100 + self.foreign_cls.len() as i64;
                     self.foreign_cls.insert(d.name.clone());
                     if !d.visible {
@@ -198,7 +209,13 @@ impl ModEmitter {
                     }
                     self.emit_func(&d.name, None, f, None, false);
                 }
-                DeclNode::Class(_) => {
+                DeclNode::Class(c) => {
+                    // generic-class templates emit no body here; their
+                    // monomorphized instances are emitted once by the root pass
+                    // under the defining module's name (bug M1)
+                    if !c.type_params.is_empty() {
+                        continue;
+                    }
                     let meths = match self.classes.get(&d.name) {
                         Some(ci) => ci.methods.clone(),
                         None => Vec::new(),
@@ -248,6 +265,53 @@ impl ModEmitter {
         self.init_mods.push(mname.to_string());
         self.cur_mod = self.name.clone();
         self.finalize_vt();
+    }
+
+    /// register an additional import alias for a module that was already
+    /// registered under `mname` (bug M7): the module body is emitted once, but
+    /// qualified lookups under the new alias must resolve. Every table is keyed
+    /// `"<qualifier>.<name>"`, and `register_import` always registers the
+    /// module's own name as a qualifier, so copy the `mname.` prefix.
+    pub(crate) fn register_module_alias(&mut self, mname: &str, alias: &str) {
+        self.mod_alias.insert(alias.to_string(), mname.to_string());
+        let pre = format!("{}.", mname);
+        let ap = format!("{}.", alias);
+        let cf: Vec<(String, (String, TyId))> = self
+            .cross_funcs
+            .iter()
+            .filter(|(k, _)| k.starts_with(&pre))
+            .map(|(k, v)| (format!("{}{}", ap, &k[pre.len()..]), v.clone()))
+            .collect();
+        for (k, v) in cf {
+            self.cross_funcs.insert(k, v);
+        }
+        let ff: Vec<(String, (String, FuncDef))> = self
+            .foreign_func_defs
+            .iter()
+            .filter(|(k, _)| k.starts_with(&pre))
+            .map(|(k, v)| (format!("{}{}", ap, &k[pre.len()..]), v.clone()))
+            .collect();
+        for (k, v) in ff {
+            self.foreign_func_defs.insert(k, v);
+        }
+        let fg: Vec<(String, (String, TyId, bool))> = self
+            .fglobals
+            .iter()
+            .filter(|(k, _)| k.starts_with(&pre))
+            .map(|(k, v)| (format!("{}{}", ap, &k[pre.len()..]), v.clone()))
+            .collect();
+        for (k, v) in fg {
+            self.fglobals.insert(k, v);
+        }
+        let hs: Vec<String> = self
+            .hidden
+            .iter()
+            .filter(|k| k.starts_with(&pre))
+            .map(|k| format!("{}{}", ap, &k[pre.len()..]))
+            .collect();
+        for k in hs {
+            self.hidden.insert(k);
+        }
     }
 }
 
@@ -364,6 +428,9 @@ impl ModEmitter {
                     self.fixed_syms.insert((*s).to_string());
                 }
                 for s in CONTAINER_DISPOSERS {
+                    // death-hook routines are taken by address (`fn_addr`), so
+                    // they must keep their raw symbol too
+                    self.fixed_syms.insert((*s).to_string());
                     self.addressable.insert((*s).to_string());
                 }
                 for d in stdp.decls.into_iter().rev() {
@@ -669,6 +736,8 @@ impl ModEmitter {
         //    module's global cells. Emitted for every module so @sloth_main
         //    can invoke it unconditionally before running the user body.
         {
+            let gframe = format!("{}__ginit", self.name);
+            let saved_frame = std::mem::replace(&mut self.cur_frame, gframe);
             let mut fw = fresh_walk(self);
             for d in &prog.decls {
                 if let DeclNode::Var { ty, init } = &d.node {
@@ -697,6 +766,7 @@ impl ModEmitter {
                 "  func.func @sloth_{}__ginit() -> () {{\n    func.call @sloth_{}__anyinit() : () -> ()\n{}    return\n  }}\n",
                 self.name, self.name, body
             ));
+            self.cur_frame = saved_frame;
         }
         // 1) top-level funcs. Generic functions emit no template body — only
         // their monomorphic instances are real; emitting a template would type
@@ -736,9 +806,19 @@ impl ModEmitter {
                     None => Vec::new(),
                 };
                 self.tp_subst.push(frame);
+                // emit the instance's methods under its *defining* module: the
+                // ctor/method call sites mangle with `cls_mod[inst]`, so the
+                // definition must match (bug M1)
+                let saved_mod = self.cur_mod.clone();
+                self.cur_mod = self
+                    .cls_mod
+                    .get(&inst)
+                    .cloned()
+                    .unwrap_or_else(|| self.name.clone());
                 for (mname, fd) in meths {
                     self.emit_func(&mname, Some(&inst), &fd, None, false);
                 }
+                self.cur_mod = saved_mod;
                 self.tp_subst.pop();
             }
         }
@@ -748,6 +828,8 @@ impl ModEmitter {
             .iter()
             .any(|d| d.name == "main" && matches!(d.node, DeclNode::Func(_)));
         if !has_main {
+            let sframe = format!("{}__script", self.name);
+            let saved_frame = std::mem::replace(&mut self.cur_frame, sframe);
             let mut fw = FnWalk {
                 cur: String::new(),
                 vcount: 1000,
@@ -760,6 +842,10 @@ impl ModEmitter {
                 loopvars: Vec::new(),
                 loop_owned_elems: Vec::new(),
                 xfer: Vec::new(),
+                lambda_env: None,
+                fiber_payload: None,
+                params: std::collections::HashSet::new(),
+                param_owned: std::collections::HashSet::new(),
                 ret: self.r.mk(Ty::Unit),
                 ret_alloca: String::new(),
                 ret_flag: String::new(),
@@ -789,6 +875,7 @@ impl ModEmitter {
             for d in &prog.decls {
                 if let DeclNode::Var { ty, init } = &d.node {
                     let st = Stmt {
+                        id: 0,
                         pos: d.pos.clone(),
                         node: StmtNode::Let {
                             mutable: d.kind == DeclKind::Var,
@@ -805,6 +892,7 @@ impl ModEmitter {
             }
             fw.pop_scope();
             self.finish_entry(&mut fw);
+            self.cur_frame = saved_frame;
         }
         let diag = self.diags.clone();
         diag
@@ -931,6 +1019,33 @@ impl ModEmitter {
             self.err(
                 pos,
                 format!("`{}` is private to its module (not `pub`)", key),
+            );
+        }
+    }
+
+    /// is `cls` defined in another module than the one currently emitted?
+    pub(crate) fn foreign_cls(&self, cls: &str) -> bool {
+        self.cls_mod
+            .get(cls)
+            .map(|m| m != &self.cur_mod)
+            .unwrap_or(false)
+    }
+
+    /// a class registered as non-`pub` by an import (bug M4); instance names
+    /// (`Box_int`) match their generic base (`Box`) by the mangle separator
+    pub(crate) fn class_is_hidden(&self, cls: &str) -> bool {
+        self.hidden_classes.contains(cls)
+            || self
+                .hidden_classes
+                .iter()
+                .any(|h| cls.starts_with(h.as_str()) && cls[h.len()..].starts_with('_'))
+    }
+
+    pub(crate) fn guard_class(&mut self, cls: &str, pos: &Pos) {
+        if self.foreign_cls(cls) && self.class_is_hidden(cls) {
+            self.err(
+                pos,
+                format!("class `{}` is private to its module (not `pub`)", cls),
             );
         }
     }

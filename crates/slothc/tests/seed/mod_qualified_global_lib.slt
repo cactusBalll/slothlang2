@@ -1,0 +1,2 @@
+// seed helper for mod_qualified_global.sl (not run directly)
+pub var counter = 3;

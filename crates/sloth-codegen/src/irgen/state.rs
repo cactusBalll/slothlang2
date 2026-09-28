@@ -137,6 +137,24 @@ pub struct ModEmitter {
     /// top-level functions whose address is taken (`fn_addr`): emitted as
     /// `llvm.func` so `llvm.mlir.addressof` is legal
     pub(crate) addressable: HashSet<String>,
+    /// Pass selector. `true` = semantic analysis pass (`sem`): infer + check
+    /// and collect diagnostics. `false` = code-emission pass (`irgen`):
+    /// diagnostics are suppressed because Pass 1 owns them.
+    pub(crate) check_mode: bool,
+    /// current function/instance frame key (mangled symbol or module marker):
+    /// scopes the type side table so a generic body's nodes keep one entry per
+    /// monomorphic instance
+    pub(crate) cur_frame: String,
+    /// Pass 1 (sem) type side table: `(frame, node id) -> TyId`. Pass 2 reads
+    /// it as the authoritative expression type; a miss falls back to the
+    /// emitter's own inference.
+    pub(crate) type_table: HashMap<(String, u32), TyId>,
+    /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
+    /// `emit_func_env` so `fiber.yield` in the body can be type-checked
+    pub(crate) pending_fiber_payload: Option<TyId>,
+    /// imported non-`pub` class names (bug M4): unqualified construction from
+    /// another module must be rejected
+    pub(crate) hidden_classes: HashSet<String>,
 }
 
 /// one compiler-emitted `any` type descriptor record
@@ -256,12 +274,23 @@ impl ModEmitter {
             predeclared,
             fixed_syms: HashSet::new(),
             addressable: HashSet::new(),
+            check_mode: true,
+            cur_frame: String::new(),
+            type_table: HashMap::new(),
+            pending_fiber_payload: None,
+            hidden_classes: HashSet::new(),
         }
     }
 }
 
 impl ModEmitter {
     pub(crate) fn err(&mut self, pos: &Pos, msg: String) {
+        // Pass 2 (emission) must not re-report: Pass 1 already validated the
+        // program. Keeping the code path but dropping the diagnostic makes the
+        // check/emit boundary explicit without a second code path.
+        if !self.check_mode {
+            return;
+        }
         self.diags.push(Diag {
             line: pos.line,
             col: pos.col,

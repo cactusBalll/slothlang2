@@ -142,10 +142,10 @@ impl Parser {
     /// heuristic: these keyword starts begin toplevel declarations
     fn looks_like_decl(&self) -> bool {
         if self.is_kw("pub") {
-            // pub var/let/func/class/trait
+            // pub var/let/func/class/trait/extern (appendix C: `'pub'? (…|extern_decl)`)
             return matches!(
                 self.peek_at(1),
-                Some(Tok::Ident(s)) if s == "var" || s == "let" || s == "func" || s == "class" || s == "trait"
+                Some(Tok::Ident(s)) if s == "var" || s == "let" || s == "func" || s == "class" || s == "trait" || s == "extern"
             );
         }
         matches!(
@@ -488,8 +488,10 @@ impl Parser {
                 variadic,
                 ret,
                 body: Box::new(Stmt {
+                    id: 0,
                     pos: pos.clone(),
                     node: StmtNode::Expr(Expr {
+                        id: 0,
                         pos: pos.clone(),
                         node: ExprNode::Int(0),
                     }),
@@ -525,7 +527,7 @@ impl Parser {
             if self.peek().is_none() {
                 return Err(self.err("unexpected EOF in class body"));
             }
-            let _ = self.eat_kw("pub");
+            let item_visible = self.eat_kw("pub");
             if self.is_kw("var") || self.is_kw("let") {
                 let mutable = self.is_kw("var");
                 self.ptr += 1;
@@ -540,6 +542,7 @@ impl Parser {
                 self.expect(Tok::Semi, "';' after field")?;
                 fields.push(FieldDecl {
                     mutable,
+                    visible: item_visible,
                     name: fname,
                     ty: fty,
                     init: finit,
@@ -547,7 +550,11 @@ impl Parser {
             } else if self.is_kw("func") {
                 self.ptr += 1;
                 let (mname, _, f) = self.func_after_kw()?;
-                methods.push(MethodDef { name: mname, fd: f });
+                methods.push(MethodDef {
+                    name: mname,
+                    visible: item_visible,
+                    fd: f,
+                });
             } else {
                 return Err(self.err("expected field or method in class body"));
             }
@@ -598,6 +605,7 @@ impl Parser {
                 self.ptr += 1;
                 let bpos = self.pos();
                 Some(Box::new(Stmt {
+                    id: 0,
                     node: StmtNode::Block(out),
                     pos: bpos,
                 }))
@@ -636,6 +644,7 @@ impl Parser {
         }
         self.ptr += 1;
         Ok(Stmt {
+            id: 0,
             node: StmtNode::Block(out),
             pos,
         })
@@ -656,6 +665,7 @@ impl Parser {
             let init = self.expr(0)?;
             self.expect(Tok::Semi, "';'")?;
             return Ok(Stmt {
+                id: 0,
                 node: StmtNode::Let {
                     mutable,
                     name,
@@ -681,6 +691,7 @@ impl Parser {
                     self.expect(Tok::Semi, "';'")?;
                 }
                 Ok(Stmt {
+                    id: 0,
                     node: StmtNode::Return(e),
                     pos,
                 })
@@ -689,6 +700,7 @@ impl Parser {
                 self.ptr += 1;
                 self.expect(Tok::Semi, "';'")?;
                 Ok(Stmt {
+                    id: 0,
                     node: StmtNode::Break,
                     pos,
                 })
@@ -697,6 +709,7 @@ impl Parser {
                 self.ptr += 1;
                 self.expect(Tok::Semi, "';'")?;
                 Ok(Stmt {
+                    id: 0,
                     node: StmtNode::Continue,
                     pos,
                 })
@@ -716,6 +729,7 @@ impl Parser {
                     let target =
                         expr_to_path(&e).ok_or_else(|| self.err("invalid assignment target"))?;
                     Ok(Stmt {
+                        id: 0,
                         node: StmtNode::AssignOp { target, op, value },
                         pos,
                     })
@@ -725,12 +739,14 @@ impl Parser {
                     let target =
                         expr_to_path(&e).ok_or_else(|| self.err("invalid assignment target"))?;
                     Ok(Stmt {
+                        id: 0,
                         node: StmtNode::Assign { target, value },
                         pos,
                     })
                 } else {
                     self.expect(Tok::Semi, "';'")?;
                     Ok(Stmt {
+                        id: 0,
                         node: StmtNode::Expr(e),
                         pos,
                     })
@@ -752,6 +768,7 @@ impl Parser {
                 None
             };
             return Ok(Stmt {
+                id: 0,
                 node: StmtNode::If { cond, then_, else_ },
                 pos,
             });
@@ -764,6 +781,7 @@ impl Parser {
             None
         };
         Ok(Stmt {
+            id: 0,
             node: StmtNode::If { cond, then_, else_ },
             pos,
         })
@@ -778,6 +796,7 @@ impl Parser {
             self.expect(Tok::RParen, "')'")?;
             let body = Box::new(self.stmt()?);
             return Ok(Stmt {
+                id: 0,
                 node: StmtNode::While { cond, body },
                 pos,
             });
@@ -785,6 +804,7 @@ impl Parser {
         let cond = self.expr(0)?;
         let body = Box::new(self.stmt()?);
         Ok(Stmt {
+            id: 0,
             node: StmtNode::While { cond, body },
             pos,
         })
@@ -802,6 +822,7 @@ impl Parser {
             self.expect(Tok::RParen, "')'")?;
             let body = Box::new(self.stmt()?);
             return Ok(Stmt {
+                id: 0,
                 node: StmtNode::For { var, iter, body },
                 pos,
             });
@@ -812,6 +833,7 @@ impl Parser {
         let iter = self.expr(0)?;
         let body = Box::new(self.stmt()?);
         Ok(Stmt {
+            id: 0,
             node: StmtNode::For { var, iter, body },
             pos,
         })
@@ -834,6 +856,7 @@ impl Parser {
                         self.ptr += if is_not { 2 } else { 1 };
                         let rhs = self.expr(P_CMP + 1)?;
                         lhs = Expr {
+                            id: 0,
                             pos,
                             node: ExprNode::Is {
                                 negated: is_not,
@@ -890,6 +913,7 @@ impl Parser {
                 self.ptr += ntok;
                 let rhs = self.expr(bp + 1)?;
                 lhs = Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Arith {
                         op,
@@ -914,6 +938,7 @@ impl Parser {
                 self.ptr += 1;
                 let rhs = self.expr(bp + 1)?;
                 lhs = Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Arith {
                         op,
@@ -936,6 +961,7 @@ impl Parser {
                 self.ptr += 1;
                 let high = self.expr(P_RANGE + 1)?;
                 lhs = Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Range {
                         low: Box::new(lhs),
@@ -962,6 +988,7 @@ impl Parser {
             self.ptr += 1;
             let rhs = self.expr(bp + 1)?;
             lhs = Expr {
+                id: 0,
                 pos,
                 node: ExprNode::Bin {
                     op,
@@ -989,6 +1016,7 @@ impl Parser {
             };
             lhs = if is_elvis {
                 Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Elvis {
                         lhs: Box::new(lhs),
@@ -997,6 +1025,7 @@ impl Parser {
                 }
             } else {
                 Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Pipe {
                         lhs: Box::new(lhs),
@@ -1014,6 +1043,7 @@ impl Parser {
             self.ptr += 1;
             let e = self.expr(P_UNARY)?;
             return Ok(Expr {
+                id: 0,
                 pos,
                 node: ExprNode::Un {
                     op: UnOp::Not,
@@ -1024,6 +1054,7 @@ impl Parser {
         if self.eat(Tok::Minus) {
             let e = self.expr(P_UNARY)?;
             return Ok(Expr {
+                id: 0,
                 pos,
                 node: ExprNode::Un {
                     op: UnOp::Neg,
@@ -1034,6 +1065,7 @@ impl Parser {
         if self.eat(Tok::Tilde) {
             let e = self.expr(P_UNARY)?;
             return Ok(Expr {
+                id: 0,
                 pos,
                 node: ExprNode::Un {
                     op: UnOp::BitNot,
@@ -1063,6 +1095,7 @@ impl Parser {
                     }
                     self.expect(Tok::RParen, "')'")?;
                     e = Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Call {
                             callee: Box::new(e),
@@ -1083,6 +1116,7 @@ impl Parser {
                     let idx = self.expr(0)?;
                     self.expect(Tok::RBracket, "']'")?;
                     e = Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Index {
                             obj: Box::new(e),
@@ -1094,12 +1128,20 @@ impl Parser {
                     self.ptr += 1;
                     let (name, _) = self.ident("field or method name")?;
                     e = Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Field {
                             obj: Box::new(e),
                             name,
                         },
                     };
+                }
+                Some(Tok::QuestionDot) => {
+                    // appendix C / §A.4: `?.` is lexed but deliberately
+                    // unsupported — say so instead of the generic `expected ')'`
+                    return Err(self.err(
+                        "optional chaining `?.` is not supported; use an explicit `is nil` check",
+                    ));
                 }
                 _ => break,
             }
@@ -1162,6 +1204,7 @@ impl Parser {
             return None;
         }
         Some(Expr {
+            id: 0,
             pos,
             node: ExprNode::GenCall {
                 callee: Box::new(callee.clone()),
@@ -1180,6 +1223,7 @@ impl Parser {
             Tok::Int(v) => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Int(v),
                 })
@@ -1187,6 +1231,7 @@ impl Parser {
             Tok::UInt(v) => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::UInt(v),
                 })
@@ -1194,6 +1239,7 @@ impl Parser {
             Tok::Float(v) => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Float(v),
                 })
@@ -1201,6 +1247,7 @@ impl Parser {
             Tok::True => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Bool(true),
                 })
@@ -1208,6 +1255,7 @@ impl Parser {
             Tok::False => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Bool(false),
                 })
@@ -1215,6 +1263,7 @@ impl Parser {
             Tok::Nil => {
                 self.ptr += 1;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Nil,
                 })
@@ -1223,6 +1272,7 @@ impl Parser {
                 self.ptr += 1;
                 let expanded = self.expand_str(&parts)?;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Str(expanded),
                 })
@@ -1231,6 +1281,7 @@ impl Parser {
                 "this" => {
                     self.ptr += 1;
                     Ok(Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::This,
                     })
@@ -1238,6 +1289,7 @@ impl Parser {
                 "super" => {
                     self.ptr += 1;
                     Ok(Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Super,
                     })
@@ -1245,6 +1297,7 @@ impl Parser {
                 "nil" => {
                     self.ptr += 1;
                     Ok(Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Nil,
                     })
@@ -1255,6 +1308,7 @@ impl Parser {
                 _ => {
                     self.ptr += 1;
                     Ok(Expr {
+                        id: 0,
                         pos,
                         node: ExprNode::Ident(name),
                     })
@@ -1274,6 +1328,7 @@ impl Parser {
                 }
                 self.expect(Tok::RBracket, "']'")?;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::List(out),
                 })
@@ -1296,6 +1351,7 @@ impl Parser {
                 }
                 self.expect(Tok::RParen, "')'")?;
                 Ok(Expr {
+                    id: 0,
                     pos,
                     node: ExprNode::Map(out),
                 })
@@ -1365,6 +1421,7 @@ impl Parser {
         };
         let body = self.block()?;
         Ok(Expr {
+            id: 0,
             pos,
             node: ExprNode::Lambda(Box::new(Lambda {
                 params,
@@ -1377,6 +1434,7 @@ impl Parser {
 
 fn bin_expr(pos: Pos, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
     Expr {
+        id: 0,
         pos,
         node: ExprNode::Bin {
             op,
