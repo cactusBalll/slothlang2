@@ -84,6 +84,7 @@ impl ModEmitter {
                     }
                     _ => None,
                 };
+                let diag_before = self.diags.len();
                 let (v, t) = match &pre {
                     Some((w, tt)) => (w.clone(), *tt),
                     None => {
@@ -256,6 +257,12 @@ impl ModEmitter {
                 } else {
                     (v, t)
                 };
+                // a `unit` initializer has no word: keep the store well-formed
+                // and diagnose the binding (probe containers/x7); `let _ = …`
+                // discards deliberately, and an already-reported error should
+                // not cascade into a second diagnostic
+                let report = name != "_" && self.diags.len() == diag_before;
+                let v = self.value_or_nil_word(fw, v, t, &s.pos, report);
                 let fl = self.is_float(t);
                 // rc patch B: declare + retain (slot ownership; nil/unknown
                 // words are rt no-ops), then flush the temp's producer +1.
@@ -323,7 +330,8 @@ impl ModEmitter {
                         }
                     }
                 }
-                let (mut v, vty) = match pre {
+                let diag_before = self.diags.len();
+                let (v, vty) = match pre {
                     Some((w, tt)) => (w, tt),
                     None => {
                         let hint = target_ty.unwrap_or_else(|| self.r.mk(Ty::Unit));
@@ -333,6 +341,10 @@ impl ModEmitter {
                         out
                     }
                 };
+                // a `unit` assigned value has no word: keep every store face
+                // (slot / field / index / global) well-formed and diagnose it
+                let report = self.diags.len() == diag_before;
+                let mut v = self.value_or_nil_word(fw, v, vty, &s.pos, report);
                 // super.x = v: store into an inherited field slot of this
                 if let (Some(PathSeg::Name(h)), Some(PathSeg::Name(f))) =
                     (target.first(), target.last())

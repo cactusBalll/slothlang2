@@ -1643,8 +1643,12 @@ impl ModEmitter {
                     // `Array<int>?` and retained the raw int as a handle
                     // (rc subtract overflow; probe p_optmatrix).
                     self.exp_ret.push(exp);
+                    let diag_before = self.diags.len();
                     let (v, t) = self.emit_expr(fw, x);
                     self.exp_ret.pop();
+                    // a `unit` element has no word (probe containers/x7)
+                    let report = self.diags.len() == diag_before;
+                    let v = self.value_or_nil_word(fw, v, t, &x.pos, report);
                     evs.push(v);
                     ets.push(t);
                 }
@@ -1851,7 +1855,11 @@ impl ModEmitter {
                     _ => None,
                 };
                 for (k, v) in pairs {
+                    let kd = self.diags.len();
                     let (kv, kt) = self.emit_expr(fw, k);
+                    // a `unit` key/value has no word (probe containers/x7)
+                    let kv = self.value_or_nil_word(fw, kv, kt, &k.pos, self.diags.len() == kd);
+                    let vd = self.diags.len();
                     let (vv, vt) = match val_expected {
                         Some(e) => match self.try_literal_result_ctor(fw, v, e) {
                             Some((w, t)) => (w, t),
@@ -1859,6 +1867,7 @@ impl ModEmitter {
                         },
                         None => self.emit_expr(fw, v),
                     };
+                    let vv = self.value_or_nil_word(fw, vv, vt, &v.pos, self.diags.len() == vd);
                     kevs.push((kv, kt));
                     vevs.push((vv, vt));
                 }

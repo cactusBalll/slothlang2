@@ -232,6 +232,33 @@ impl ModEmitter {
         out
     }
 
+    /// A `unit` expression has no word: storing it would emit `memref.store , …`
+    /// or a call with a missing operand — MLIR "expected SSA operand" (probe
+    /// `containers/x7`). Return a placeholder nil word so the store stays
+    /// well-formed and, when `report` holds (not a `let _ = …` discard and no
+    /// diagnostic was already raised for the expression), diagnose the misuse.
+    pub(crate) fn value_or_nil_word(
+        &mut self,
+        fw: &mut FnWalk,
+        v: String,
+        t: TyId,
+        pos: &Pos,
+        report: bool,
+    ) -> String {
+        if !v.is_empty() {
+            return v;
+        }
+        if self.is_unit(t) && report {
+            self.err(
+                pos,
+                "a `unit` expression has no value; expected a value".to_string(),
+            );
+        }
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : i64", z));
+        z
+    }
+
     /// call-site arity check: mismatch is a user diagnostic, not an MLIR ICE
     pub(crate) fn check_call_arity(
         &mut self,
