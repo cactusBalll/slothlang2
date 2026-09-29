@@ -1628,6 +1628,7 @@ impl ModEmitter {
                         _ => None,
                     };
                 for x in xs {
+                    let exp = elem_expected.unwrap_or_else(|| self.r.mk(Ty::Unit));
                     if let Some(e) = elem_expected {
                         if let Some((v, t)) = self.try_literal_result_ctor(fw, x, e) {
                             evs.push(v);
@@ -1635,7 +1636,15 @@ impl ModEmitter {
                             continue;
                         }
                     }
+                    // Scope the outer element surface to the element itself:
+                    // without this a nested array literal `[[1]]` typed
+                    // `Array<Array<int>?>` saw the *outer* `Array` annotation as
+                    // its own element hint, mis-tagged its int element as
+                    // `Array<int>?` and retained the raw int as a handle
+                    // (rc subtract overflow; probe p_optmatrix).
+                    self.exp_ret.push(exp);
                     let (v, t) = self.emit_expr(fw, x);
+                    self.exp_ret.pop();
                     evs.push(v);
                     ets.push(t);
                 }
