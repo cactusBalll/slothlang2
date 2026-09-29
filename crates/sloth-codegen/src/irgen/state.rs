@@ -162,6 +162,11 @@ pub struct ModEmitter {
     /// A3 arithmetic plan: unified integer surface of integer arithmetic /
     /// comparison nodes, keyed by `(frame, NodeId)`.
     pub(crate) int_ops: HashMap<(String, u32), TyId>,
+    /// A3 container-hint plan: store-face coercion target of a list/map
+    /// literal, keyed by `(frame, NodeId)`; `None` = sem decided no
+    /// store-face coercion applies. Pass 2 replays it instead of re-reading
+    /// the expected-type hint stack.
+    pub(crate) store_faces: HashMap<(String, u32), Option<TyId>>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -294,6 +299,7 @@ impl ModEmitter {
             type_table: HashMap::new(),
             inst_sites: HashMap::new(),
             int_ops: HashMap::new(),
+            store_faces: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -307,6 +313,7 @@ impl ModEmitter {
             types: std::mem::take(&mut self.type_table),
             inst_sites: std::mem::take(&mut self.inst_sites),
             int_ops: std::mem::take(&mut self.int_ops),
+            store_faces: std::mem::take(&mut self.store_faces),
         }
     }
 
@@ -316,6 +323,26 @@ impl ModEmitter {
         self.type_table = t.types;
         self.inst_sites = t.inst_sites;
         self.int_ops = t.int_ops;
+        self.store_faces = t.store_faces;
+    }
+
+    /// A3 (container-hint family): the store face `sem` chose for the
+    /// container literal `id`. `Some(face)` = every element/value is coerced
+    /// to `face` at the store; `None` = sem decided no store-face coercion
+    /// applies. Only consultable in Pass 2 (Pass 1 derives it itself).
+    pub(crate) fn planned_store_face(&self, id: u32) -> Option<Option<TyId>> {
+        if self.check_mode || id == 0 {
+            return None;
+        }
+        self.store_faces.get(&(self.cur_frame.clone(), id)).copied()
+    }
+
+    /// A3: freeze the store face decided for container literal `id` while
+    /// walking it in Pass 1 (no-op for id-less synthetic literals).
+    pub(crate) fn record_store_face(&mut self, id: u32, face: Option<TyId>) {
+        if self.check_mode && id != 0 {
+            self.store_faces.insert((self.cur_frame.clone(), id), face);
+        }
     }
 
     /// A3: unified integer surface of an integer arithmetic/comparison node.

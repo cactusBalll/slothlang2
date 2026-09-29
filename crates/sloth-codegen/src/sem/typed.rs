@@ -3,8 +3,10 @@
 //! produces these tables; the emitter only consumes them.
 //!
 //! This is the seam for the staged typed-AST migration: today it carries the
-//! expression result types and the resolved type arguments of every generic
-//! call site; branch-level coercion/width plans will move here next.
+//! expression result types, the resolved type arguments of every generic call
+//! site, and the coercion plans the branch logic used to derive on the fly
+//! (integer widths, container store faces, call-site argument coercions);
+//! the remaining branch logic will move into a dedicated `sem` walk next.
 
 use sloth_frontend::ty::TyId;
 use std::collections::HashMap;
@@ -34,4 +36,12 @@ pub struct TypedTables {
     /// comparison nodes. Pass 2 replays the width chosen by `unify_int` rather
     /// than re-deriving it (A3, arithmetic family).
     pub int_ops: HashMap<(String, u32), TyId>,
+    /// `(frame, NodeId) -> store face` of a container literal: the declared
+    /// element (list) / value (map) surface every slot is coerced to at the
+    /// store face (`Array<Weak<T>>` / `Map<_, int8>` / `Array<dyn D>` …).
+    /// The value is `Some` exactly when Pass 1 applied the hint-driven
+    /// store-face coercion and `None` when it decided no coercion applies, so
+    /// Pass 2 never re-reads the expected-type hint to decide it (A3,
+    /// container-hint family).
+    pub store_faces: HashMap<(String, u32), Option<TyId>>,
 }

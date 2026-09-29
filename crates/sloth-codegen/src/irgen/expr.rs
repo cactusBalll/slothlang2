@@ -1759,18 +1759,38 @@ impl ModEmitter {
                     Some(Ty::Array(e)) => Some(e),
                     _ => None,
                 };
+                // A3 (batch 6): `sem` decides the store face in Pass 1 and
+                // freezes it against the literal's node; Pass 2 replays the
+                // plan instead of re-deriving it from the hint stack. A plan
+                // miss means the two passes walked different literals.
+                let face: Option<TyId> = if self.check_mode || e.id == 0 {
+                    let f = if anyf {
+                        None
+                    } else {
+                        hint_el.filter(|he| self.store_face_coerces(*he))
+                    };
+                    self.record_store_face(e.id, f);
+                    f
+                } else {
+                    match self.planned_store_face(e.id) {
+                        Some(f) => f,
+                        None => {
+                            debug_assert!(
+                                false,
+                                "store-face plan miss: frame={} node={}",
+                                self.cur_frame, e.id
+                            );
+                            hint_el.filter(|he| self.store_face_coerces(*he))
+                        }
+                    }
+                };
                 if !anyf {
-                    if let Some(he) = hint_el {
-                        if self.weak_inner(he).is_some()
-                            || self.opt_inner(he).is_some()
-                            || matches!(self.r.get(he), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
-                        {
-                            for i in 0..evs.len() {
-                                if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
-                                    let (c2, t2) = self.coerce_word_to(fw, &evs[i], ets[i], he);
-                                    evs[i] = c2;
-                                    ets[i] = t2;
-                                }
+                    if let Some(he) = face {
+                        for i in 0..evs.len() {
+                            if self.r.get(ets[i]).clone() != self.r.get(he).clone() {
+                                let (c2, t2) = self.coerce_word_to(fw, &evs[i], ets[i], he);
+                                evs[i] = c2;
+                                ets[i] = t2;
                             }
                         }
                     }
@@ -2042,18 +2062,36 @@ impl ModEmitter {
                     Some(Ty::Map(_k, v)) => Some(v),
                     _ => None,
                 };
+                // A3 (batch 6): the value store face is decided by `sem` in
+                // Pass 1 and replayed here (see the list-literal route).
+                let vface: Option<TyId> = if self.check_mode || e.id == 0 {
+                    let f = if anyf {
+                        None
+                    } else {
+                        hint_v.filter(|hv| self.store_face_coerces(*hv))
+                    };
+                    self.record_store_face(e.id, f);
+                    f
+                } else {
+                    match self.planned_store_face(e.id) {
+                        Some(f) => f,
+                        None => {
+                            debug_assert!(
+                                false,
+                                "store-face plan miss: frame={} node={}",
+                                self.cur_frame, e.id
+                            );
+                            hint_v.filter(|hv| self.store_face_coerces(*hv))
+                        }
+                    }
+                };
                 if !anyf {
-                    if let Some(hv) = hint_v {
-                        if self.weak_inner(hv).is_some()
-                            || self.opt_inner(hv).is_some()
-                            || matches!(self.r.get(hv), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
-                        {
-                            for x in vevs.iter_mut() {
-                                if self.r.get(x.1).clone() != self.r.get(hv).clone() {
-                                    let (c2, t2) = self.coerce_word_to(fw, &x.0, x.1, hv);
-                                    x.0 = c2;
-                                    x.1 = t2;
-                                }
+                    if let Some(hv) = vface {
+                        for x in vevs.iter_mut() {
+                            if self.r.get(x.1).clone() != self.r.get(hv).clone() {
+                                let (c2, t2) = self.coerce_word_to(fw, &x.0, x.1, hv);
+                                x.0 = c2;
+                                x.1 = t2;
                             }
                         }
                     }

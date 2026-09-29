@@ -311,6 +311,18 @@ impl ModEmitter {
             _ => None,
         }
     }
+    /// A3 (container-hint family): does a declared store face force a
+    /// per-element word coercion at a list/map literal's store?
+    /// Value-optional/Weak surfaces box (or wrap) the bare word, `dyn`/`any`
+    /// box it into the runtime-typed surface and fixed-width integers
+    /// narrow; every other surface stores the word unchanged, so no
+    /// store-face plan is needed for it.
+    pub(crate) fn store_face_coerces(&self, face: TyId) -> bool {
+        self.weak_inner(face).is_some()
+            || self.opt_inner(face).is_some()
+            || matches!(self.r.get(face), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
+    }
+
     /// Send marker (design §4.2, first cut): a value is shareable across a
     /// thread boundary unless it contains a thread-confined `Fiber<Y>`.
     /// Shallow structural walk (class internals are not traversed — see
