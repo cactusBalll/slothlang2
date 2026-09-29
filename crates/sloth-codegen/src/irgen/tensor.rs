@@ -146,6 +146,37 @@ impl ModEmitter {
         (r, ty)
     }
 
+    /// A3 (expected-hint family): resolve the declared `Tensor<T, R>` target
+    /// of a `tensor.zeros`/`tensor.from_array` call site. Pass 1 reads the
+    /// expected-type hint and freezes the `(element, rank)` decision against
+    /// the site; Pass 2 replays it instead of re-reading the hint stack.
+    fn tensor_target_shape(&mut self, pos: &Pos) -> Option<(TyId, u32)> {
+        if self.check_mode {
+            let shape = self
+                .exp_ret
+                .last()
+                .copied()
+                .and_then(|h| self.tensor_info(h));
+            self.record_tensor_shape(pos, shape);
+            shape
+        } else {
+            match self.planned_tensor_shape(pos) {
+                Some(shape) => shape,
+                None => {
+                    debug_assert!(
+                        false,
+                        "tensor shape plan miss: frame={} pos={}:{}",
+                        self.cur_frame, pos.line, pos.col
+                    );
+                    self.exp_ret
+                        .last()
+                        .copied()
+                        .and_then(|h| self.tensor_info(h))
+                }
+            }
+        }
+    }
+
     /// `tensor.zeros(shape)`: elem/rank from the declared target surface
     pub(crate) fn emit_tensor_zeros(
         &mut self,
@@ -153,8 +184,7 @@ impl ModEmitter {
         shape: &Expr,
         pos: &Pos,
     ) -> (String, TyId) {
-        let hint = self.exp_ret.last().copied();
-        let (elem, rank) = match hint.and_then(|h| self.tensor_info(h)) {
+        let (elem, rank) = match self.tensor_target_shape(pos) {
             Some(x) => x,
             None => {
                 self.err(
@@ -179,8 +209,7 @@ impl ModEmitter {
         shape: &Expr,
         pos: &Pos,
     ) -> (String, TyId) {
-        let hint = self.exp_ret.last().copied();
-        let (helem, rank) = match hint.and_then(|h| self.tensor_info(h)) {
+        let (helem, rank) = match self.tensor_target_shape(pos) {
             Some(x) => x,
             None => {
                 self.err(

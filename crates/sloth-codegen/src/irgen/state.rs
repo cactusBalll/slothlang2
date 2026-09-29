@@ -174,6 +174,16 @@ pub struct ModEmitter {
     /// A3 call-argument plan: post-coercion argument surfaces of a call site
     /// (they drive the emitted call signature), keyed like `arg_coercions`.
     pub(crate) arg_faces: HashMap<crate::sem::SiteKey, Vec<TyId>>,
+    /// A3 expected-hint plan: resolved `Result` instance of every container
+    /// literal element that `sem` recognized as an `ok()`/`err()` ctor under a
+    /// declared Result surface, keyed by `(frame, element NodeId)`. Pass 2
+    /// replays it instead of re-reading the expected-type hint.
+    pub(crate) literal_ctors: HashMap<(String, u32), String>,
+    /// A3 expected-hint plan: resolved `(element, rank)` of every
+    /// `tensor.zeros`/`tensor.from_array` call site, keyed by
+    /// `(frame, line, col)`. `None` records "no tensor hint" (diagnosed in
+    /// Pass 1). Pass 2 replays the decision instead of re-reading the hint.
+    pub(crate) tensor_shapes: HashMap<crate::sem::SiteKey, Option<(TyId, u32)>>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -309,6 +319,8 @@ impl ModEmitter {
             store_faces: HashMap::new(),
             arg_coercions: HashMap::new(),
             arg_faces: HashMap::new(),
+            literal_ctors: HashMap::new(),
+            tensor_shapes: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -325,6 +337,8 @@ impl ModEmitter {
             store_faces: std::mem::take(&mut self.store_faces),
             arg_coercions: std::mem::take(&mut self.arg_coercions),
             arg_faces: std::mem::take(&mut self.arg_faces),
+            literal_ctors: std::mem::take(&mut self.literal_ctors),
+            tensor_shapes: std::mem::take(&mut self.tensor_shapes),
         }
     }
 
@@ -337,6 +351,8 @@ impl ModEmitter {
         self.store_faces = t.store_faces;
         self.arg_coercions = t.arg_coercions;
         self.arg_faces = t.arg_faces;
+        self.literal_ctors = t.literal_ctors;
+        self.tensor_shapes = t.tensor_shapes;
     }
 
     /// A3 (container-hint family): the store face `sem` chose for the
@@ -420,6 +436,56 @@ impl ModEmitter {
             None => {
                 self.arg_faces.insert(key, faces);
             }
+        }
+    }
+
+    /// A3 (expected-hint family): the resolved `Result` instance `sem`
+    /// recorded for the container-literal element node `id` (Pass 2 only).
+    pub(crate) fn planned_literal_ctor(&self, id: u32) -> Option<String> {
+        if self.check_mode || id == 0 {
+            return None;
+        }
+        self.literal_ctors
+            .get(&(self.cur_frame.clone(), id))
+            .cloned()
+    }
+
+    /// A3: freeze the `Result` instance resolved for the container-literal
+    /// element node `id` (Pass 1 only; a repeated resolution with a different
+    /// instance is a bug, not a tie to break).
+    pub(crate) fn record_literal_ctor(&mut self, id: u32, inst: &str) {
+        if !self.check_mode || id == 0 {
+            return;
+        }
+        let key = (self.cur_frame.clone(), id);
+        match self.literal_ctors.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == inst,
+                "conflicting literal ctor at node {}: {} vs {}",
+                id,
+                prev,
+                inst
+            ),
+            None => {
+                self.literal_ctors.insert(key, inst.to_string());
+            }
+        }
+    }
+
+    /// A3 (expected-hint family): the `(element, rank)` `sem` resolved for the
+    /// `tensor.zeros`/`tensor.from_array` call site at `pos` (Pass 2 only).
+    /// `Some(None)` is the recorded "no tensor hint" decision.
+    pub(crate) fn planned_tensor_shape(&self, pos: &Pos) -> Option<Option<(TyId, u32)>> {
+        if self.check_mode {
+            return None;
+        }
+        self.tensor_shapes.get(&self.site_key(pos)).copied()
+    }
+
+    /// A3: freeze the tensor target shape decided for the call site at `pos`.
+    pub(crate) fn record_tensor_shape(&mut self, pos: &Pos, shape: Option<(TyId, u32)>) {
+        if self.check_mode {
+            self.tensor_shapes.insert(self.site_key(pos), shape);
         }
     }
 

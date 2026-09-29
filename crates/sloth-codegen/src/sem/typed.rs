@@ -5,8 +5,10 @@
 //! This is the seam for the staged typed-AST migration: today it carries the
 //! expression result types, the resolved type arguments of every generic call
 //! site, and the coercion plans the branch logic used to derive on the fly
-//! (integer widths, container store faces, call-site argument coercions);
-//! the remaining branch logic will move into a dedicated `sem` walk next.
+//! (integer widths, container store faces, call-site argument coercions, and
+//! the expected-type-hint decisions: literal `ok()/err()` ctors and tensor
+//! target shapes); the remaining branch logic will move into a dedicated
+//! `sem` walk next.
 
 use sloth_frontend::ty::TyId;
 use std::collections::HashMap;
@@ -55,4 +57,15 @@ pub struct TypedTables {
     /// 2 replays them rather than re-deriving them from the parameter list
     /// (A3, call-argument family).
     pub arg_faces: HashMap<SiteKey, Vec<TyId>>,
+    /// container-literal element node -> resolved `Result` instance. Pass 1
+    /// resolves `ok(v)`/`err(e)` elements against the declared element/value
+    /// surface (the expected-type hint) and freezes the instance here; Pass 2
+    /// replays the ctor instead of re-reading the hint (A3, expected-hint
+    /// family).
+    pub literal_ctors: HashMap<(String, u32), String>,
+    /// `tensor.zeros` / `tensor.from_array` call site -> resolved
+    /// `(element, rank)` of the declared `Tensor<T, R>` target. `None` records
+    /// that Pass 1 found no tensor hint (diagnosed there); Pass 2 replays the
+    /// decision instead of re-reading the hint (A3, expected-hint family).
+    pub tensor_shapes: HashMap<SiteKey, Option<(TyId, u32)>>,
 }

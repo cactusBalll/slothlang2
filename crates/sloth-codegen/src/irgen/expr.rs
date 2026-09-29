@@ -1639,21 +1639,27 @@ impl ModEmitter {
                 let mut evs: Vec<String> = Vec::new();
                 let mut ets: Vec<TyId> = Vec::new();
                 // a declared element surface resolves `ok()/err()` ctor
-                // elements inside the literal (bug OPT5/E4)
-                let elem_expected =
+                // elements inside the literal (bug OPT5/E4). A3 (expected-hint
+                // family): the hint is only read in Pass 1; Pass 2 replays the
+                // resolved ctor per element below.
+                let elem_expected = if self.check_mode {
                     match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
                         Some(Ty::Array(e)) => Some(e),
                         _ => None,
-                    };
-                for x in xs {
-                    let exp = elem_expected.unwrap_or_else(|| self.r.mk(Ty::Unit));
-                    if let Some(e) = elem_expected {
-                        if let Some((v, t)) = self.try_literal_result_ctor(fw, x, e) {
-                            evs.push(v);
-                            ets.push(t);
-                            continue;
-                        }
                     }
+                } else {
+                    None
+                };
+                for x in xs {
+                    // A3 (expected-hint family): Pass 2 replays the resolved
+                    // `ok()`/`err()` ctor (when Pass 1 found one); Pass 1
+                    // resolves it against `elem_expected` and freezes it.
+                    if let Some((v, t)) = self.try_literal_result_ctor(fw, x, elem_expected) {
+                        evs.push(v);
+                        ets.push(t);
+                        continue;
+                    }
+                    let exp = elem_expected.unwrap_or_else(|| self.r.mk(Ty::Unit));
                     // Scope the outer element surface to the element itself:
                     // without this a nested array literal `[[1]]` typed
                     // `Array<Array<int>?>` saw the *outer* `Array` annotation as
@@ -1674,9 +1680,13 @@ impl ModEmitter {
                 // surface wins, including *reference* optionals (nil stays nil,
                 // bare scalars box up) — otherwise `[C()]` collapses to
                 // `Array<C>` and `is nil` becomes a false error (bug B9/OPT4)
-                let hint_el0 = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
-                    Some(Ty::Array(e)) => Some(e),
-                    _ => None,
+                let hint_el0 = if self.check_mode {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Array(e)) => Some(e),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
                 // A3: Pass 2 replays the Opt-family element coercion decided in
                 // Pass 1 (the two blocks below). The planned element surface is
@@ -1754,10 +1764,20 @@ impl ModEmitter {
                 // declared store face (`var a: Array<Weak<T>> = [t]` or
                 // `Array<int?> = [1, 2]`) coerces each element; without the
                 // Weak wrap a strong handle would sit in a Weak slot and
-                // upgrade() would misread it as a box
-                let hint_el = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
-                    Some(Ty::Array(e)) => Some(e),
-                    _ => None,
+                // upgrade() would misread it as a box.
+                // A3 (expected-hint family): Pass 1 reads the declared element
+                // surface from the hint stack; Pass 2 recovers it from the
+                // recorded literal type instead (no ambient hint read).
+                let hint_el = if self.check_mode {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Array(e)) => Some(e),
+                        _ => None,
+                    }
+                } else {
+                    match self.planned_expr_ty(e.id).map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Array(e)) => Some(e),
+                        _ => None,
+                    }
                 };
                 // A3 (batch 6): `sem` decides the store face in Pass 1 and
                 // freezes it against the literal's node; Pass 2 replays the
@@ -1912,11 +1932,16 @@ impl ModEmitter {
                 let mut kevs: Vec<(String, TyId)> = Vec::new();
                 let mut vevs: Vec<(String, TyId)> = Vec::new();
                 // declared value surface resolves `ok()/err()` ctor values
-                // inside the literal (bug OPT5/E4)
-                let val_expected = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone())
-                {
-                    Some(Ty::Map(_, v)) => Some(v),
-                    _ => None,
+                // inside the literal (bug OPT5/E4). A3 (expected-hint family):
+                // the hint is only read in Pass 1; Pass 2 replays the resolved
+                // ctor per value below.
+                let val_expected = if self.check_mode {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Map(_, v)) => Some(v),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
                 for (k, v) in pairs {
                     let kd = self.diags.len();
@@ -1924,11 +1949,8 @@ impl ModEmitter {
                     // a `unit` key/value has no word (probe containers/x7)
                     let kv = self.value_or_nil_word(fw, kv, kt, &k.pos, self.diags.len() == kd);
                     let vd = self.diags.len();
-                    let (vv, vt) = match val_expected {
-                        Some(e) => match self.try_literal_result_ctor(fw, v, e) {
-                            Some((w, t)) => (w, t),
-                            None => self.emit_expr(fw, v),
-                        },
+                    let (vv, vt) = match self.try_literal_result_ctor(fw, v, val_expected) {
+                        Some((w, t)) => (w, t),
                         None => self.emit_expr(fw, v),
                     };
                     let vv = self.value_or_nil_word(fw, vv, vt, &v.pos, self.diags.len() == vd);
@@ -1964,8 +1986,10 @@ impl ModEmitter {
                     }
                 }
                 // empty map literal: adopt K/V from the surrounding annotation
-                // (e.g. `var m: Map<str, int> = @()`)
-                let hint_kv = if pairs.is_empty() {
+                // (e.g. `var m: Map<str, int> = @()`). A3 (expected-hint
+                // family): Pass 2 recovers K/V from the recorded map type
+                // instead of the hint stack.
+                let hint_kv = if self.check_mode && pairs.is_empty() {
                     match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
                         Some(Ty::Map(k, v)) => Some((k, v)),
                         _ => None,
@@ -2018,10 +2042,16 @@ impl ModEmitter {
                     }
                 }
                 // declared `Map<_, T?>`: mirror the list-literal optional
-                // element rule (reference optionals included) — bug B9/OPT4
-                let hint_v0 = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
-                    Some(Ty::Map(_, v)) => Some(v),
-                    _ => None,
+                // element rule (reference optionals included) — bug B9/OPT4.
+                // A3 (expected-hint family): Pass 1 only; Pass 2 replays via
+                // `planned_pv` above.
+                let hint_v0 = if self.check_mode {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Map(_, v)) => Some(v),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
                 if planned_pv.is_none() {
                     if let Some(hv) = hint_v0 {
@@ -2057,10 +2087,20 @@ impl ModEmitter {
                     }
                 }
                 // declared value store face (`Map<str, Weak<T>> = @(...)`)
-                // coerces bare values the same way the list literal route does
-                let hint_v = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
-                    Some(Ty::Map(_k, v)) => Some(v),
-                    _ => None,
+                // coerces bare values the same way the list literal route does.
+                // A3 (expected-hint family): Pass 1 reads the declared value
+                // surface from the hint stack; Pass 2 recovers it from the
+                // recorded map type instead.
+                let hint_v = if self.check_mode {
+                    match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Map(_k, v)) => Some(v),
+                        _ => None,
+                    }
+                } else {
+                    match self.planned_expr_ty(e.id).map(|t| self.r.get(t).clone()) {
+                        Some(Ty::Map(_k, v)) => Some(v),
+                        _ => None,
+                    }
                 };
                 // A3 (batch 6): the value store face is decided by `sem` in
                 // Pass 1 and replayed here (see the list-literal route).
@@ -4100,12 +4140,17 @@ impl ModEmitter {
 
     /// `ok(x)`/`err(x)` used as a container-literal element under a declared
     /// `Array<Result<_,_>>` / `Map<_, Result<_,_>>` surface (bug OPT5/E4).
-    /// Returns the ctor value+type, or `None` for any other expression.
+    ///
+    /// A3 (expected-hint family): Pass 1 resolves the `Result` instance from
+    /// the declared element surface `expected` and freezes it against the
+    /// element node; Pass 2 replays the frozen instance (`expected` is then
+    /// ignored). Returns the ctor value+type, or `None` for any other
+    /// expression / a node Pass 1 did not resolve.
     pub(crate) fn try_literal_result_ctor(
         &mut self,
         fw: &mut FnWalk,
         x: &Expr,
-        expected: TyId,
+        expected: Option<TyId>,
     ) -> Option<(String, TyId)> {
         let (callee, args) = match &x.node {
             ExprNode::Call { callee, args } if args.len() == 1 => (callee, args),
@@ -4116,9 +4161,16 @@ impl ModEmitter {
             ExprNode::Ident(id) if id == "err" => false,
             _ => return None,
         };
-        let inst = match self.r.get(expected).clone() {
-            Ty::Named(nm, _) if self.result_insts.contains(&nm) => nm,
-            _ => return None,
+        let inst = if self.check_mode {
+            let expected = expected?;
+            let nm = match self.r.get(expected).clone() {
+                Ty::Named(nm, _) if self.result_insts.contains(&nm) => nm,
+                _ => return None,
+            };
+            self.record_literal_ctor(x.id, &nm);
+            nm
+        } else {
+            self.planned_literal_ctor(x.id)?
         };
         Some(self.emit_result_ctor(fw, &inst, &args[0], is_ok, &x.pos))
     }
