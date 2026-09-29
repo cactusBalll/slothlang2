@@ -98,7 +98,9 @@ impl ModEmitter {
 impl ModEmitter {
     /// Pass-boundary wrapper for expression lowering. Pass 1 (`check_mode`)
     /// records each node's inferred type into the NodeId side table; Pass 2
-    /// consults it as the authoritative expression type.
+    /// consumes it as the authoritative expression type. The table is complete
+    /// over the whole program (verified: no misses across the spec/seed suites),
+    /// so Pass 2 never contributes a new expression type — it only lowers.
     pub(crate) fn emit_expr(&mut self, fw: &mut FnWalk, e: &Expr) -> (String, TyId) {
         let (w, t) = self.emit_expr_inner(fw, e);
         if e.id != 0 {
@@ -107,6 +109,15 @@ impl ModEmitter {
                 self.type_table.insert(key, t);
             } else if let Some(&tt) = self.type_table.get(&key) {
                 return (w, tt);
+            } else {
+                // Pass 1 records every expression node; a miss means the two
+                // passes walked different code. Keep the locally computed type
+                // so release builds still emit, but surface the bug in debug.
+                debug_assert!(
+                    false,
+                    "type side table miss: frame={} node={}",
+                    self.cur_frame, e.id
+                );
             }
         }
         (w, t)

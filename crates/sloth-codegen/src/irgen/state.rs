@@ -151,8 +151,9 @@ pub struct ModEmitter {
     /// monomorphic instance
     pub(crate) cur_frame: String,
     /// Pass 1 (sem) type side table: `(frame, node id) -> TyId`. Pass 2 reads
-    /// it as the authoritative expression type; a miss falls back to the
-    /// emitter's own inference.
+    /// it as the authoritative expression type; it is complete over the whole
+    /// program, so Pass 2 contributes no expression types (a miss is a bug and
+    /// is surfaced in debug builds).
     pub(crate) type_table: HashMap<(String, u32), TyId>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked

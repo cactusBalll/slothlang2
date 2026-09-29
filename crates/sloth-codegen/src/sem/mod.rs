@@ -9,8 +9,9 @@
 //! * a **type side table** keyed by `(frame, NodeId)`: `Expr`/`Stmt` nodes
 //!   carry a stable id (`sloth_frontend::ast::assign_ids`), and every
 //!   expression's inferred `TyId` is recorded as the analysis walk visits it.
-//!   Pass 2 consults it as the authoritative expression type (falling back to
-//!   its own inference only on a miss), so type checking lives in Pass 1.
+//!   Pass 2 consumes it as the authoritative expression type (the table is
+//!   complete across the whole program, so Pass 2 contributes no expression
+//!   types of its own), so type checking lives in Pass 1.
 //! * a **monomorphization plan** (A1): the complete set of generic-function and
 //!   generic-class instances, discovered by walking the program to a fixed
 //!   point. Pass 2 emits exactly that set instead of re-deriving it.

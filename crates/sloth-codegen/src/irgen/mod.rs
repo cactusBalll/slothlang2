@@ -105,15 +105,16 @@ fn build_multimod(
     mods: &[(String, Program, Option<String>, bool)],
     mod_name: &str,
     check_mode: bool,
-    plan: Option<crate::mono::MonoPlan>,
+    sem: Option<(crate::mono::MonoPlan, crate::sem::TypeTable)>,
 ) -> ModEmitter {
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = check_mode;
-    // Pass 2 adopts Pass 1's type registry + frozen instance set before any
-    // import is registered, so `TyId`s from the plan resolve during import
-    // typing too (A1).
-    if let Some(p) = plan {
-        me.seed_mono_plan(p);
+    // Pass 2 adopts Pass 1's type registry + frozen instance set + expression
+    // type side table *before* anything is emitted, so `TyId`s from the plan
+    // resolve during import typing and every expression lookup can hit.
+    if let Some((plan, table)) = sem {
+        me.seed_mono_plan(plan);
+        me.type_table = table;
     }
     // order-independent devirtualization: index overrides across every module
     // (imports emit method bodies before root classes are registered)
@@ -218,9 +219,15 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
             mono: me.take_mono_plan(),
         }
     };
-    // Pass 2
-    let mut me = build_multimod(&root, &mods, "main", false, Some(sem.mono));
-    me.type_table = sem.type_table;
+    // Pass 2: hand Pass 1's side table + plan to the assembler so the emitter
+    // consumes them from the very first lookup.
+    let mut me = build_multimod(
+        &root,
+        &mods,
+        "main",
+        false,
+        Some((sem.mono, sem.type_table)),
+    );
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }
