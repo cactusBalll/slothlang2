@@ -8,6 +8,18 @@ use crate::irgen::ModEmitter;
 use crate::jit::Engine;
 use crate::module::Op;
 
+/// Leave the process once a `slothc run` program has returned. `run` is a
+/// one-shot mode: returning from `run_src` would drop the `Engine`, unmapping
+/// the JIT session while detached worker threads may still be executing
+/// JIT-emitted code (bug G6/B5). Flush the buffered stdout/stderr first, then
+/// `_exit(0)` — the same no-teardown discipline the panic paths use.
+fn exit_after_run() -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { libc::_exit(0) }
+}
+
 /// path of libsloth_rt.so produced by this workspace build
 fn lib_path() -> String {
     // running binary is at target/debug/slothc; resolve relative to the exe
@@ -61,7 +73,8 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
         op.print(),
     );
     r?;
-    Ok(())
+    // do not drop the engine under live detached workers (bug B5)
+    exit_after_run()
 }
 
 /// compile+run a multi-module program through the JIT
@@ -81,7 +94,8 @@ pub fn run_src_multimod(src: &str, base: &std::path::Path) -> Result<(), String>
     eprintln!("invokePacked target=sloth_main lib={}", lib_path());
     let r = e.invoke("sloth_main", &mut []);
     r?;
-    Ok(())
+    // do not drop the engine under live detached workers (bug B5)
+    exit_after_run()
 }
 
 #[cfg(test)]

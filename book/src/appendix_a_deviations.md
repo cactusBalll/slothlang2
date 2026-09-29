@@ -7,7 +7,7 @@
 
 | 设计 | 实现 | 性质 |
 | --- | --- | --- |
-| §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后分两个显式 Pass：Pass 1 `sem`（符号收集、局部推断、约束检查；独占诊断，产出 NodeId 类型侧表），Pass 2 `irgen`（消费该侧表、诊断静默地发射 MLIR）。两 Pass 仍共享推断引擎，主动单态化尚未抽出 | 部分对齐（2026-09，两 Pass 解耦 + NodeId 类型侧表）；跨语句流敏感推断仍不承诺 |
+| §4.1 十个阶段的流水线，含独立的 [3] 名称解析、[4] 类型检查/推断、[5] 单态化 | 解析后分两个显式 Pass：Pass 1 `sem`（符号收集、局部推断、约束检查；独占诊断，产出 NodeId 类型侧表），Pass 2 `irgen`（消费该侧表、诊断静默地发射 MLIR）。`sem/` 现在只保留分析（谓词/注册表/约束）；ARC/coercion、整数宽度转换与赋值存储路线等全部 IR 发射已移入 `irgen/coerce.rs`。两 Pass 仍共享推断引擎，主动单态化尚未抽出 | 部分对齐（2026-09，两 Pass 解耦 + NodeId 类型侧表 + 发射辅助出 `sem`）；跨语句流敏感推断仍不承诺 |
 | §4.3 自定义 `sloth` dialect（`!sloth.string`、`sloth.gc_alloc` 等） | 仅一个**最小** `sloth` dialect（TableGen/C++，ARC `sloth.rc_retain`/`sloth.rc_release`）；解析后由单点 lowering 全部降为标准方言（`func.call @__sloth_*`），对外 IR 仍无 `sloth.*`。完整类型/GC 方言（`!sloth.string`、`sloth.gc_alloc`）不实现 | 部分解冻（2026-09-23，见 `PLAN-sloth-dialect.md`） |
 | （设计未列的运行时命名空间） | 运行时/prelude ABI 统一使用保留前缀 `__sloth_*`（`lib/prelude/abi.slt` 唯一声明）；普通模块声明保留符号报错，调用需伪导入 `import "__sloth";` | 增补（2026-09-24，提交 430f0e3） |
 | §4.1 循环依赖通过依赖图拓扑检测 | `resolve_program` 在按 `import` 递归装配时用 DFS 栈比对规范化路径，命中即报 `circular import`（`crates/sloth-codegen/src/irgen/mod.rs:205`）；`done` 集合去重。无独立依赖图/拓扑排序阶段 | 定案（等价检测，无独立阶段） |
@@ -108,6 +108,7 @@
 | §4.4 `fiber.cancel` 用 `setjmp`/`longjmp` 直达入口 | 同左；差别在于出栈前先结算在册局部槽，再 `longjmp`（`longjmp` 会重置栈指针，必须先于其完成释放） | 定案 |
 | §4.1 仅保存 x86_64 的 `rsp/rbp/rbx/r12-r15`、aarch64 的 `x19-x30/sp/lr` | aarch64 额外保存 AAPCS64 被调用者保存的 `d8-d15`（设计稿遗漏） | 修正 |
 | §4.1 自研汇编以 `global_asm!` 内联于 `sloth-rt` | `sloth_fiber_switch_asm`/`sloth_fiber_trampoline`（crate 内部符号，非 ABI）为 `global_asm!`，无需 `build.rs` 或额外链接 | 等价实现 |
+| §27.1 `fiber.yield` 载荷与入口 `Y` 一致 | 入口 lambda **及其文本嵌套闭包**内的 `fiber.yield` 按入口 `Y` 检查（嵌套闭包继承 `Y`）；经普通函数调用到达的 `yield` 不检查——同一函数可由不同 `Y` 的协程调用，无单一静态 `Y` | 定案（可检查范围） |
 
 ## A.9 多线程扩展（TH-P0–TH-P3）
 
@@ -122,6 +123,7 @@
 | §5.4 Fiber 线程封闭 | `owner_tid` 校验 + 每线程 TLS `CUR`/`MAIN` 哨兵 + 线程退出断言（`abandoned fibers on thread exit`） | 已对齐 |
 | §5.5 trampoline / 转移插桩 | worker 持有句柄自引用；结果以 owned +1 交付 `join`；`spawn` retain 闭包与引用参数 | 已对齐 |
 | §5.3 `Weak` 跨线程 upgrade | 原子 CAS 控制块，`upgrade` 与析构排空弱链配合 | 已对齐 |
+| §5.4 线程退出纪律 | worker trampoline 先 `__sloth_fiber_thread_exit()`（有未决协程则 panic）；panic 诊断、slice-assign/opaque-token 错误退出与 `slothc run` 正常返回统一走 `libc::_exit`（不跑 `atexit`/析构），避免 JIT session 在存活 detached worker 脚下被 unmap（G6/B5） | 定案 |
 | ~~风险 #7 63-bit int 与 64-bit 原子槽~~ | 去 tag 后 `int` 为原生 i64，缝隙已消除 | 已消除 |
 
 > **弃置纪律**：未 join/detach 的 `JoinHandle` 计数归零时，debug 构建 panic

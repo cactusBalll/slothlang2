@@ -4,8 +4,10 @@
 /// still be executing JIT-emitted code, and a full `process::exit` teardown
 /// unmaps the JIT session under them → intermittent SIGSEGV (bug G6). `_exit`
 /// stops the process immediately; stderr is flushed first so the diagnosis is
-/// not lost.
-fn exit_now(code: i32) -> ! {
+/// not lost. Shared by every terminal path (panic diagnostics and the
+/// slice-assignment / opaque-token error exits) so no route reintroduces the
+/// teardown race (bug B5).
+pub(crate) fn exit_now(code: i32) -> ! {
     use std::io::Write;
     let _ = std::io::stderr().flush();
     unsafe { libc::_exit(code) }
@@ -99,5 +101,5 @@ pub extern "C" fn __sloth_panic_slice_assign(got: i64, want: i64) -> i64 {
         "sloth panic: array slice assignment length {} does not match target length {}",
         got, want
     );
-    std::process::exit(1);
+    exit_now(1);
 }

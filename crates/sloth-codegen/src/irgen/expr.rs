@@ -701,15 +701,20 @@ impl ModEmitter {
                     Ty::Opt(e) => e,
                     _ => ut,
                 };
-                // design §2.1: `?:` joins two operands of the same type — a
-                // mixed int/float pair is a compile error, not a promotion
-                // (a `nil` rhs is exempt: it keeps the optional surface)
-                if self.r.get(rt) != &Ty::Unit
-                    && self.r.get(ut) != &Ty::Unit
-                    && self.is_float(ut) != self.is_float(rt)
+                // design §2.1: `?:` joins two operands of the same type — not
+                // just equal float-ness. A reference optional vs a scalar
+                // (`C? ?: 5`) otherwise fell through and the select word was
+                // mistyped as the class handle, so `print` released a scalar
+                // (rc underflow; bug core/bug2). A `nil` operand is exempt
+                // (keeps the optional surface).
+                let uts = self.r.get(ut).clone();
+                let rts = self.r.get(rt).clone();
+                if !matches!(rts, Ty::Unit)
+                    && !matches!(uts, Ty::Unit)
+                    && !self.surface_compat(&uts, &rts)
                 {
-                    let an = sloth_frontend::ty::ty_name(self.r.get(ut));
-                    let bn = sloth_frontend::ty::ty_name(self.r.get(rt));
+                    let an = self.surface_name(&uts);
+                    let bn = self.surface_name(&rts);
                     self.err_diff(&e.pos, "elvis operand", &an, &bn);
                 }
                 // encoded words select word-wise; nil/0.0 both ride word 0
@@ -2546,7 +2551,7 @@ impl ModEmitter {
                         return self.emit_fiber_yield(fw, &args[0], pos);
                     }
                     "error" if args.len() == 1 => {
-                        return self.emit_fiber_error(fw, &args[0]);
+                        return self.emit_fiber_error(fw, &args[0], pos);
                     }
                     "check" if args.len() == 1 => {
                         return self.emit_fiber_check(fw, &args[0]);

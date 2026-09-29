@@ -150,6 +150,13 @@ impl ModEmitter {
         // generic instance's mangled name (`tp_mangled`), or every instantiation
         // would share one body whose ARC depends on the concrete type args
         let saved_tpm = self.tp_mangled.pop();
+        // a closure nested inside a fiber entry body inherits the entry
+        // payload `Y`, so its `fiber.yield` is checked against the same `Y`
+        // (bug B4: only the entry frame used to see `fiber_payload`)
+        let saved_pending = self.pending_fiber_payload;
+        if fw.fiber_payload.is_some() {
+            self.pending_fiber_payload = fw.fiber_payload;
+        }
         let sym = self.emit_func_env(
             &lname,
             None,
@@ -158,6 +165,7 @@ impl ModEmitter {
             false,
             Some(("__sloth_env".to_string(), caps.clone())),
         );
+        self.pending_fiber_payload = saved_pending;
         if let Some(m) = saved_tpm {
             self.tp_mangled.push(m);
         }

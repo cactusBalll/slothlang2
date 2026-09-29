@@ -109,7 +109,15 @@ impl ModEmitter {
         let r = fw.v();
         match sarg {
             Some(s) => {
-                let (sv, _st) = self.emit_expr(fw, s);
+                let (sv, st) = self.emit_expr(fw, s);
+                // book ch27 §27.1: `fiber.create_with(f, init, n: int)` — the
+                // stack size is a byte count; a non-int word would be used as
+                // an allocation size (bug: unchecked boundary)
+                let sts = self.r.get(st).clone();
+                if self.int_info(st).is_none() && !matches!(sts, Ty::Unit) {
+                    let got = self.surface_name(&sts);
+                    self.err_diff(pos, "fiber.create_with stack size", "int", &got);
+                }
                 fw.op(&format!(
                     "    {} = func.call @{}({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
                     r, sym, fv, iv, sv, eref
@@ -252,8 +260,20 @@ impl ModEmitter {
         (r, ret_t)
     }
 
-    pub(crate) fn emit_fiber_error(&mut self, fw: &mut FnWalk, marg: &Expr) -> (String, TyId) {
-        let (mv, _mt) = self.emit_expr(fw, marg);
+    pub(crate) fn emit_fiber_error(
+        &mut self,
+        fw: &mut FnWalk,
+        marg: &Expr,
+        pos: &Pos,
+    ) -> (String, TyId) {
+        let (mv, mt) = self.emit_expr(fw, marg);
+        // book ch27 §27.1: `fiber.error(msg: str) -> unit`; a non-`str`
+        // message would be printed as a pointer word (bug: unchecked boundary)
+        let mts = self.r.get(mt).clone();
+        if !self.is_str(mt) && !matches!(mts, Ty::Unit) {
+            let got = self.surface_name(&mts);
+            self.err_diff(pos, "fiber.error message", "str", &got);
+        }
         // transfer an owning +1 on the message to the runtime (it prints then
         // releases), so the skipped caller frame cannot leak the value
         let owned = if fw.rc_consume(&mv) {

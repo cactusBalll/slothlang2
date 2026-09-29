@@ -353,25 +353,11 @@ pub(crate) fn walk_ids_stmt(
         }
         StmtNode::Assign { target, value } => {
             walk_ids_expr(value, push_use, decls);
-            for seg in target {
-                if let PathSeg::Name(n) = seg {
-                    push_use(n);
-                }
-                if let PathSeg::Index(e) = seg {
-                    walk_ids_expr(e, push_use, decls);
-                }
-            }
+            walk_assign_target(target, push_use, decls);
         }
         StmtNode::AssignOp { target, value, .. } => {
             walk_ids_expr(value, push_use, decls);
-            for seg in target {
-                if let PathSeg::Name(n) = seg {
-                    push_use(n);
-                }
-                if let PathSeg::Index(e) = seg {
-                    walk_ids_expr(e, push_use, decls);
-                }
-            }
+            walk_assign_target(target, push_use, decls);
         }
         StmtNode::While { cond, body } => {
             walk_ids_expr(cond, push_use, decls);
@@ -397,6 +383,24 @@ pub(crate) fn walk_ids_stmt(
             for st in ss {
                 walk_ids_stmt(st, push_use, decls);
             }
+        }
+    }
+}
+
+/// an assignment target path `[Name(root), Name(field)?, Index(..)…]`: only the
+/// root `Name` is a variable use — later `Name` segments are member names (not
+/// captures), while every `Index` expression is a real use.
+fn walk_assign_target(
+    target: &[PathSeg],
+    push_use: &mut dyn FnMut(&String),
+    decls: &mut std::collections::HashSet<String>,
+) {
+    if let Some(PathSeg::Name(n)) = target.first() {
+        push_use(n);
+    }
+    for seg in target.iter().skip(1) {
+        if let PathSeg::Index(e) = seg {
+            walk_ids_expr(e, push_use, decls);
         }
     }
 }

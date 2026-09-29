@@ -26,7 +26,7 @@ pub extern "C" fn sloth_extern_tok_new() -> *mut libc::c_void {
 pub extern "C" fn sloth_extern_tok_val(t: *const libc::c_void) -> i64 {
     if t.is_null() {
         eprintln!("sloth panic: unreachable opaque token");
-        std::process::exit(1);
+        crate::panics::exit_now(1);
     }
     unsafe { *(t as *const i64) }
 }

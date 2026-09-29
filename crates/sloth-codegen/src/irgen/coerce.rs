@@ -340,3 +340,316 @@ impl ModEmitter {
         (r, any)
     }
 }
+
+// ---- integer width coercions (emission side; predicates live in sem/types) ----
+
+impl ModEmitter {
+    /// convert an integer word to an f64 word, choosing unsigned promotion
+    /// for `uint` (whose bit pattern reads negative as i64)
+    pub(crate) fn int_to_f64_word(&mut self, fw: &mut FnWalk, v: &str, src: TyId) -> String {
+        if matches!(self.r.get(src), Ty::Int(sloth_frontend::ty::IntKind::U64)) {
+            iw_to_f64_word_u(fw, v)
+        } else {
+            iw_to_f64_word(fw, v)
+        }
+    }
+
+    /// truncate/sign-extend an i64 word to a fixed-width integer surface
+    /// (no-op for `int`/`i64`/`uint64` where the full 64 bits are kept)
+    pub(crate) fn coerce_int_word(&mut self, fw: &mut FnWalk, v: &str, to: TyId) -> String {
+        let (bits, signed) = match self.int_info(to) {
+            Some(x) => x,
+            None => return v.to_string(),
+        };
+        if bits >= 64 {
+            return v.to_string();
+        }
+        if signed {
+            // sign-extend the low `bits`: (v << (64-bits)) >>a (64-bits)
+            let sh = (64 - bits) as i64;
+            let a = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", a, sh));
+            let l = fw.v();
+            fw.op(&format!("    {} = arith.shli {}, {} : i64", l, v, a));
+            let r = fw.v();
+            fw.op(&format!("    {} = arith.shrsi {}, {} : i64", r, l, a));
+            r
+        } else {
+            // zero-extend: mask the low `bits`
+            let mask: i64 = ((1u64 << bits) - 1) as i64;
+            let m = fw.v();
+            fw.op(&format!("    {} = arith.constant {} : i64", m, mask));
+            let r = fw.v();
+            fw.op(&format!("    {} = arith.andi {}, {} : i64", r, v, m));
+            r
+        }
+    }
+}
+
+// ---- closure capture writeback + checked assignment store routes ----
+
+impl ModEmitter {
+    /// write a captured scalar back into the closure frame so the value
+    /// persists across calls (design §10.2; bug A4). Reference captures use
+    /// [`lambda_capture_writeback_ref`] instead (ARC-aware).
+    pub(crate) fn lambda_capture_writeback(&mut self, fw: &mut FnWalk, name: &str, val: &str) {
+        let (env_name, idx) = match fw.lambda_env.as_ref() {
+            Some((e, m)) => match m.get(name) {
+                Some(i) => (e.clone(), *i),
+                None => return,
+            },
+            None => return,
+        };
+        let (a, _t) = match fw.lookup(&env_name) {
+            Some(x) => x,
+            None => return,
+        };
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        let env = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            env, a, z
+        ));
+        let zi = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            zi,
+            enc_i_lit(idx as i64)
+        ));
+        fw.op(&format!(
+            "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+            env, zi, val
+        ));
+    }
+
+    /// ARC-aware reference-capture writeback (bug B1): the frame owns one
+    /// count per reference field (retained when the closure was built), so an
+    /// assignment to a captured reference must retain the new owner for the
+    /// frame, release the field's previous owner, then store. Retain-before-
+    /// release keeps `cap = cap` safe. A miss (not a capture) emits nothing.
+    pub(crate) fn lambda_capture_writeback_ref(&mut self, fw: &mut FnWalk, name: &str, val: &str) {
+        let (env_name, idx) = match fw.lambda_env.as_ref() {
+            Some((e, m)) => match m.get(name) {
+                Some(i) => (e.clone(), *i),
+                None => return,
+            },
+            None => return,
+        };
+        let (a, _t) = match fw.lookup(&env_name) {
+            Some(x) => x,
+            None => return,
+        };
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        let env = fw.v();
+        fw.op(&format!(
+            "    {} = memref.load {}[{}] : memref<1xi64>",
+            env, a, z
+        ));
+        let zi = fw.v();
+        fw.op(&format!(
+            "    {} = arith.constant {} : i64",
+            zi,
+            enc_i_lit(idx as i64)
+        ));
+        // field read has no ARC side effect (raw word); nil is inert
+        let old = fw.v();
+        fw.op(&format!(
+            "    {} = func.call @__sloth_obj_field({}, {}) : (i64, i64) -> i64",
+            old, env, zi
+        ));
+        let rv = self.emit_retain(fw, val);
+        self.emit_release(fw, &old);
+        fw.op(&format!(
+            "    func.call @__sloth_obj_set_field({}, {}, {}) : (i64, i64, i64) -> i64",
+            env, zi, rv
+        ));
+    }
+
+    /// plain-name assignment checked against the declared/inferred surface
+    /// type recorded at declare time (patch #22): float target promotes int
+    /// words; float value into non-float target diagnosed; structurally
+    /// different i64-word surfaces (int/str/bool/class/array/map) diagnosed;
+    /// nil (word 0) accepted into any non-float target.
+    pub(crate) fn check_named_assign(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        dt: TyId,
+        v: &str,
+        vty: TyId,
+        pos: &Pos,
+    ) {
+        // value-optional surfaces (patch 42): wrap bare scalars into boxes,
+        // keep nil (Unit) / already-opt words as they are; `dyn T` surfaces
+        // auto-box builtin values too. The common i64 store path below
+        // releases the old and retains the new owner.
+        let mut v = v.to_string();
+        let mut vty = vty;
+        if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
+        {
+            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
+            v = vc;
+            vty = vtc;
+        }
+        if self.is_float(dt) {
+            let stored = if self.is_float(vty) {
+                v.clone()
+            } else {
+                // int word -> f64 word (slot storage is always the word plane)
+                self.int_to_f64_word(fw, &v, vty)
+            };
+            fw.assign(name, &stored, true);
+            self.lambda_capture_writeback(fw, name, &stored);
+            return;
+        }
+        if self.is_float(vty) && self.opt_inner(dt).is_none() {
+            let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
+            self.err_diff(pos, &format!("assignment to `{}`", name), "float", &dtn);
+            // keep IR parseable: store with the value's own float spelling
+            fw.assign(name, &v, true);
+            self.lambda_capture_writeback(fw, name, &v);
+            return;
+        }
+        let dts = self.r.get(dt).clone();
+        let vts = self.r.get(vty).clone();
+        if !self.surface_compat(&dts, &vts) {
+            let dtn = self.surface_name(&dts);
+            let vtn = self.surface_name(&vts);
+            self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
+        }
+        // rc patch B: release the overwritten word, retain the new owner's
+        // copy (nil = rt no-op; value words are NOT rc-managed under the
+        // de-tag word plane and must store raw). Loop variables are BORROWS
+        // of container elements (patch C): their slot owns no count.
+        // patch 42: transferred call-result words already carry their +1 —
+        // bind them raw instead of retaining a second count
+        if !self.is_ref(dt) {
+            fw.assign(name, &v, false);
+            self.lambda_capture_writeback(fw, name, &v);
+            return;
+        }
+        let xferred = fw.rc_take_xfer(&v);
+        // a borrowed formal's first assignment must NOT release the incoming
+        // caller-owned count (design §9.2/§23.1 rule 3); the slot only becomes
+        // an owner from this assignment on (and is then tracked for scope exit)
+        let borrow_param = fw.params.contains(name) && !fw.param_owned.contains(&name.to_string());
+        match fw.lookup(name) {
+            Some((a, _)) if !fw.loopvars.contains(&name.to_string()) => {
+                if borrow_param {
+                    if xferred {
+                        fw.assign(name, &v, false);
+                    } else if fw.rc_consume(&v) {
+                        // fresh producer: its +1 becomes the slot's ownership
+                        fw.assign(name, &v, false);
+                    } else {
+                        let rv = self.emit_retain(fw, &v);
+                        fw.assign(name, &rv, false);
+                    }
+                    fw.param_owned.insert(name.to_string());
+                    // once owned, the slot must be released at function exit
+                    if let Some(sc) = fw.scope_decls.first_mut() {
+                        sc.insert(name.to_string(), a.clone());
+                    }
+                } else {
+                    let old = self.load_slot(fw, &a);
+                    self.emit_release(fw, &old);
+                    if xferred {
+                        fw.assign(name, &v, false);
+                    } else {
+                        let rv = self.emit_retain(fw, &v);
+                        fw.assign(name, &rv, false);
+                    }
+                }
+            }
+            _ => {
+                fw.assign(name, &v, false);
+            }
+        }
+        // reference captures persist across calls too (bug B1): update the
+        // closure frame's owned field with the new handle (ARC-aware); no-op
+        // when `name` is not a capture
+        self.lambda_capture_writeback_ref(fw, name, &v);
+    }
+
+    /// store a tagged word into a module-level global cell
+    pub(crate) fn store_global(&self, fw: &mut FnWalk, gsym: &str, dt: TyId, val: &str) {
+        let mty = memref_cell_ty(self, dt);
+        let g = fw.v();
+        fw.op(&format!(
+            "    {} = memref.get_global @{} : {}",
+            g, gsym, mty
+        ));
+        let z = fw.v();
+        fw.op(&format!("    {} = arith.constant 0 : index", z));
+        fw.op(&format!("    memref.store {}, {}[{}] : {}", val, g, z, mty));
+    }
+
+    /// plain-name assignment to a module-level global cell: mirrors
+    /// `check_named_assign` (coercion + surface check + rc overwrite) but
+    /// stores through `memref.get_global` instead of a local slot.
+    pub(crate) fn check_global_assign(
+        &mut self,
+        fw: &mut FnWalk,
+        name: &str,
+        gsym: &str,
+        dt: TyId,
+        v: &str,
+        vty: TyId,
+        pos: &Pos,
+    ) {
+        let mut v = v.to_string();
+        let mut vty = vty;
+        if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
+        {
+            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
+            v = vc;
+            vty = vtc;
+        }
+        if self.is_float(dt) {
+            let cv = if self.is_float(vty) {
+                v.clone()
+            } else {
+                self.int_to_f64_word(fw, &v, vty)
+            };
+            self.store_global(fw, gsym, dt, &cv);
+            return;
+        }
+        if self.is_float(vty) && self.opt_inner(dt).is_none() {
+            let dtn = sloth_frontend::ty::ty_name(self.r.get(dt));
+            self.err_diff(pos, &format!("assignment to `{}`", name), "float", &dtn);
+            self.store_global(fw, gsym, dt, &v);
+            return;
+        }
+        // unannotated global (`dt == Unit`) stays word-lenient
+        let dts = self.r.get(dt).clone();
+        if !matches!(dts, Ty::Unit) {
+            let vts = self.r.get(vty).clone();
+            if !self.surface_compat(&dts, &vts) {
+                let dtn = self.surface_name(&dts);
+                let vtn = self.surface_name(&vts);
+                self.err_diff(pos, &format!("assignment to `{}`", name), &dtn, &vtn);
+            }
+        }
+        // rc: read old, retain new (unless ownership transferred), release old,
+        // then store. Retain-before-release keeps `g = g` self-assignment safe.
+        // Value globals are not rc-managed (de-tag): store the raw word.
+        if !self.is_ref(dt) {
+            self.store_global(fw, gsym, dt, &v);
+            return;
+        }
+        let (old, _) = self.emit_global_read(fw, gsym, dt);
+        let stored = if fw.rc_take_xfer(&v) {
+            v.clone()
+        } else {
+            self.emit_retain(fw, &v)
+        };
+        self.emit_release(fw, &old);
+        self.store_global(fw, gsym, dt, &stored);
+    }
+}
