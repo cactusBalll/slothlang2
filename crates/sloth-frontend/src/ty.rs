@@ -119,7 +119,7 @@ pub struct Diag {
     pub msg: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Reg {
     pub types: Vec<Ty>,
     /// cache: key = Ty debug key → TyId, for structural reuse

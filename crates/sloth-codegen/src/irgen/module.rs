@@ -797,31 +797,9 @@ impl ModEmitter {
                 }
             }
         }
-        // 1c) generic-class instances: methods emitted under the T-frame
-        {
-            let insts = self.pending_insts.clone();
-            for (inst, frame) in insts {
-                let meths = match self.classes.get(&inst) {
-                    Some(ci) => ci.methods.clone(),
-                    None => Vec::new(),
-                };
-                self.tp_subst.push(frame);
-                // emit the instance's methods under its *defining* module: the
-                // ctor/method call sites mangle with `cls_mod[inst]`, so the
-                // definition must match (bug M1)
-                let saved_mod = self.cur_mod.clone();
-                self.cur_mod = self
-                    .cls_mod
-                    .get(&inst)
-                    .cloned()
-                    .unwrap_or_else(|| self.name.clone());
-                for (mname, fd) in meths {
-                    self.emit_func(&mname, Some(&inst), &fd, None, false);
-                }
-                self.cur_mod = saved_mod;
-                self.tp_subst.pop();
-            }
-        }
+        // 1c) monomorphic instances: drain the generic fn/class worklists to a
+        // fixed point (eager monomorphization, A1)
+        self.emit_pending_instances();
         // 2) script statements run in entry if no main() was declared
         let has_main = prog
             .decls
@@ -894,8 +872,77 @@ impl ModEmitter {
             self.finish_entry(&mut fw);
             self.cur_frame = saved_frame;
         }
+        // script/top-level statements can themselves trigger instances; drain
+        // the worklists once more so nothing discovered late is left unemitted
+        self.emit_pending_instances();
         let diag = self.diags.clone();
         diag
+    }
+
+    /// Drain the generic-function and generic-class worklists to a fixed point:
+    /// emitting one instance body can discover further instances, which are
+    /// appended to the worklists and picked up by the outer loop. This is the
+    /// eager-monomorphization core (A1): Pass 1 reaches the complete instance
+    /// set here, and Pass 2 replays it from the frozen plan.
+    ///
+    /// Class instances are re-scanned each round: a queued instance whose class
+    /// surface is not registered yet (a Pass-2 plan entry discovered only
+    /// transitively) is retried after the enclosing body registers it, instead
+    /// of being dropped.
+    pub(crate) fn emit_pending_instances(&mut self) {
+        let mut fn_idx = 0usize;
+        let mut cls_done: HashSet<String> = HashSet::new();
+        loop {
+            let mut progress = false;
+            // generic-function instances (append-only; the index is stable)
+            while fn_idx < self.pending_fn_insts.len() {
+                let inst = self.pending_fn_insts[fn_idx].clone();
+                fn_idx += 1;
+                progress = true;
+                self.tp_subst.push(inst.frame.clone());
+                self.tp_mangled.push(inst.mangled.clone());
+                let saved_mod = self.cur_mod.clone();
+                self.cur_mod = inst.module.clone();
+                self.emit_func(&inst.name, None, &inst.fd, None, false);
+                self.cur_mod = saved_mod;
+                self.tp_subst.pop();
+                self.tp_mangled.pop();
+            }
+            // generic-class instances: methods emitted under the T-frame
+            let mut i = 0usize;
+            while i < self.pending_insts.len() {
+                let (inst, frame) = self.pending_insts[i].clone();
+                i += 1;
+                if cls_done.contains(&inst) {
+                    continue;
+                }
+                let meths = match self.classes.get(&inst) {
+                    // not registered yet: retry next round
+                    None => continue,
+                    Some(ci) => ci.methods.clone(),
+                };
+                cls_done.insert(inst.clone());
+                progress = true;
+                self.tp_subst.push(frame);
+                // emit the instance's methods under its *defining* module: the
+                // ctor/method call sites mangle with `cls_mod[inst]`, so the
+                // definition must match (bug M1)
+                let saved_mod = self.cur_mod.clone();
+                self.cur_mod = self
+                    .cls_mod
+                    .get(&inst)
+                    .cloned()
+                    .unwrap_or_else(|| self.name.clone());
+                for (mname, fd) in meths {
+                    self.emit_func(&mname, Some(&inst), &fd, None, false);
+                }
+                self.cur_mod = saved_mod;
+                self.tp_subst.pop();
+            }
+            if !progress {
+                break;
+            }
+        }
     }
 }
 

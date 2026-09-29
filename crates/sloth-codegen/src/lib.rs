@@ -7,6 +7,7 @@ mod dialect;
 pub mod irgen;
 mod jit;
 mod module;
+mod mono;
 pub mod pass;
 pub mod pipeline;
 /// Pass 1 — semantic analysis (inference + checking), separate from irgen.

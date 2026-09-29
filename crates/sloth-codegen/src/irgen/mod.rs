@@ -80,12 +80,14 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     let mut prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     sloth_frontend::ast::assign_ids(&mut prog);
     // Pass 1: semantic analysis (inference + checking); owns diagnostics and
-    // produces the NodeId type side table.
-    let table = crate::sem::analyze_program(&prog, mod_name)?;
+    // produces the NodeId type side table + the monomorphization plan.
+    let sem = crate::sem::analyze_program(&prog, mod_name)?;
     // Pass 2: emission (diagnostics suppressed — Pass 1 already validated).
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = false;
-    me.type_table = table;
+    // adopt Pass 1's type registry and frozen instance set (A1)
+    me.seed_mono_plan(sem.mono);
+    me.type_table = sem.type_table;
     me.emit_module(&prog);
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
@@ -103,9 +105,16 @@ fn build_multimod(
     mods: &[(String, Program, Option<String>, bool)],
     mod_name: &str,
     check_mode: bool,
+    plan: Option<crate::mono::MonoPlan>,
 ) -> ModEmitter {
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = check_mode;
+    // Pass 2 adopts Pass 1's type registry + frozen instance set before any
+    // import is registered, so `TyId`s from the plan resolve during import
+    // typing too (A1).
+    if let Some(p) = plan {
+        me.seed_mono_plan(p);
+    }
     // order-independent devirtualization: index overrides across every module
     // (imports emit method bodies before root classes are registered)
     {
@@ -172,15 +181,19 @@ fn resolve_multimod(
 }
 
 /// Pass 1 for a multi-module program: resolve imports, assemble, analyse,
-/// returning the type side table for Pass 2.
+/// returning the sem products for Pass 2.
 pub fn analyze_multimod_table(
     root_src: &str,
     base_dir: &std::path::Path,
-) -> Result<crate::sem::TypeTable, String> {
+) -> Result<crate::sem::SemOutput, String> {
     let (root, mods) = resolve_multimod(root_src, base_dir)?;
-    let me = build_multimod(&root, &mods, "main", true);
+    let mut me = build_multimod(&root, &mods, "main", true, None);
     if me.diags.is_empty() {
-        Ok(me.type_table)
+        let type_table = std::mem::take(&mut me.type_table);
+        Ok(crate::sem::SemOutput {
+            type_table,
+            mono: me.take_mono_plan(),
+        })
     } else {
         Err(format_diags(&me))
     }
@@ -194,16 +207,20 @@ pub fn analyze_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<()
 pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<String, String> {
     let (root, mods) = resolve_multimod(root_src, base_dir)?;
     // Pass 1
-    let table = {
-        let me = build_multimod(&root, &mods, "main", true);
+    let sem = {
+        let mut me = build_multimod(&root, &mods, "main", true, None);
         if !me.diags.is_empty() {
             return Err(format_diags(&me));
         }
-        me.type_table
+        let type_table = std::mem::take(&mut me.type_table);
+        crate::sem::SemOutput {
+            type_table,
+            mono: me.take_mono_plan(),
+        }
     };
     // Pass 2
-    let mut me = build_multimod(&root, &mods, "main", false);
-    me.type_table = table;
+    let mut me = build_multimod(&root, &mods, "main", false, Some(sem.mono));
+    me.type_table = sem.type_table;
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }

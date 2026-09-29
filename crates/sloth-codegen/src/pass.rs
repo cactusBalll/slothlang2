@@ -44,11 +44,12 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
     let mut prog = sloth_frontend::parser::parse(src).map_err(|e| format!("{:?}", e))?;
     sloth_frontend::ast::assign_ids(&mut prog);
     // Pass 1: semantic analysis owns diagnostics and the NodeId type table.
-    let table = crate::sem::analyze_program(&prog, mod_name)?;
+    let sem = crate::sem::analyze_program(&prog, mod_name)?;
     // Pass 2: emission, consulting the Pass 1 type side table.
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = false;
-    me.type_table = table;
+    me.seed_mono_plan(sem.mono);
+    me.type_table = sem.type_table;
     me.emit_module(&prog);
     let errs = me.diags.clone();
     if !errs.is_empty() {

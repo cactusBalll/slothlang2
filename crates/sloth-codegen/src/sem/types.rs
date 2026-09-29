@@ -242,7 +242,11 @@ impl ModEmitter {
             self.result_insts.insert(inst.clone());
         }
         self.class_frames.insert(inst.clone(), frame.clone());
-        self.pending_insts.push((inst.clone(), frame));
+        // eager worklist (A1): every instance is emitted exactly once, whether
+        // discovered during this pass's walk or loaded from the Pass-1 plan.
+        if self.pending_cls_seen.insert(inst.clone()) {
+            self.pending_insts.push((inst.clone(), frame));
+        }
         self.r.mk(Ty::Named(inst.clone(), a.to_vec()))
     }
 }

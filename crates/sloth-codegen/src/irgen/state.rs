@@ -65,6 +65,13 @@ pub struct ModEmitter {
     pub lamcount: usize,
     /// generic-class instances registered during typing: (inst name, T-frame)
     pub pending_insts: Vec<(String, HashMap<String, TyId>)>,
+    /// eager-monomorphization worklist for generic *function* instances,
+    /// in discovery order; emitted to a fixpoint by `emit_module`
+    pub(crate) pending_fn_insts: Vec<crate::mono::FnInst>,
+    /// dedupe for `pending_fn_insts` by mangled symbol
+    pub(crate) pending_fn_seen: HashSet<String>,
+    /// dedupe for `pending_insts` by instance name (seeded from the Pass-1 plan)
+    pub(crate) pending_cls_seen: HashSet<String>,
     /// next fresh native class id for synthesized instances
     pub native_cls_id: i64,
     /// Result<T,E> instances (builtins `ok(v)`/`err(e)` target them)
@@ -110,8 +117,6 @@ pub struct ModEmitter {
     pub(crate) builtin_bridges: HashMap<String, String>,
     /// mangled instance name forced for the next plan_func/emit_func
     pub(crate) tp_mangled: Vec<String>,
-    /// generic instance cache: base mangled -> concrete word spelling key
-    pub(crate) insts: std::collections::HashMap<String, Vec<String>>,
     /// runtime `typeid` registry: canonical type key -> integer id (monomorphic
     /// non-class reference types; classes/dyn use `ObjInfo.cls_id` instead)
     pub(crate) type_ids: HashMap<String, i64>,
@@ -249,6 +254,9 @@ impl ModEmitter {
             stat_extdecls: 0,
             stat_vtbuilds: 0,
             pending_insts: Vec::new(),
+            pending_fn_insts: Vec::new(),
+            pending_fn_seen: HashSet::new(),
+            pending_cls_seen: HashSet::new(),
             native_cls_id: 0,
             result_insts: std::collections::HashSet::new(),
             extern_types: std::collections::HashSet::new(),
@@ -261,7 +269,6 @@ impl ModEmitter {
             vt_cap: 0,
             tp_subst: Vec::new(),
             tp_mangled: Vec::new(),
-            insts: std::collections::HashMap::new(),
             bridges: HashMap::new(),
             builtin_bridges: HashMap::new(),
             type_ids: HashMap::new(),
@@ -279,6 +286,40 @@ impl ModEmitter {
             type_table: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
+        }
+    }
+}
+
+impl ModEmitter {
+    /// Capture the Pass-1 monomorphization product (A1): the complete instance
+    /// set plus the type registry its `TyId`s live in.
+    pub(crate) fn take_mono_plan(&self) -> crate::mono::MonoPlan {
+        crate::mono::MonoPlan {
+            reg: self.r.clone(),
+            fns: self.pending_fn_insts.clone(),
+            cls: self.pending_insts.clone(),
+        }
+    }
+
+    /// Load the Pass-1 monomorphization plan into Pass 2 (A1).
+    ///
+    /// The type registry is adopted wholesale so every `TyId` recorded in the
+    /// plan — and in the `sem` type side table — resolves correctly even if
+    /// Pass 2 happens to intern a different subset of types. Both frozen
+    /// instance sets are queued for eager emission; the Pass-2 walk re-registers
+    /// the class instances deterministically (same names, ids and frames), and
+    /// the `pending_*_seen` dedupe keeps the worklists free of duplicates.
+    pub(crate) fn seed_mono_plan(&mut self, plan: crate::mono::MonoPlan) {
+        self.r = plan.reg;
+        for inst in &plan.fns {
+            if self.pending_fn_seen.insert(inst.mangled.clone()) {
+                self.pending_fn_insts.push(inst.clone());
+            }
+        }
+        for (inst, frame) in &plan.cls {
+            if self.pending_cls_seen.insert(inst.clone()) {
+                self.pending_insts.push((inst.clone(), frame.clone()));
+            }
         }
     }
 }

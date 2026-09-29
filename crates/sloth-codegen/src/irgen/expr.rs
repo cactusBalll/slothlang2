@@ -11,6 +11,11 @@ use sloth_frontend::ty::{Diag, FnTy, LamMeta, Reg, Ty, TyId};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 
+/// upper bound on the number of live monomorphic instances; a generic whose
+/// instantiation never reaches a fixed point (e.g. `f<T>` calling `f<Box<T>>`)
+/// is rejected rather than looping forever.
+const MONO_INST_CAP: usize = 10_000;
+
 impl ModEmitter {
     /// stmt text of the callee Identifier for diagnostics
     pub(crate) fn init_str2(callee: &Expr) -> String {
@@ -3617,7 +3622,10 @@ impl ModEmitter {
                 }
             }
         }
-        if self.insts.len() > 64 {
+        // recursion guard: a self-referential generic that never reaches a
+        // fixed point would grow the worklist without bound (the old guard keyed
+        // off `insts`, which is never populated, so it never fired).
+        if self.pending_fn_insts.len() + self.pending_insts.len() > MONO_INST_CAP {
             self.err(
                 pos,
                 "generic instantiation too deep (recursion?)".to_string(),
@@ -3629,12 +3637,18 @@ impl ModEmitter {
         let keys: Vec<TyId> = tnames.iter().map(|n| map[n]).collect();
         let base = mangle(&self.cur_mod.clone(), None, name);
         let mangled = format!("{}{}", base, mangle_t(&keys, &self.r));
-        if !self.emitted_names.contains(&mangled) {
-            self.tp_subst.push(map.clone());
-            self.tp_mangled.push(mangled.clone());
-            self.emit_func(name, None, fd, None, false);
-            self.tp_subst.pop();
-            self.tp_mangled.pop();
+        // eager monomorphization (A1): record the instance for the module-level
+        // fixpoint instead of emitting its body inline here. The body is emitted
+        // exactly once, after the walk, from the frozen set — so instances only
+        // reachable *through* another instance are also covered.
+        if self.pending_fn_seen.insert(mangled.clone()) {
+            self.pending_fn_insts.push(crate::mono::FnInst {
+                module: self.cur_mod.clone(),
+                name: name.to_string(),
+                fd: fd.clone(),
+                frame: map.clone(),
+                mangled: mangled.clone(),
+            });
         }
         self.stat_ginsts += 1;
         // instance plan: substitution frame active so T resolves to the bound type
