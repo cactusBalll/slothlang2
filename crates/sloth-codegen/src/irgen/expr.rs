@@ -3553,6 +3553,21 @@ impl ModEmitter {
             fw.op(&format!("    {} = arith.constant 0 : i64", z));
             return (z, self.r.mk(Ty::Unit));
         }
+        // A3: Pass 2 replays the Pass-1 resolution of this call site instead of
+        // re-running shape unification (the emitter no longer infers `T`).
+        if !self.check_mode {
+            if let Some(map) = self.inst_sites.get(&self.site_key(pos)).cloned() {
+                return self.emit_ginst_call(fw, name, fd, argv, pos, map);
+            }
+            // Pass 1 records every generic call site; a miss means the two
+            // passes walked different code. Fall through to inference so release
+            // builds still emit, but surface the bug in debug builds.
+            debug_assert!(
+                false,
+                "generic call site miss: frame={} pos={}:{}",
+                self.cur_frame, pos.line, pos.col
+            );
+        }
         let tnames: Vec<String> = fd.type_params.iter().map(|p| p.name.clone()).collect();
         let mut map: std::collections::HashMap<String, TyId> = std::collections::HashMap::new();
         for (p, (_av, at)) in fd.params.iter().zip(argv.iter()) {
@@ -3632,6 +3647,11 @@ impl ModEmitter {
                     );
                 }
             }
+        }
+        // A3: the substitution is now final (arg-driven + return-hint bindings);
+        // freeze it for this call site so Pass 2 can replay it.
+        if self.check_mode {
+            self.inst_sites.insert(self.site_key(pos), map.clone());
         }
         // recursion guard: a self-referential generic that never reaches a
         // fixed point would grow the worklist without bound (the old guard keyed

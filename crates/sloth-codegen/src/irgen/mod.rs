@@ -85,9 +85,9 @@ pub fn compile_to_ir(src: &str, mod_name: &str) -> Result<String, String> {
     // Pass 2: emission (diagnostics suppressed — Pass 1 already validated).
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = false;
-    // adopt Pass 1's type registry and frozen instance set (A1)
+    // adopt Pass 1's type registry, frozen instance set, and typed tables (A1/A3)
     me.seed_mono_plan(sem.mono);
-    me.type_table = sem.type_table;
+    me.seed_typed(sem.types);
     me.emit_module(&prog);
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
@@ -105,16 +105,16 @@ fn build_multimod(
     mods: &[(String, Program, Option<String>, bool)],
     mod_name: &str,
     check_mode: bool,
-    sem: Option<(crate::mono::MonoPlan, crate::sem::TypeTable)>,
+    sem: Option<(crate::mono::MonoPlan, crate::sem::TypedTables)>,
 ) -> ModEmitter {
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = check_mode;
-    // Pass 2 adopts Pass 1's type registry + frozen instance set + expression
-    // type side table *before* anything is emitted, so `TyId`s from the plan
-    // resolve during import typing and every expression lookup can hit.
-    if let Some((plan, table)) = sem {
+    // Pass 2 adopts Pass 1's type registry + frozen instance set + typed side
+    // tables *before* anything is emitted, so `TyId`s from the plan resolve
+    // during import typing and every expression lookup can hit.
+    if let Some((plan, typed)) = sem {
         me.seed_mono_plan(plan);
-        me.type_table = table;
+        me.seed_typed(typed);
     }
     // order-independent devirtualization: index overrides across every module
     // (imports emit method bodies before root classes are registered)
@@ -190,9 +190,8 @@ pub fn analyze_multimod_table(
     let (root, mods) = resolve_multimod(root_src, base_dir)?;
     let mut me = build_multimod(&root, &mods, "main", true, None);
     if me.diags.is_empty() {
-        let type_table = std::mem::take(&mut me.type_table);
         Ok(crate::sem::SemOutput {
-            type_table,
+            types: me.take_typed_tables(),
             mono: me.take_mono_plan(),
         })
     } else {
@@ -213,21 +212,14 @@ pub fn compile_multimod(root_src: &str, base_dir: &std::path::Path) -> Result<St
         if !me.diags.is_empty() {
             return Err(format_diags(&me));
         }
-        let type_table = std::mem::take(&mut me.type_table);
         crate::sem::SemOutput {
-            type_table,
+            types: me.take_typed_tables(),
             mono: me.take_mono_plan(),
         }
     };
     // Pass 2: hand Pass 1's side table + plan to the assembler so the emitter
     // consumes them from the very first lookup.
-    let mut me = build_multimod(
-        &root,
-        &mods,
-        "main",
-        false,
-        Some((sem.mono, sem.type_table)),
-    );
+    let mut me = build_multimod(&root, &mods, "main", false, Some((sem.mono, sem.types)));
     if !me.diags.is_empty() {
         return Err(format_diags(&me));
     }

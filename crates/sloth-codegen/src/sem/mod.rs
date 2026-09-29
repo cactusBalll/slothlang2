@@ -20,20 +20,17 @@
 //! the body-level inference into a distinct typed-AST traversal is staged.
 
 pub(crate) mod collect;
+pub mod typed;
 pub(crate) mod types;
 
 use crate::irgen::{format_diags, ModEmitter};
 use sloth_frontend::ast::Program;
-use sloth_frontend::ty::TyId;
-use std::collections::HashMap;
+pub use typed::{SiteKey, TypeTable, TypedTables};
 
-/// `(frame, NodeId) -> TyId`, produced by Pass 1 and consumed by Pass 2.
-pub type TypeTable = HashMap<(String, u32), TyId>;
-
-/// The complete product of one Pass-1 run: the expression type side table and
-/// the eager-monomorphization plan.
+/// The complete product of one Pass-1 run: the typed side tables and the
+/// eager-monomorphization plan.
 pub struct SemOutput {
-    pub type_table: TypeTable,
+    pub types: TypedTables,
     pub(crate) mono: crate::mono::MonoPlan,
 }
 
@@ -42,9 +39,8 @@ pub fn analyze_program(prog: &Program, mod_name: &str) -> Result<SemOutput, Stri
     let mut me = ModEmitter::new(mod_name);
     me.emit_module(prog);
     if me.diags.is_empty() {
-        let type_table = std::mem::take(&mut me.type_table);
         Ok(SemOutput {
-            type_table,
+            types: me.take_typed_tables(),
             mono: me.take_mono_plan(),
         })
     } else {

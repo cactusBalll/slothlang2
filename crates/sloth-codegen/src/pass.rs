@@ -49,7 +49,7 @@ pub fn run_src(src: &str, mod_name: &str) -> Result<(), String> {
     let mut me = ModEmitter::new(mod_name);
     me.check_mode = false;
     me.seed_mono_plan(sem.mono);
-    me.type_table = sem.type_table;
+    me.seed_typed(sem.types);
     me.emit_module(&prog);
     let errs = me.diags.clone();
     if !errs.is_empty() {

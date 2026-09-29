@@ -155,6 +155,10 @@ pub struct ModEmitter {
     /// program, so Pass 2 contributes no expression types (a miss is a bug and
     /// is surfaced in debug builds).
     pub(crate) type_table: HashMap<(String, u32), TyId>,
+    /// A3 typed plan: resolved type-argument substitution per generic call
+    /// site, keyed by `(frame, line, col)`. Pass 1 fills it; Pass 2 replays it
+    /// instead of re-running shape/return-type inference.
+    pub(crate) inst_sites: HashMap<(String, usize, usize), HashMap<String, TyId>>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -285,6 +289,7 @@ impl ModEmitter {
             check_mode: true,
             cur_frame: String::new(),
             type_table: HashMap::new(),
+            inst_sites: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -292,6 +297,26 @@ impl ModEmitter {
 }
 
 impl ModEmitter {
+    /// Capture the Pass-1 typed side tables (A3).
+    pub(crate) fn take_typed_tables(&mut self) -> crate::sem::TypedTables {
+        crate::sem::TypedTables {
+            types: std::mem::take(&mut self.type_table),
+            inst_sites: std::mem::take(&mut self.inst_sites),
+        }
+    }
+
+    /// Load the Pass-1 typed side tables into Pass 2 (A3): expression result
+    /// types and generic-call resolutions.
+    pub(crate) fn seed_typed(&mut self, t: crate::sem::TypedTables) {
+        self.type_table = t.types;
+        self.inst_sites = t.inst_sites;
+    }
+
+    /// key of a call site under the frame currently being emitted
+    pub(crate) fn site_key(&self, pos: &Pos) -> crate::sem::SiteKey {
+        (self.cur_frame.clone(), pos.line, pos.col)
+    }
+
     /// Capture the Pass-1 monomorphization product (A1): the complete instance
     /// set plus the type registry its `TyId`s live in.
     pub(crate) fn take_mono_plan(&self) -> crate::mono::MonoPlan {
