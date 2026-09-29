@@ -159,7 +159,13 @@ impl ModEmitter {
 
     /// caller-side coercion of args to Opt(值型) params (patch 42): bare
     /// scalars box, opt/nil words pass through; other pairs unchanged;
-    /// Weak(值型)-typed params (patch 43) wrap their targets too
+    /// Weak(值型)-typed params (patch 43) wrap their targets too.
+    ///
+    /// A3 (batch 7): the *decision* — which argument binds to which declared
+    /// surface — belongs to `sem`. Pass 1 computes it with
+    /// [`ModEmitter::arg_coercion_target`] and freezes it per call site;
+    /// Pass 2 replays the plan and only materialises the coercions (the
+    /// diagnostics below are Pass-1-only, as everywhere else).
     pub(crate) fn coerce_args_to_params(
         &mut self,
         fw: &mut FnWalk,
@@ -171,6 +177,8 @@ impl ModEmitter {
         strict: bool,
     ) -> Vec<String> {
         let n = argv.len().min(params.len());
+        let plan = self.planned_arg_coercions(pos);
+        let mut decided: Vec<Option<TyId>> = Vec::with_capacity(argv.len());
         let mut out: Vec<String> = Vec::with_capacity(argv.len());
         for i in 0..argv.len() {
             if i < n {
@@ -189,46 +197,82 @@ impl ModEmitter {
                     );
                     let z = fw.v();
                     fw.op(&format!("    {} = arith.constant 0 : i64", z));
+                    decided.push(None);
                     out.push(z);
                     continue;
                 }
                 // a value actual into a `dyn T` formal only boxes when the
                 // builtin satisfies T (predefined / method-free)
-                if let Ty::Dyn(tn) = self.r.get(pt).clone() {
-                    if self.value_kind(at).is_some() && !self.value_impls_trait(&tn) {
-                        let got = self.surface_name(self.r.get(at));
-                        self.err_diff(pos, "function argument", &format!("dyn {}", tn), &got);
+                if self.check_mode {
+                    if let Ty::Dyn(tn) = self.r.get(pt).clone() {
+                        if self.value_kind(at).is_some() && !self.value_impls_trait(&tn) {
+                            let got = self.surface_name(self.r.get(at));
+                            self.err_diff(pos, "function argument", &format!("dyn {}", tn), &got);
+                        }
                     }
                 }
-                if self.opt_inner(pt).is_some()
-                    || self.weak_inner(pt).is_some()
-                    || matches!(self.r.get(pt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
-                {
-                    out.push(self.coerce_word_to(fw, &av, at, pt).0);
+                // coercion target: recorded by `sem` in Pass 1, replayed by
+                // Pass 2. Both passes must agree — a divergence would make
+                // the caller's signature disagree with the callee's.
+                let target: Option<TyId> = if self.check_mode {
+                    self.arg_coercion_target(pt)
+                } else {
+                    let replay = plan.as_ref().and_then(|p| p.get(i)).copied();
+                    debug_assert!(
+                        replay.is_some(),
+                        "arg coercion plan miss: frame={} pos={}:{} arg={}",
+                        self.cur_frame,
+                        pos.line,
+                        pos.col,
+                        i
+                    );
+                    if let Some(t) = replay {
+                        // the plan stores either `None` (the word binds
+                        // as-is) or exactly the parameter surface
+                        debug_assert!(
+                            t.is_none() || t == Some(pt),
+                            "arg coercion plan diverged: frame={} pos={}:{} arg={}",
+                            self.cur_frame,
+                            pos.line,
+                            pos.col,
+                            i
+                        );
+                        t
+                    } else {
+                        self.arg_coercion_target(pt)
+                    }
+                };
+                decided.push(target);
+                if let Some(t) = target {
+                    out.push(self.coerce_word_to(fw, &av, at, t).0);
                     continue;
                 }
                 // general declared-surface check (design §2.2): a known actual
                 // surface must be compatible with the declared parameter
                 // surface. `unit` (nil literal / unknown) stays lenient.
-                let pty = self.r.get(pt).clone();
-                let aty = self.r.get(at).clone();
-                // the receiver (`this`) is a raw word at the call ABI and is
-                // never surface-checked
-                if strict
-                    && params[i].0 != "this"
-                    && !matches!(aty, Ty::Unit)
-                    && !matches!(pty, Ty::Unit)
-                    && !self.surface_compat(&pty, &aty)
-                {
-                    let pn = self.surface_name(&pty);
-                    let an = self.surface_name(&aty);
-                    self.err_diff(pos, "function argument", &pn, &an);
+                // Pass 1 owns it; Pass 2 never re-derives the surfaces.
+                if self.check_mode && strict {
+                    let pty = self.r.get(pt).clone();
+                    let aty = self.r.get(at).clone();
+                    // the receiver (`this`) is a raw word at the call ABI and
+                    // is never surface-checked
+                    if params[i].0 != "this"
+                        && !matches!(aty, Ty::Unit)
+                        && !matches!(pty, Ty::Unit)
+                        && !self.surface_compat(&pty, &aty)
+                    {
+                        let pn = self.surface_name(&pty);
+                        let an = self.surface_name(&aty);
+                        self.err_diff(pos, "function argument", &pn, &an);
+                    }
                 }
                 out.push(av);
             } else {
+                decided.push(None);
                 out.push(argv[i].0.clone());
             }
         }
+        self.record_arg_coercions(pos, decided);
         out
     }
 

@@ -44,4 +44,15 @@ pub struct TypedTables {
     /// Pass 2 never re-reads the expected-type hint to decide it (A3,
     /// container-hint family).
     pub store_faces: HashMap<(String, u32), Option<TyId>>,
+    /// call site -> per-argument coercion target (`Some(param surface)` when
+    /// the argument word is boxed/wrapped/narrowed into the parameter,
+    /// `None` when it binds as-is). `sem` decides it once in Pass 1; Pass 2
+    /// replays it instead of re-deriving the gate from the parameter
+    /// surfaces (A3, call-argument family).
+    pub arg_coercions: HashMap<SiteKey, Vec<Option<TyId>>>,
+    /// call site -> post-coercion argument surfaces. These drive the call
+    /// signature (a boxed `float?` argument rides `i64`, not `f64`), so Pass
+    /// 2 replays them rather than re-deriving them from the parameter list
+    /// (A3, call-argument family).
+    pub arg_faces: HashMap<SiteKey, Vec<TyId>>,
 }

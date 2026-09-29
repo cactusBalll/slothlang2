@@ -323,6 +323,22 @@ impl ModEmitter {
             || matches!(self.r.get(face), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
     }
 
+    /// A3 (call-argument family): the declared parameter surface that forces
+    /// a caller-side word coercion for a call argument — value-optional and
+    /// `Weak` surfaces box/wrap, `dyn`/`any` box into the runtime-typed
+    /// surface, fixed-width integers narrow. `None` = the word binds to the
+    /// parameter unchanged.
+    pub(crate) fn arg_coercion_target(&self, pt: TyId) -> Option<TyId> {
+        if self.opt_inner(pt).is_some()
+            || self.weak_inner(pt).is_some()
+            || matches!(self.r.get(pt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
+        {
+            Some(pt)
+        } else {
+            None
+        }
+    }
+
     /// Send marker (design §4.2, first cut): a value is shareable across a
     /// thread boundary unless it contains a thread-confined `Fiber<Y>`.
     /// Shallow structural walk (class internals are not traversed — see

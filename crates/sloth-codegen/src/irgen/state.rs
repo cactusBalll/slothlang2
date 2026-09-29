@@ -167,6 +167,13 @@ pub struct ModEmitter {
     /// store-face coercion applies. Pass 2 replays it instead of re-reading
     /// the expected-type hint stack.
     pub(crate) store_faces: HashMap<(String, u32), Option<TyId>>,
+    /// A3 call-argument plan: per-argument coercion target of a call site,
+    /// keyed by `(frame, line, col)`; `None` entry = the word binds as-is.
+    /// Pass 1 records it in `coerce_args_to_params`, Pass 2 replays it.
+    pub(crate) arg_coercions: HashMap<crate::sem::SiteKey, Vec<Option<TyId>>>,
+    /// A3 call-argument plan: post-coercion argument surfaces of a call site
+    /// (they drive the emitted call signature), keyed like `arg_coercions`.
+    pub(crate) arg_faces: HashMap<crate::sem::SiteKey, Vec<TyId>>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -300,6 +307,8 @@ impl ModEmitter {
             inst_sites: HashMap::new(),
             int_ops: HashMap::new(),
             store_faces: HashMap::new(),
+            arg_coercions: HashMap::new(),
+            arg_faces: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -314,6 +323,8 @@ impl ModEmitter {
             inst_sites: std::mem::take(&mut self.inst_sites),
             int_ops: std::mem::take(&mut self.int_ops),
             store_faces: std::mem::take(&mut self.store_faces),
+            arg_coercions: std::mem::take(&mut self.arg_coercions),
+            arg_faces: std::mem::take(&mut self.arg_faces),
         }
     }
 
@@ -324,6 +335,8 @@ impl ModEmitter {
         self.inst_sites = t.inst_sites;
         self.int_ops = t.int_ops;
         self.store_faces = t.store_faces;
+        self.arg_coercions = t.arg_coercions;
+        self.arg_faces = t.arg_faces;
     }
 
     /// A3 (container-hint family): the store face `sem` chose for the
@@ -342,6 +355,71 @@ impl ModEmitter {
     pub(crate) fn record_store_face(&mut self, id: u32, face: Option<TyId>) {
         if self.check_mode && id != 0 {
             self.store_faces.insert((self.cur_frame.clone(), id), face);
+        }
+    }
+
+    /// A3 (call-argument family): the per-argument coercion plan `sem`
+    /// recorded for the call site at `pos`; `None` means Pass 1 has no plan
+    /// for it (Pass 1 itself, or a miss — reported by the caller).
+    pub(crate) fn planned_arg_coercions(&self, pos: &Pos) -> Option<Vec<Option<TyId>>> {
+        if self.check_mode {
+            return None;
+        }
+        self.arg_coercions.get(&self.site_key(pos)).cloned()
+    }
+
+    /// A3: freeze the per-argument coercion decision for the call site at
+    /// `pos` (Pass 1 only). A site may be reached twice in one pass (a
+    /// vtable attempt falling back to a direct call): the first plan wins,
+    /// and a *conflicting* second plan means the two routes disagree about
+    /// the parameter surfaces — a bug, not a tie to break.
+    pub(crate) fn record_arg_coercions(&mut self, pos: &Pos, plan: Vec<Option<TyId>>) {
+        if !self.check_mode {
+            return;
+        }
+        let key = self.site_key(pos);
+        match self.arg_coercions.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &plan,
+                "conflicting arg coercion plan at {:?}: {:?} vs {:?}",
+                key,
+                prev,
+                plan
+            ),
+            None => {
+                self.arg_coercions.insert(key, plan);
+            }
+        }
+    }
+
+    /// A3: the post-coercion argument surfaces `sem` recorded for the call
+    /// site at `pos` (Pass 2 only).
+    pub(crate) fn planned_arg_faces(&self, pos: &Pos) -> Option<Vec<TyId>> {
+        if self.check_mode {
+            return None;
+        }
+        self.arg_faces.get(&self.site_key(pos)).cloned()
+    }
+
+    /// A3: freeze the post-coercion argument surfaces of the call site at
+    /// `pos` (Pass 1 only; see [`Self::record_arg_coercions`] for the
+    /// write-once rule).
+    pub(crate) fn record_arg_faces(&mut self, pos: &Pos, faces: Vec<TyId>) {
+        if !self.check_mode {
+            return;
+        }
+        let key = self.site_key(pos);
+        match self.arg_faces.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &faces,
+                "conflicting arg faces at {:?}: {:?} vs {:?}",
+                key,
+                prev,
+                faces
+            ),
+            None => {
+                self.arg_faces.insert(key, faces);
+            }
         }
     }
 

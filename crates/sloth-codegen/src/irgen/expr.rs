@@ -3226,18 +3226,45 @@ impl ModEmitter {
                     None => &plan.params,
                 };
                 let vals = self.coerce_args_to_params(fw, &argv, check_params, pos, !fd.is_extern);
+                // A3 (batch 7): the post-coercion argument surfaces drive the
+                // emitted signature (a boxed `float?` argument rides `i64`,
+                // not `f64`), so `sem` decides them once in Pass 1 and
+                // Pass 2 replays the recorded faces.
+                let faces: Vec<TyId> = match self.planned_arg_faces(pos) {
+                    Some(f) if f.len() == argv.len() => f,
+                    other => {
+                        debug_assert!(
+                            self.check_mode,
+                            "arg face plan {}: frame={} pos={}:{}",
+                            match other {
+                                Some(_) => "too short",
+                                None => "miss",
+                            },
+                            self.cur_frame,
+                            pos.line,
+                            pos.col
+                        );
+                        let f: Vec<TyId> = argv
+                            .iter()
+                            .enumerate()
+                            .map(|(i, x)| {
+                                if i < plan.params.len()
+                                    && (self.opt_inner(plan.params[i].1).is_some()
+                                        || matches!(self.r.get(plan.params[i].1), Ty::Any))
+                                {
+                                    plan.params[i].1
+                                } else {
+                                    x.1
+                                }
+                            })
+                            .collect();
+                        self.record_arg_faces(pos, f.clone());
+                        f
+                    }
+                };
                 argv.iter()
                     .enumerate()
-                    .map(|(i, x)| {
-                        if i < plan.params.len()
-                            && (self.opt_inner(plan.params[i].1).is_some()
-                                || matches!(self.r.get(plan.params[i].1), Ty::Any))
-                        {
-                            (vals[i].clone(), plan.params[i].1)
-                        } else {
-                            (vals[i].clone(), x.1)
-                        }
-                    })
+                    .map(|(i, _)| (vals[i].clone(), faces[i]))
                     .collect()
             };
             let argv = argv_c;
