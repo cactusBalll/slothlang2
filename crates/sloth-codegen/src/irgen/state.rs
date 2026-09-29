@@ -349,6 +349,15 @@ impl ModEmitter {
         (self.cur_frame.clone(), pos.line, pos.col)
     }
 
+    /// A3: replay the Pass-1 expression type of `id` in Pass 2 (no-op in Pass 1
+    /// and for synthetic id-less nodes).
+    pub(crate) fn planned_expr_ty(&self, id: u32) -> Option<TyId> {
+        if self.check_mode || id == 0 {
+            return None;
+        }
+        self.type_table.get(&(self.cur_frame.clone(), id)).copied()
+    }
+
     /// Capture the Pass-1 monomorphization product (A1): the complete instance
     /// set plus the type registry its `TyId`s live in.
     pub(crate) fn take_mono_plan(&self) -> crate::mono::MonoPlan {

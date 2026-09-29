@@ -1759,7 +1759,9 @@ impl ModEmitter {
                 // element-wise; otherwise unrelated families (int/bool/str/
                 // unrelated classes) are a compile error rather than a silent
                 // `Array<int>` fallback that stores raw pointers (bug B5).
-                if !ets.is_empty() && !anyf {
+                // Pass 1 owns the check; Pass 2 skips it (the result type is
+                // replayed above).
+                if self.check_mode && !ets.is_empty() && !anyf {
                     let first = ets[0];
                     let allsame = ets.iter().all(|t| self.r.get(*t) == self.r.get(first));
                     if !allsame {
@@ -1835,7 +1837,10 @@ impl ModEmitter {
                         arr, zi, vv
                     ));
                 }
-                let ty = if ets.is_empty() {
+                let ty = if let Some(t) = self.planned_expr_ty(e.id) {
+                    // A3: Pass 2 replays the literal's element surface
+                    t
+                } else if ets.is_empty() {
                     // empty literal: adopt the expected element type from the
                     // surrounding annotation (`var a: Array<float> = []`)
                     let ei = hint_el.unwrap_or_else(|| self.r.mk(Ty::I64));
@@ -2009,8 +2014,9 @@ impl ModEmitter {
                 let vts: Vec<TyId> = vevs.iter().map(|x| x.1).collect();
                 // value homogeneity (book ch13 §13.1): mirrored from the list
                 // literal — unrelated value families are a compile error, not a
-                // silent `int` fallback that stores raw pointers (bug B5)
-                if !vevs.is_empty() && !anyf {
+                // silent `int` fallback that stores raw pointers (bug B5).
+                // Pass 1 owns the check; Pass 2 skips it.
+                if self.check_mode && !vevs.is_empty() && !anyf {
                     let first = vevs[0].1;
                     let allsame = vevs.iter().all(|y| self.r.get(y.1) == self.r.get(first));
                     if !allsame {
@@ -2091,7 +2097,9 @@ impl ModEmitter {
                     "    {} = func.call @__sloth_map_new({}) : (i64) -> i64",
                     m, kv0
                 ));
-                let mt2 = self.r.mk(Ty::Map(kty, vty));
+                let mt2 = self
+                    .planned_expr_ty(e.id)
+                    .unwrap_or_else(|| self.r.mk(Ty::Map(kty, vty)));
                 self.dangling_producer(fw, &m, mt2);
                 for (kev, vev) in kevs.iter().zip(vevs.iter()) {
                     // object keys route the monomorphized hash() into the map
