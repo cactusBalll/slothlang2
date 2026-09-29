@@ -30,4 +30,8 @@ pub struct TypedTables {
     /// site. Pass 2 replays this instead of re-running shape unification and
     /// return-type inference.
     pub inst_sites: HashMap<SiteKey, HashMap<String, TyId>>,
+    /// `(frame, NodeId) -> unified integer surface` for integer arithmetic and
+    /// comparison nodes. Pass 2 replays the width chosen by `unify_int` rather
+    /// than re-deriving it (A3, arithmetic family).
+    pub int_ops: HashMap<(String, u32), TyId>,
 }

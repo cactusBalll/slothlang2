@@ -159,6 +159,9 @@ pub struct ModEmitter {
     /// site, keyed by `(frame, line, col)`. Pass 1 fills it; Pass 2 replays it
     /// instead of re-running shape/return-type inference.
     pub(crate) inst_sites: HashMap<(String, usize, usize), HashMap<String, TyId>>,
+    /// A3 arithmetic plan: unified integer surface of integer arithmetic /
+    /// comparison nodes, keyed by `(frame, NodeId)`.
+    pub(crate) int_ops: HashMap<(String, u32), TyId>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -290,6 +293,7 @@ impl ModEmitter {
             cur_frame: String::new(),
             type_table: HashMap::new(),
             inst_sites: HashMap::new(),
+            int_ops: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -302,6 +306,7 @@ impl ModEmitter {
         crate::sem::TypedTables {
             types: std::mem::take(&mut self.type_table),
             inst_sites: std::mem::take(&mut self.inst_sites),
+            int_ops: std::mem::take(&mut self.int_ops),
         }
     }
 
@@ -310,6 +315,33 @@ impl ModEmitter {
     pub(crate) fn seed_typed(&mut self, t: crate::sem::TypedTables) {
         self.type_table = t.types;
         self.inst_sites = t.inst_sites;
+        self.int_ops = t.int_ops;
+    }
+
+    /// A3: unified integer surface of an integer arithmetic/comparison node.
+    /// Pass 1 computes it with `unify_int` and records it; Pass 2 replays the
+    /// recorded value instead of re-deriving the width.
+    pub(crate) fn planned_int_width(
+        &mut self,
+        id: u32,
+        at: TyId,
+        lit_a: bool,
+        bt: TyId,
+        lit_b: bool,
+    ) -> Option<TyId> {
+        let key = (self.cur_frame.clone(), id);
+        if !self.check_mode && id != 0 {
+            if let Some(&t) = self.int_ops.get(&key) {
+                return Some(t);
+            }
+        }
+        let t = self.unify_int(at, lit_a, bt, lit_b);
+        if self.check_mode && id != 0 {
+            if let Some(t) = t {
+                self.int_ops.insert(key, t);
+            }
+        }
+        t
     }
 
     /// key of a call site under the frame currently being emitted

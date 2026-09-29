@@ -874,7 +874,8 @@ impl ModEmitter {
                 // operands to that width, then compute signed/unsigned per the
                 // shared surface and truncate the result back.
                 let rty = if self.is_int_like(at) && self.is_int_like(bt) {
-                    match self.unify_int(at, lit_l, bt, lit_r) {
+                    // A3: Pass 2 replays the Pass-1 width choice.
+                    match self.planned_int_width(e.id, at, lit_l, bt, lit_r) {
                         Some(t) => t,
                         None => {
                             let an = sloth_frontend::ty::ty_name(self.r.get(at));
@@ -1030,7 +1031,7 @@ impl ModEmitter {
                 let (b, bt) = self.unwrap_opt_word(fw, &b, bt);
                 let lit_l = matches!(lhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
                 let lit_r = matches!(rhs.node, ExprNode::Int(_) | ExprNode::UInt(_));
-                return self.emit_binop(fw, op, a, b, at, bt, lit_l, lit_r, &e.pos);
+                return self.emit_binop(fw, op, a, b, at, bt, lit_l, lit_r, &e.pos, e.id);
             }
             ExprNode::Un { op, expr } => {
                 let (v, t) = self.emit_expr(fw, expr);
@@ -1218,6 +1219,7 @@ impl ModEmitter {
         lit_l: bool,
         lit_r: bool,
         pos: &Pos,
+        site: u32,
     ) -> (String, TyId) {
         let cmp_ty_id = self.r.mk(Ty::Bool);
         // operator overload: comparison family dispatches __gt__/__eq__ etc
@@ -1381,7 +1383,7 @@ impl ModEmitter {
             // fixed width) and compare at the shared width with signed vs
             // unsigned predicates
             let (a, b, uns) = if self.is_int_like(at) && self.is_int_like(bt) {
-                match self.unify_int(at, lit_l, bt, lit_r) {
+                match self.planned_int_width(site, at, lit_l, bt, lit_r) {
                     Some(t) => (
                         self.coerce_int_word(fw, &a, t),
                         self.coerce_int_word(fw, &b, t),
