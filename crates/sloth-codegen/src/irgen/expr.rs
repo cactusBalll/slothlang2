@@ -1932,25 +1932,36 @@ impl ModEmitter {
                 } else {
                     None
                 };
-                let kty = if !kvm.is_empty() {
-                    // homogeneous surface: keep the exact key type so
-                    // `Map<bool,_>` / `Map<int8,_>` / `Map<range,_>` survive
-                    // (bug C3/E1); mixed widths collapse to i64
-                    if kvm.iter().all(|t| *t == kvm[0]) {
-                        kvm[0]
-                    } else if anyk_str {
-                        self.r.mk(Ty::Str)
-                    } else if anyk_float {
-                        self.r.mk(Ty::F64)
-                    } else if anyk_obj {
-                        kvm[0]
-                    } else {
-                        self.r.mk(Ty::I64)
+                // A3: Pass 2 replays the resolved key/value surfaces instead of
+                // re-deriving them (key-family collapse + value LUB).
+                let planned_kv =
+                    self.planned_expr_ty(e.id)
+                        .and_then(|t| match self.r.get(t).clone() {
+                            Ty::Map(k, v) => Some((k, v)),
+                            _ => None,
+                        });
+                let kty = match planned_kv {
+                    Some((k, _)) => k,
+                    None if !kvm.is_empty() => {
+                        // homogeneous surface: keep the exact key type so
+                        // `Map<bool,_>` / `Map<int8,_>` / `Map<range,_>` survive
+                        // (bug C3/E1); mixed widths collapse to i64
+                        if kvm.iter().all(|t| *t == kvm[0]) {
+                            kvm[0]
+                        } else if anyk_str {
+                            self.r.mk(Ty::Str)
+                        } else if anyk_float {
+                            self.r.mk(Ty::F64)
+                        } else if anyk_obj {
+                            kvm[0]
+                        } else {
+                            self.r.mk(Ty::I64)
+                        }
                     }
-                } else if let Some((k, _)) = hint_kv {
-                    k
-                } else {
-                    self.r.mk(Ty::I64)
+                    None => match hint_kv {
+                        Some((k, _)) => k,
+                        None => self.r.mk(Ty::I64),
+                    },
                 };
                 // declared `Map<_, T?>`: mirror the list-literal optional
                 // element rule (reference optionals included) — bug B9/OPT4
@@ -2038,19 +2049,22 @@ impl ModEmitter {
                         }
                     }
                 }
-                let vty = match vevs.first() {
-                    Some(x) if vevs.iter().all(|y| self.r.get(y.1) == self.r.get(x.1)) => x.1,
-                    _ => {
-                        if anyf {
-                            self.r.mk(Ty::F64)
-                        } else if let Some(n) = self.named_lub(&vts) {
-                            self.r.mk(Ty::Named(n, Vec::new()))
-                        } else if let Some((_, v)) = hint_kv {
-                            v
-                        } else {
-                            self.r.mk(Ty::I64)
+                let vty = match planned_kv {
+                    Some((_, v)) => v,
+                    None => match vevs.first() {
+                        Some(x) if vevs.iter().all(|y| self.r.get(y.1) == self.r.get(x.1)) => x.1,
+                        _ => {
+                            if anyf {
+                                self.r.mk(Ty::F64)
+                            } else if let Some(n) = self.named_lub(&vts) {
+                                self.r.mk(Ty::Named(n, Vec::new()))
+                            } else if let Some((_, v)) = hint_kv {
+                                v
+                            } else {
+                                self.r.mk(Ty::I64)
+                            }
                         }
-                    }
+                    },
                 };
                 // patch 42: Opt(值型) value family unification (same rule as
                 // list literals: bare scalars box under the Opt surface)
