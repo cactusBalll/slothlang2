@@ -1678,18 +1678,39 @@ impl ModEmitter {
                     Some(Ty::Array(e)) => Some(e),
                     _ => None,
                 };
-                if let Some(he) = hint_el0 {
-                    if matches!(self.r.get(he), Ty::Opt(_)) {
+                // A3: Pass 2 replays the Opt-family element coercion decided in
+                // Pass 1 (the two blocks below). The planned element surface is
+                // `Opt(_)` exactly when one of them applied, so a direct
+                // re-coercion reproduces the result without re-deriving it.
+                let planned_el = self
+                    .planned_expr_ty(e.id)
+                    .and_then(|t| match self.r.get(t) {
+                        Ty::Array(e) => Some(*e),
+                        _ => None,
+                    });
+                if let Some(pe) = planned_el {
+                    if matches!(self.r.get(pe), Ty::Opt(_)) {
                         for i in 0..evs.len() {
-                            let et = self.r.get(ets[i]).clone();
-                            if matches!(et, Ty::Unit) {
-                                ets[i] = he;
-                            } else if self.opt_inner(he).is_some() {
-                                let (c2, t2) = self.coerce_into_opt(fw, &evs[i], ets[i], he);
-                                evs[i] = c2;
-                                ets[i] = t2;
-                            } else {
-                                ets[i] = he;
+                            let (c2, t2) = self.coerce_into_opt(fw, &evs[i], ets[i], pe);
+                            evs[i] = c2;
+                            ets[i] = t2;
+                        }
+                    }
+                }
+                if planned_el.is_none() {
+                    if let Some(he) = hint_el0 {
+                        if matches!(self.r.get(he), Ty::Opt(_)) {
+                            for i in 0..evs.len() {
+                                let et = self.r.get(ets[i]).clone();
+                                if matches!(et, Ty::Unit) {
+                                    ets[i] = he;
+                                } else if self.opt_inner(he).is_some() {
+                                    let (c2, t2) = self.coerce_into_opt(fw, &evs[i], ets[i], he);
+                                    evs[i] = c2;
+                                    ets[i] = t2;
+                                } else {
+                                    ets[i] = he;
+                                }
                             }
                         }
                     }
@@ -1712,7 +1733,7 @@ impl ModEmitter {
                 }
                 // patch 42: a single Opt(值型) element family unifies the
                 // whole literal under the Opt surface; bare scalars box up
-                if !anyf {
+                if planned_el.is_none() && !anyf {
                     let inner = ets.iter().find_map(|t| self.opt_inner(*t).map(|x| x.0));
                     if let Some(inner) = inner {
                         let ik = self.r.get(inner).clone();
@@ -1963,24 +1984,39 @@ impl ModEmitter {
                         None => self.r.mk(Ty::I64),
                     },
                 };
+                // A3: Pass 2 replays the Opt-family value coercion decided in
+                // Pass 1 (the two blocks below). The planned value surface is
+                // `Opt(_)` exactly when one of them applied.
+                let planned_pv = planned_kv.map(|(_, v)| v);
+                if let Some(pv) = planned_pv {
+                    if matches!(self.r.get(pv), Ty::Opt(_)) {
+                        for x in vevs.iter_mut() {
+                            let (c2, t2) = self.coerce_into_opt(fw, &x.0, x.1, pv);
+                            x.0 = c2;
+                            x.1 = t2;
+                        }
+                    }
+                }
                 // declared `Map<_, T?>`: mirror the list-literal optional
                 // element rule (reference optionals included) — bug B9/OPT4
                 let hint_v0 = match self.exp_ret.last().copied().map(|t| self.r.get(t).clone()) {
                     Some(Ty::Map(_, v)) => Some(v),
                     _ => None,
                 };
-                if let Some(hv) = hint_v0 {
-                    if matches!(self.r.get(hv), Ty::Opt(_)) {
-                        for x in vevs.iter_mut() {
-                            let et = self.r.get(x.1).clone();
-                            if matches!(et, Ty::Unit) {
-                                x.1 = hv;
-                            } else if self.opt_inner(hv).is_some() {
-                                let (c2, t2) = self.coerce_into_opt(fw, &x.0, x.1, hv);
-                                x.0 = c2;
-                                x.1 = t2;
-                            } else {
-                                x.1 = hv;
+                if planned_pv.is_none() {
+                    if let Some(hv) = hint_v0 {
+                        if matches!(self.r.get(hv), Ty::Opt(_)) {
+                            for x in vevs.iter_mut() {
+                                let et = self.r.get(x.1).clone();
+                                if matches!(et, Ty::Unit) {
+                                    x.1 = hv;
+                                } else if self.opt_inner(hv).is_some() {
+                                    let (c2, t2) = self.coerce_into_opt(fw, &x.0, x.1, hv);
+                                    x.0 = c2;
+                                    x.1 = t2;
+                                } else {
+                                    x.1 = hv;
+                                }
                             }
                         }
                     }
@@ -2067,7 +2103,10 @@ impl ModEmitter {
                     },
                 };
                 // patch 42: Opt(值型) value family unification (same rule as
-                // list literals: bare scalars box under the Opt surface)
+                // list literals: bare scalars box under the Opt surface).
+                // NOTE: not gated on `planned_pv` — the map's recorded value
+                // surface is resolved *before* this block, so it may not be
+                // `Opt` even when this block applies.
                 if !anyf {
                     let inner = vevs.iter().find_map(|x| self.opt_inner(x.1).map(|z| z.0));
                     if let Some(inner) = inner {
