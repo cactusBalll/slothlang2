@@ -1659,17 +1659,25 @@ impl ModEmitter {
                         ets.push(t);
                         continue;
                     }
-                    let exp = elem_expected.unwrap_or_else(|| self.r.mk(Ty::Unit));
-                    // Scope the outer element surface to the element itself:
-                    // without this a nested array literal `[[1]]` typed
+                    // A3 (expected-hint family): the element hint is pushed
+                    // in Pass 1 only — Pass 2 replays the recorded literal
+                    // plan (`literal_ctors` / `store_faces` / `planned_expr_ty`)
+                    // and never reads the stack. Scope the outer element
+                    // surface to the element itself in Pass 1: without this a
+                    // nested array literal `[[1]]` typed
                     // `Array<Array<int>?>` saw the *outer* `Array` annotation as
                     // its own element hint, mis-tagged its int element as
                     // `Array<int>?` and retained the raw int as a handle
                     // (rc subtract overflow; probe p_optmatrix).
-                    self.exp_ret.push(exp);
+                    if self.check_mode {
+                        let exp = elem_expected.unwrap_or_else(|| self.r.mk(Ty::Unit));
+                        self.exp_ret.push(exp);
+                    }
                     let diag_before = self.diags.len();
                     let (v, t) = self.emit_expr(fw, x);
-                    self.exp_ret.pop();
+                    if self.check_mode {
+                        self.exp_ret.pop();
+                    }
                     // a `unit` element has no word (probe containers/x7)
                     let report = self.diags.len() == diag_before;
                     let v = self.value_or_nil_word(fw, v, t, &x.pos, report);
@@ -3771,8 +3779,11 @@ impl ModEmitter {
     ) -> (String, TyId) {
         let tnames: Vec<String> = fd.type_params.iter().map(|p| p.name.clone()).collect();
         // unbound type params: infer from the expected return type hint (let
-        // annotation / assignment target surface — patch #38)
-        if tnames.iter().any(|n| !map.contains_key(n)) {
+        // annotation / assignment target surface — patch #38).
+        // A3 (expected-hint family): the hint is a Pass-1 input — Pass 2
+        // replays the substitution frozen by Pass 1 (`inst_sites`), so it
+        // never reads the ambient expectation.
+        if self.check_mode && tnames.iter().any(|n| !map.contains_key(n)) {
             if let Some(&hint) = self.exp_ret.last() {
                 if !matches!(self.r.get(hint), Ty::Unit) {
                     let pat = self.shape_of_retched(fd.ret.clone(), &tnames);

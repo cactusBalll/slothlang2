@@ -45,6 +45,12 @@ impl ModEmitter {
                 if let Some(te) = ty {
                     self.check_trait_type(te, &s.pos);
                 }
+                // A3 (let-initializer family): resolve the declared surface
+                // before the initializer is emitted — interning the annotation
+                // registers its generic class instances (`Result<T, E>` …),
+                // which the initializer's lowering needs. Pass 1 additionally
+                // feeds the surface to the expected-hint stack.
+                let decl = ty.as_ref().map(|te| self.ty_of(te));
                 // typed(s) ok()/err() ctor fast-path: Result init (annotation
                 // provides the T/E binding; absent annotation diagnosed)
                 let pre: Option<(String, TyId)> = match &init.node {
@@ -89,11 +95,17 @@ impl ModEmitter {
                     Some((w, tt)) => (w.clone(), *tt),
                     None => {
                         // expected-type hint from the declared annotation
-                        // (return-driven generic inference, patch #38)
-                        let hint = ty.as_ref().map(|te| self.ty_of(te));
-                        self.exp_ret.push(hint.unwrap_or(self.r.mk(Ty::Unit)));
+                        // (return-driven generic inference, patch #38).
+                        // A3 (expected-hint family): the hint stack is
+                        // Pass-1 only — Pass 2 replays the frozen plan instead
+                        // of feeding ambient expectations to the emitter.
+                        if self.check_mode {
+                            self.exp_ret.push(decl.unwrap_or(self.r.mk(Ty::Unit)));
+                        }
                         let out = self.emit_expr(fw, init);
-                        self.exp_ret.pop();
+                        if self.check_mode {
+                            self.exp_ret.pop();
+                        }
                         out
                     }
                 };
@@ -101,7 +113,6 @@ impl ModEmitter {
                 // plan — `dyn` boxing, the initializer's store face (promotion /
                 // boxing / narrowing) and the surface the binding records — and
                 // freezes it against the statement id; Pass 2 replays it.
-                let decl = ty.as_ref().map(|te| self.ty_of(te));
                 let plan = self.let_plan(s.id, &s.pos, decl, t);
                 let (v, t) = self.apply_let_plan(fw, v, t, plan);
                 // a `unit` initializer has no word: keep the store well-formed
@@ -181,10 +192,16 @@ impl ModEmitter {
                 let (v, vty) = match pre {
                     Some((w, tt)) => (w, tt),
                     None => {
-                        let hint = target_ty.unwrap_or_else(|| self.r.mk(Ty::Unit));
-                        self.exp_ret.push(hint);
+                        // A3 (expected-hint family): the hint stack is Pass-1
+                        // only (see the `Let` route above).
+                        if self.check_mode {
+                            let hint = target_ty.unwrap_or_else(|| self.r.mk(Ty::Unit));
+                            self.exp_ret.push(hint);
+                        }
                         let out = self.emit_expr(fw, value);
-                        self.exp_ret.pop();
+                        if self.check_mode {
+                            self.exp_ret.pop();
+                        }
                         out
                     }
                 };
