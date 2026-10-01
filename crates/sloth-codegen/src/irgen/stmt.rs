@@ -404,7 +404,7 @@ impl ModEmitter {
                                         ),
                                     );
                                 }
-                                self.check_global_assign(fw, g, &gsym, gt, &v, vty, &s.pos);
+                                self.check_global_assign(fw, g, &gsym, gt, &v, vty, &s.pos, s.id);
                                 fw.rc_flush();
                                 return;
                             }
@@ -490,7 +490,7 @@ impl ModEmitter {
                         }
                         match fw.lookup(n) {
                             Some((_, dt)) => {
-                                self.check_named_assign(fw, n, dt, &v, vty, &s.pos);
+                                self.check_named_assign(fw, n, dt, &v, vty, &s.pos, s.id);
                             }
                             None => {
                                 let cur_mod = self.cur_mod.clone();
@@ -515,7 +515,9 @@ impl ModEmitter {
                                                 ),
                                             );
                                         }
-                                        self.check_global_assign(fw, n, &gsym, gt, &v, vty, &s.pos);
+                                        self.check_global_assign(
+                                            fw, n, &gsym, gt, &v, vty, &s.pos, s.id,
+                                        );
                                     }
                                     None => {
                                         fw.assign(n, &v, false);
@@ -631,36 +633,55 @@ impl ModEmitter {
                                 Ty::Array(el) => {
                                     // tag migration: single word route;
                                     // int words promote for float slots;
-                                    // cross-kind stores diagnose
-                                    if self.opt_inner(el).is_some() || self.weak_inner(el).is_some()
+                                    // cross-kind stores diagnose.
+                                    // A3 (store-face family): replay the element
+                                    // coercion decided in Pass 1.
+                                    let face = if self.check_mode {
+                                        let f = self.array_elem_store_face(el, vty);
+                                        self.record_assign_face(s.id, f);
+                                        f
+                                    } else if s.id == 0 {
+                                        self.array_elem_store_face(el, vty)
+                                    } else {
+                                        match self.planned_assign_face(s.id) {
+                                            Some(f) => f,
+                                            None => {
+                                                debug_assert!(
+                                                    false,
+                                                    "assign-face plan miss: frame={} stmt={}",
+                                                    self.cur_frame, s.id
+                                                );
+                                                self.array_elem_store_face(el, vty)
+                                            }
+                                        }
+                                    };
+                                    if self.check_mode
+                                        && matches!(face, crate::sem::StoreFace::Identity)
                                     {
-                                        let (vc, _tc) = self.coerce_word_to(fw, &v, vty, el);
-                                        v = vc;
-                                    } else if self.is_float(el) && !self.is_float(vty) {
-                                        v = self.int_to_f64_word(fw, &v, vty);
-                                    } else if !self.is_float(el) && self.is_float(vty) {
-                                        self.err_diff(
-                                            &s.pos,
-                                            "array element assignment",
-                                            "non-float surface",
-                                            "float",
-                                        );
-                                    } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
-                                        let els = self.r.get(el).clone();
-                                        let vts = self.r.get(vty).clone();
-                                        if !self.surface_compat(&els, &vts) {
-                                            let en = self.surface_name(&els);
-                                            let vn = self.surface_name(&vts);
+                                        if !self.is_float(el) && self.is_float(vty) {
                                             self.err_diff(
                                                 &s.pos,
                                                 "array element assignment",
-                                                &en,
-                                                &vn,
+                                                "non-float surface",
+                                                "float",
                                             );
+                                        } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
+                                            let els = self.r.get(el).clone();
+                                            let vts = self.r.get(vty).clone();
+                                            if !self.surface_compat(&els, &vts) {
+                                                let en = self.surface_name(&els);
+                                                let vn = self.surface_name(&vts);
+                                                self.err_diff(
+                                                    &s.pos,
+                                                    "array element assignment",
+                                                    &en,
+                                                    &vn,
+                                                );
+                                            }
                                         }
                                     }
-                                    if self.is_int_like(el) && self.is_int_like(vty) {
-                                        v = self.coerce_int_word(fw, &v, el);
+                                    if !matches!(face, crate::sem::StoreFace::Identity) {
+                                        v = self.apply_store_face(fw, &v, vty, face).0;
                                     }
                                     // rc patch B: retain the incoming element
                                     // FIRST, then release the evicted old one.
@@ -729,30 +750,54 @@ impl ModEmitter {
                                             }
                                         }
                                     }
-                                    if self.opt_inner(v2).is_some()
-                                        || self.weak_inner(v2).is_some()
-                                        || matches!(self.r.get(v2), Ty::Dyn(_) | Ty::Int(_))
-                                    {
-                                        let (vc, _tc) = self.coerce_word_to(fw, &v, vty, v2);
-                                        v = vc;
-                                    } else if vf && !self.is_float(vty) {
-                                        // int word -> f64 word
-                                        v = self.int_to_f64_word(fw, &v, vty);
-                                    } else if !vf && self.is_float(vty) {
-                                        self.err_diff(
-                                            &s.pos,
-                                            "map value assignment",
-                                            "non-float surface",
-                                            "float",
-                                        );
-                                    } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
-                                        let v2s = self.r.get(v2).clone();
-                                        let vts = self.r.get(vty).clone();
-                                        if !self.surface_compat(&v2s, &vts) {
-                                            let en = self.surface_name(&v2s);
-                                            let vn = self.surface_name(&vts);
-                                            self.err_diff(&s.pos, "map value assignment", &en, &vn);
+                                    // A3 (store-face family): replay the value
+                                    // coercion decided in Pass 1.
+                                    let face = if self.check_mode {
+                                        let f = self.map_val_store_face(v2, vty);
+                                        self.record_assign_face(s.id, f);
+                                        f
+                                    } else if s.id == 0 {
+                                        self.map_val_store_face(v2, vty)
+                                    } else {
+                                        match self.planned_assign_face(s.id) {
+                                            Some(f) => f,
+                                            None => {
+                                                debug_assert!(
+                                                    false,
+                                                    "assign-face plan miss: frame={} stmt={}",
+                                                    self.cur_frame, s.id
+                                                );
+                                                self.map_val_store_face(v2, vty)
+                                            }
                                         }
+                                    };
+                                    if self.check_mode {
+                                        if matches!(face, crate::sem::StoreFace::Identity) {
+                                            if !vf && self.is_float(vty) {
+                                                self.err_diff(
+                                                    &s.pos,
+                                                    "map value assignment",
+                                                    "non-float surface",
+                                                    "float",
+                                                );
+                                            } else if !matches!(self.r.get(vty).clone(), Ty::Unit) {
+                                                let v2s = self.r.get(v2).clone();
+                                                let vts = self.r.get(vty).clone();
+                                                if !self.surface_compat(&v2s, &vts) {
+                                                    let en = self.surface_name(&v2s);
+                                                    let vn = self.surface_name(&vts);
+                                                    self.err_diff(
+                                                        &s.pos,
+                                                        "map value assignment",
+                                                        &en,
+                                                        &vn,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !matches!(face, crate::sem::StoreFace::Identity) {
+                                        v = self.apply_store_face(fw, &v, vty, face).0;
                                     }
                                     // rc patch B: the map slot owns its
                                     // key (str/object) and value copy;

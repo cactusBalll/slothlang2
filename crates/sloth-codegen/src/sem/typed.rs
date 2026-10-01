@@ -25,6 +25,21 @@ pub type TypeTable = HashMap<(String, u32), TyId>;
 /// position (unique within a frame's walk).
 pub type SiteKey = (String, usize, usize);
 
+/// A3 (store-face family): the word coercion `sem` decided for a value that is
+/// about to be stored (assignment, index write, `push`). Pass 2 replays the
+/// decision instead of re-deriving the promotion/narrowing/boxing gate from
+/// the source and destination surfaces.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StoreFace {
+    /// the produced word binds to the destination as-is
+    Identity,
+    /// int word -> f64 word (the slot plane is always the word plane)
+    IntToFloat,
+    /// box/narrow into the destination surface (`coerce_word_to`): value
+    /// optional/Weak closure, `dyn`/`any` box, or integer width coercion
+    Coerce(TyId),
+}
+
 /// Pass-1 typed products consumed by Pass 2.
 #[derive(Default, Clone)]
 pub struct TypedTables {
@@ -68,4 +83,11 @@ pub struct TypedTables {
     /// that Pass 1 found no tensor hint (diagnosed there); Pass 2 replays the
     /// decision instead of re-reading the hint (A3, expected-hint family).
     pub tensor_shapes: HashMap<SiteKey, Option<(TyId, u32)>>,
+    /// assignment / index-write statement -> store face of its value, keyed by
+    /// `(frame, StmtId)`. Pass 1 decides the promotion/narrowing/boxing;
+    /// Pass 2 replays it (A3, store-face family).
+    pub assign_faces: HashMap<(String, u32), StoreFace>,
+    /// `push` call site -> store face of the pushed value, keyed by
+    /// `(frame, line, col)` (A3, store-face family).
+    pub push_faces: HashMap<SiteKey, StoreFace>,
 }

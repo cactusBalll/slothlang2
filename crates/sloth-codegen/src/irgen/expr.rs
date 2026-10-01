@@ -3034,10 +3034,6 @@ impl ModEmitter {
                 _ => None,
             };
             if let Some(elid) = el_tp {
-                let _ = el_tp;
-                let el = elid;
-                let fel = self.is_float(elid);
-                let _ = el;
                 match name.as_str() {
                     "push" => {
                         let (mut v, at) = match argv.get(1).cloned() {
@@ -3047,39 +3043,53 @@ impl ModEmitter {
                                 return (String::new(), self.r.mk(Ty::Unit));
                             }
                         };
-                        if fel && !self.is_float(at) {
-                            // design §2.1: no implicit int -> float on push
-                            self.err_diff(pos, "push element", "float", "int");
-                            v = self.int_to_f64_word(fw, &v, at);
-                        }
-                        // store-face coercion: an Opt/Weak element slot boxes a
-                        // bare produced value (matches the `a[i] = v` route);
-                        // without this a strong handle lands in a Weak slot and
-                        // the container's death cascade misreads it as a box
-                        if self.opt_inner(elid).is_some() || self.weak_inner(elid).is_some() {
-                            let (vc, _tc) = self.coerce_word_to(fw, &v, at, elid);
-                            v = vc;
-                        }
-                        if self.is_int_like(elid) && self.is_int_like(at) {
-                            v = self.coerce_int_word(fw, &v, elid);
-                        }
-                        // general element-surface check (book ch12 §12.1:
-                        // `Array<T>` is homogeneous; `push` is the same store
-                        // face as `a[i] = v` and must diagnose too)
-                        let handled = (fel && !self.is_float(at))
-                            || self.opt_inner(elid).is_some()
-                            || self.weak_inner(elid).is_some()
-                            || (self.is_int_like(elid) && self.is_int_like(at))
-                            || matches!(self.r.get(at), Ty::Unit)
-                            || matches!(self.r.get(elid), Ty::Unit);
-                        if !handled {
-                            let els = self.r.get(elid).clone();
-                            let ats = self.r.get(at).clone();
-                            if !self.surface_compat(&els, &ats) {
-                                let en = self.surface_name(&els);
-                                let an = self.surface_name(&ats);
-                                self.err_diff(pos, "push element", &en, &an);
+                        // A3 (store-face family): replay the element coercion
+                        // decided in Pass 1 (float int->float, Opt/Weak box,
+                        // fixed-width narrow).
+                        let face = if self.check_mode {
+                            let f = self.push_store_face(elid, at);
+                            self.record_push_face(pos, f);
+                            f
+                        } else {
+                            match self.planned_push_face(pos) {
+                                Some(f) => f,
+                                None => {
+                                    debug_assert!(
+                                        false,
+                                        "push-face plan miss: frame={} pos={}:{}",
+                                        self.cur_frame, pos.line, pos.col
+                                    );
+                                    self.push_store_face(elid, at)
+                                }
                             }
+                        };
+                        if self.check_mode {
+                            match face {
+                                crate::sem::StoreFace::IntToFloat => {
+                                    // design §2.1: no implicit int -> float on push
+                                    self.err_diff(pos, "push element", "float", "int");
+                                }
+                                crate::sem::StoreFace::Identity => {
+                                    // general element-surface check (book ch12
+                                    // §12.1: `Array<T>` is homogeneous; `push`
+                                    // is the same store face as `a[i] = v`)
+                                    if !matches!(self.r.get(at), Ty::Unit)
+                                        && !matches!(self.r.get(elid), Ty::Unit)
+                                    {
+                                        let els = self.r.get(elid).clone();
+                                        let ats = self.r.get(at).clone();
+                                        if !self.surface_compat(&els, &ats) {
+                                            let en = self.surface_name(&els);
+                                            let an = self.surface_name(&ats);
+                                            self.err_diff(pos, "push element", &en, &an);
+                                        }
+                                    }
+                                }
+                                crate::sem::StoreFace::Coerce(_) => {}
+                            }
+                        }
+                        if !matches!(face, crate::sem::StoreFace::Identity) {
+                            v = self.apply_store_face(fw, &v, at, face).0;
                         }
                         let callv = fw.v();
                         // rc patch C: the array slot owns ref-typed

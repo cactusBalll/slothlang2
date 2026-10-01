@@ -184,6 +184,12 @@ pub struct ModEmitter {
     /// `(frame, line, col)`. `None` records "no tensor hint" (diagnosed in
     /// Pass 1). Pass 2 replays the decision instead of re-reading the hint.
     pub(crate) tensor_shapes: HashMap<crate::sem::SiteKey, Option<(TyId, u32)>>,
+    /// A3 store-face plan: the value coercion of every assignment / index-write
+    /// statement, keyed by `(frame, StmtId)`. Pass 2 replays it.
+    pub(crate) assign_faces: HashMap<(String, u32), crate::sem::StoreFace>,
+    /// A3 store-face plan: the pushed-value coercion of every `push` call site,
+    /// keyed by `(frame, line, col)`. Pass 2 replays it.
+    pub(crate) push_faces: HashMap<crate::sem::SiteKey, crate::sem::StoreFace>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -321,6 +327,8 @@ impl ModEmitter {
             arg_faces: HashMap::new(),
             literal_ctors: HashMap::new(),
             tensor_shapes: HashMap::new(),
+            assign_faces: HashMap::new(),
+            push_faces: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -339,6 +347,8 @@ impl ModEmitter {
             arg_faces: std::mem::take(&mut self.arg_faces),
             literal_ctors: std::mem::take(&mut self.literal_ctors),
             tensor_shapes: std::mem::take(&mut self.tensor_shapes),
+            assign_faces: std::mem::take(&mut self.assign_faces),
+            push_faces: std::mem::take(&mut self.push_faces),
         }
     }
 
@@ -353,6 +363,8 @@ impl ModEmitter {
         self.arg_faces = t.arg_faces;
         self.literal_ctors = t.literal_ctors;
         self.tensor_shapes = t.tensor_shapes;
+        self.assign_faces = t.assign_faces;
+        self.push_faces = t.push_faces;
     }
 
     /// A3 (container-hint family): the store face `sem` chose for the
@@ -486,6 +498,67 @@ impl ModEmitter {
     pub(crate) fn record_tensor_shape(&mut self, pos: &Pos, shape: Option<(TyId, u32)>) {
         if self.check_mode {
             self.tensor_shapes.insert(self.site_key(pos), shape);
+        }
+    }
+
+    /// A3 (store-face family): the store face `sem` recorded for the
+    /// assignment / index-write statement `id` (Pass 2 only). `None` also for
+    /// synthetic id-less statements, which re-derive locally.
+    pub(crate) fn planned_assign_face(&self, id: u32) -> Option<crate::sem::StoreFace> {
+        if self.check_mode || id == 0 {
+            return None;
+        }
+        self.assign_faces
+            .get(&(self.cur_frame.clone(), id))
+            .copied()
+    }
+
+    /// A3: freeze the store face decided for the statement `id` (Pass 1 only).
+    pub(crate) fn record_assign_face(&mut self, id: u32, face: crate::sem::StoreFace) {
+        if !self.check_mode || id == 0 {
+            return;
+        }
+        let key = (self.cur_frame.clone(), id);
+        match self.assign_faces.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &face,
+                "conflicting assign face at stmt {}: {:?} vs {:?}",
+                id,
+                prev,
+                face
+            ),
+            None => {
+                self.assign_faces.insert(key, face);
+            }
+        }
+    }
+
+    /// A3 (store-face family): the store face `sem` recorded for the `push`
+    /// call site at `pos` (Pass 2 only).
+    pub(crate) fn planned_push_face(&self, pos: &Pos) -> Option<crate::sem::StoreFace> {
+        if self.check_mode {
+            return None;
+        }
+        self.push_faces.get(&self.site_key(pos)).copied()
+    }
+
+    /// A3: freeze the pushed-value store face of the site at `pos`.
+    pub(crate) fn record_push_face(&mut self, pos: &Pos, face: crate::sem::StoreFace) {
+        if !self.check_mode {
+            return;
+        }
+        let key = self.site_key(pos);
+        match self.push_faces.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &face,
+                "conflicting push face at {:?}: {:?} vs {:?}",
+                key,
+                prev,
+                face
+            ),
+            None => {
+                self.push_faces.insert(key, face);
+            }
         }
     }
 

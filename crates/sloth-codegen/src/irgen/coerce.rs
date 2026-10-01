@@ -325,6 +325,33 @@ impl ModEmitter {
         }
     }
 
+    /// A3 (store-face family): materialise a replayed store face on a produced
+    /// word. `sem` decided promotion / narrowing / boxing in Pass 1; this only
+    /// applies it. Integer targets go through `coerce_int_word` (whose word
+    /// transform covers widening to plain `int` too), the rest through
+    /// `coerce_word_to`.
+    pub(crate) fn apply_store_face(
+        &mut self,
+        fw: &mut FnWalk,
+        v: &str,
+        vty: TyId,
+        face: crate::sem::StoreFace,
+    ) -> (String, TyId) {
+        match face {
+            crate::sem::StoreFace::Identity => (v.to_string(), vty),
+            crate::sem::StoreFace::IntToFloat => {
+                (self.int_to_f64_word(fw, v, vty), self.r.mk(Ty::F64))
+            }
+            crate::sem::StoreFace::Coerce(t) => {
+                if self.is_int_like(t) && self.is_int_like(vty) {
+                    (self.coerce_int_word(fw, v, t), t)
+                } else {
+                    self.coerce_word_to(fw, v, vty, t)
+                }
+            }
+        }
+    }
+
     /// bind a word into a declared surface (patch 42/43 entry): value
     /// optionals box up, Weak targets wrap in a weak box, else as-is
     pub(crate) fn coerce_word_to(
@@ -543,6 +570,11 @@ impl ModEmitter {
     /// words; float value into non-float target diagnosed; structurally
     /// different i64-word surfaces (int/str/bool/class/array/map) diagnosed;
     /// nil (word 0) accepted into any non-float target.
+    ///
+    /// A3 (store-face family): Pass 1 decides the promotion/narrowing/boxing
+    /// ([`ModEmitter::named_store_face`]) and freezes it against `stmt_id`;
+    /// Pass 2 replays it. The diagnostics stay Pass-1-only (the `err*` helpers
+    /// drop them in Pass 2).
     pub(crate) fn check_named_assign(
         &mut self,
         fw: &mut FnWalk,
@@ -551,21 +583,33 @@ impl ModEmitter {
         v: &str,
         vty: TyId,
         pos: &Pos,
+        stmt_id: u32,
     ) {
         // value-optional surfaces (patch 42): wrap bare scalars into boxes,
         // keep nil (Unit) / already-opt words as they are; `dyn T` surfaces
         // auto-box builtin values too. The common i64 store path below
         // releases the old and retains the new owner.
-        let mut v = v.to_string();
-        let mut vty = vty;
-        if self.opt_inner(dt).is_some()
-            || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
-        {
-            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
-            v = vc;
-            vty = vtc;
-        }
+        let face = if self.check_mode {
+            let f = self.named_store_face(dt, vty);
+            self.record_assign_face(stmt_id, f);
+            f
+        } else if stmt_id == 0 {
+            // synthetic (desugared compound assignment): no plan, re-derive
+            self.named_store_face(dt, vty)
+        } else {
+            match self.planned_assign_face(stmt_id) {
+                Some(f) => f,
+                None => {
+                    debug_assert!(
+                        false,
+                        "assign-face plan miss: frame={} stmt={}",
+                        self.cur_frame, stmt_id
+                    );
+                    self.named_store_face(dt, vty)
+                }
+            }
+        };
+        let (v, vty) = self.apply_store_face(fw, v, vty, face);
         if self.is_float(dt) {
             let stored = if self.is_float(vty) {
                 v.clone()
@@ -661,7 +705,8 @@ impl ModEmitter {
 
     /// plain-name assignment to a module-level global cell: mirrors
     /// `check_named_assign` (coercion + surface check + rc overwrite) but
-    /// stores through `memref.get_global` instead of a local slot.
+    /// stores through `memref.get_global` instead of a local slot. A3
+    /// (store-face family): the coercion is decided in Pass 1 and replayed.
     pub(crate) fn check_global_assign(
         &mut self,
         fw: &mut FnWalk,
@@ -671,17 +716,28 @@ impl ModEmitter {
         v: &str,
         vty: TyId,
         pos: &Pos,
+        stmt_id: u32,
     ) {
-        let mut v = v.to_string();
-        let mut vty = vty;
-        if self.opt_inner(dt).is_some()
-            || self.weak_inner(dt).is_some()
-            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
-        {
-            let (vc, vtc) = self.coerce_word_to(fw, &v, vty, dt);
-            v = vc;
-            vty = vtc;
-        }
+        let face = if self.check_mode {
+            let f = self.named_store_face(dt, vty);
+            self.record_assign_face(stmt_id, f);
+            f
+        } else if stmt_id == 0 {
+            self.named_store_face(dt, vty)
+        } else {
+            match self.planned_assign_face(stmt_id) {
+                Some(f) => f,
+                None => {
+                    debug_assert!(
+                        false,
+                        "assign-face plan miss: frame={} stmt={}",
+                        self.cur_frame, stmt_id
+                    );
+                    self.named_store_face(dt, vty)
+                }
+            }
+        };
+        let (v, vty) = self.apply_store_face(fw, v, vty, face);
         if self.is_float(dt) {
             let cv = if self.is_float(vty) {
                 v.clone()

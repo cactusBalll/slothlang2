@@ -3,6 +3,8 @@
 #[allow(unused_imports)]
 use crate::irgen::*;
 #[allow(unused_imports)]
+use crate::sem::StoreFace;
+#[allow(unused_imports)]
 use sloth_frontend::ast::*;
 #[allow(unused_imports)]
 use sloth_frontend::lexer::{Pos, StrPart};
@@ -336,6 +338,65 @@ impl ModEmitter {
             Some(pt)
         } else {
             None
+        }
+    }
+
+    /// A3 (store-face family): the coercion of a value into a plain-name or
+    /// module-global destination `dt` (`x = v` / `g = v`). Mirrors the
+    /// decision the two `check_*_assign` routes used to take on the fly.
+    pub(crate) fn named_store_face(&self, dt: TyId, vty: TyId) -> StoreFace {
+        if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Dyn(_) | Ty::Any | Ty::Int(_))
+        {
+            StoreFace::Coerce(dt)
+        } else if self.is_float(dt) && !self.is_float(vty) {
+            StoreFace::IntToFloat
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (store-face family): the coercion of a value into an array element
+    /// slot `el` (`a[i] = v`).
+    pub(crate) fn array_elem_store_face(&self, el: TyId, vty: TyId) -> StoreFace {
+        if self.opt_inner(el).is_some() || self.weak_inner(el).is_some() {
+            StoreFace::Coerce(el)
+        } else if self.is_float(el) && !self.is_float(vty) {
+            StoreFace::IntToFloat
+        } else if self.is_int_like(el) && self.is_int_like(vty) {
+            StoreFace::Coerce(el)
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (store-face family): the coercion of a value into a map value slot
+    /// `v2` (`m[k] = v`).
+    pub(crate) fn map_val_store_face(&self, v2: TyId, vty: TyId) -> StoreFace {
+        if self.opt_inner(v2).is_some()
+            || self.weak_inner(v2).is_some()
+            || matches!(self.r.get(v2), Ty::Dyn(_) | Ty::Int(_))
+        {
+            StoreFace::Coerce(v2)
+        } else if self.is_float(v2) && !self.is_float(vty) {
+            StoreFace::IntToFloat
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (store-face family): the coercion of a pushed value into an array
+    /// element slot `el` (`a.push(v)`).
+    pub(crate) fn push_store_face(&self, el: TyId, at: TyId) -> StoreFace {
+        if self.is_float(el) && !self.is_float(at) {
+            StoreFace::IntToFloat
+        } else if self.opt_inner(el).is_some() || self.weak_inner(el).is_some() {
+            StoreFace::Coerce(el)
+        } else if self.is_int_like(el) && self.is_int_like(at) {
+            StoreFace::Coerce(el)
+        } else {
+            StoreFace::Identity
         }
     }
 
