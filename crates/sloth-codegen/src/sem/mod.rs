@@ -25,7 +25,7 @@ pub(crate) mod types;
 
 use crate::irgen::{format_diags, ModEmitter};
 use sloth_frontend::ast::Program;
-pub use typed::{LetPlan, SiteKey, StoreFace, TypeTable, TypedTables};
+pub use typed::{FieldSite, LetPlan, SiteKey, StoreFace, TypeTable, TypedTables};
 
 /// The complete product of one Pass-1 run: the typed side tables and the
 /// eager-monomorphization plan.

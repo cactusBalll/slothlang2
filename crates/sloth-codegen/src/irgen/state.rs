@@ -194,6 +194,9 @@ pub struct ModEmitter {
     /// of every `let`/`var` declaration, keyed by `(frame, StmtId)`. Pass 2
     /// replays it.
     pub(crate) let_plans: HashMap<(String, u32), crate::sem::LetPlan>,
+    /// A3 store-face plan: the field-box decision of every field store,
+    /// keyed by `[crate::sem::FieldSite]`. Pass 2 replays it.
+    pub(crate) field_boxes: HashMap<crate::sem::FieldSite, Option<TyId>>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -334,6 +337,7 @@ impl ModEmitter {
             assign_faces: HashMap::new(),
             push_faces: HashMap::new(),
             let_plans: HashMap::new(),
+            field_boxes: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -355,6 +359,7 @@ impl ModEmitter {
             assign_faces: std::mem::take(&mut self.assign_faces),
             push_faces: std::mem::take(&mut self.push_faces),
             let_plans: std::mem::take(&mut self.let_plans),
+            field_boxes: std::mem::take(&mut self.field_boxes),
         }
     }
 
@@ -372,6 +377,7 @@ impl ModEmitter {
         self.assign_faces = t.assign_faces;
         self.push_faces = t.push_faces;
         self.let_plans = t.let_plans;
+        self.field_boxes = t.field_boxes;
     }
 
     /// A3 (container-hint family): the store face `sem` chose for the
@@ -623,6 +629,42 @@ impl ModEmitter {
                     debug_assert!(false, "let-plan miss: frame={} stmt={}", self.cur_frame, id);
                     self.derive_let_plan(pos, decl, init_ty)
                 }
+            }
+        }
+    }
+
+    /// key of the field-store site at `pos` writing the field at index `idx`,
+    /// under the frame currently being emitted
+    pub(crate) fn field_site(&self, pos: &Pos, idx: usize) -> crate::sem::FieldSite {
+        (self.cur_frame.clone(), pos.line, pos.col, idx)
+    }
+
+    /// A3 (store-face family): the field-box decision `sem` recorded for the
+    /// field store at `pos`/`idx` (Pass 2 only).
+    pub(crate) fn planned_field_box(&self, pos: &Pos, idx: usize) -> Option<Option<TyId>> {
+        if self.check_mode {
+            return None;
+        }
+        self.field_boxes.get(&self.field_site(pos, idx)).copied()
+    }
+
+    /// A3: freeze the field-box decision of the store at `pos`/`idx`
+    /// (Pass 1 only; see [`Self::record_assign_face`] for the write-once rule).
+    pub(crate) fn record_field_box(&mut self, pos: &Pos, idx: usize, boxed: Option<TyId>) {
+        if !self.check_mode {
+            return;
+        }
+        let key = self.field_site(pos, idx);
+        match self.field_boxes.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &boxed,
+                "conflicting field box at {:?}: {:?} vs {:?}",
+                key,
+                prev,
+                boxed
+            ),
+            None => {
+                self.field_boxes.insert(key, boxed);
             }
         }
     }

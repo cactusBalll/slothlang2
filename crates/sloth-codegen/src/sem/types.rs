@@ -426,6 +426,21 @@ impl ModEmitter {
         }
     }
 
+    /// A3 (store-face family): the declared face a field store boxes into —
+    /// value-optional / Weak fields wrap the bare word, `dyn` fields box a
+    /// builtin value into a synthetic object; every other field stores the
+    /// word unchanged (`op_set_field` keeps the rc / de-tag routing itself).
+    pub(crate) fn field_box_face(&self, ft: TyId) -> Option<TyId> {
+        if self.opt_inner(ft).is_some()
+            || self.weak_inner(ft).is_some()
+            || matches!(self.r.get(ft), Ty::Dyn(_))
+        {
+            Some(ft)
+        } else {
+            None
+        }
+    }
+
     /// A3 (let-initializer family): the store face of an initializer of type
     /// `t` against its declared surface `dt`: fixed floats promote the int
     /// word, fixed-width integers narrow, value-optional / Weak / `any`

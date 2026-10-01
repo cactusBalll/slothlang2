@@ -260,7 +260,7 @@ impl ModEmitter {
                                     self.check_field_surface(&s.pos, f, fty, vty);
                                 }
                                 let (v, vty) = self.apply_store_face(fw, &v, vty, face);
-                                self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
+                                self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone(), idx);
                                 fw.rc_flush();
                                 return;
                             }
@@ -360,7 +360,16 @@ impl ModEmitter {
                                     }
                                 }
                                 let (vc, vct) = self.apply_store_face(fw, &v, vty, face);
-                                self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
+                                self.op_set_field(
+                                    fw,
+                                    &recv,
+                                    &zi,
+                                    &vc,
+                                    vct,
+                                    fty,
+                                    s.pos.clone(),
+                                    idx,
+                                );
                                 fw.rc_flush();
                                 return;
                             } else if let Ty::Opt(inner) = self.r.get(rty).clone() {
@@ -1942,14 +1951,14 @@ impl ModEmitter {
             ki,
             enc_i_lit(kidxf as i64)
         ));
-        self.op_set_field(fw, &obj, &ki, &kw, k, k, pos.clone());
+        self.op_set_field(fw, &obj, &ki, &kw, k, k, pos.clone(), kidxf);
         let vi = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
             vi,
             enc_i_lit(vidxf as i64)
         ));
-        self.op_set_field(fw, &obj, &vi, &vw, v2, v2, pos.clone());
+        self.op_set_field(fw, &obj, &vi, &vw, v2, v2, pos.clone(), vidxf);
         let vs = fw.v();
         fw.op(&format!("    {} = memref.alloca() : memref<1xi64>", vs));
         fw.op(&format!(

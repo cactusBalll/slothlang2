@@ -25,6 +25,12 @@ pub type TypeTable = HashMap<(String, u32), TyId>;
 /// position (unique within a frame's walk).
 pub type SiteKey = (String, usize, usize);
 
+/// A field-store site: emitting frame + source position + the (stable) index
+/// of the field being written. One source position can store several fields —
+/// a `Result` ctor writes `ok`, `v` and `e` at the call's position — so the
+/// field index completes the key.
+pub type FieldSite = (String, usize, usize, usize);
+
 /// A3 (store-face family): the word coercion `sem` decided for a value that is
 /// about to be stored (assignment, index write, `push`). Pass 2 replays the
 /// decision instead of re-deriving the promotion/narrowing/boxing gate from
@@ -112,4 +118,9 @@ pub struct TypedTables {
     /// binding surface), keyed by `(frame, StmtId)`. Pass 1 derives it and
     /// freezes it; Pass 2 replays it (A3, store-face family).
     pub let_plans: HashMap<(String, u32), LetPlan>,
+    /// field-store site -> box decision (`Some(field surface)` = box the word
+    /// into the field's value-optional / Weak / `dyn` face before storing,
+    /// `None` = store the word unchanged), keyed by [`FieldSite`]. Pass 1
+    /// decides it; Pass 2 replays it (A3, store-face family).
+    pub field_boxes: HashMap<FieldSite, Option<TyId>>,
 }

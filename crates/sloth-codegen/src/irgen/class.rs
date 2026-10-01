@@ -93,21 +93,26 @@ impl ModEmitter {
             okv,
             enc_i_lit(if is_ok { 1 } else { 0 })
         ));
+        // A3: the three stores below share `pos`, so their field indices
+        // complete the field-box plan key
+        let f_ok = self.field_index(inst, "ok");
+        let f_v = self.field_index(inst, "v");
+        let f_e = self.field_index(inst, "e");
         let okidx = fw.v();
         fw.op(&format!(
             "    {} = arith.constant {} : i64",
             okidx,
-            enc_i_lit(self.field_index(inst, "ok") as i64)
+            enc_i_lit(f_ok as i64)
         ));
-        self.op_set_field(fw, &obj, &okidx, &okv, fok, fok, pos.clone());
+        self.op_set_field(fw, &obj, &okidx, &okv, fok, fok, pos.clone(), f_ok);
         if is_ok {
             let vidx = fw.v();
             fw.op(&format!(
                 "    {} = arith.constant {} : i64",
                 vidx,
-                enc_i_lit(self.field_index(inst, "v") as i64)
+                enc_i_lit(f_v as i64)
             ));
-            self.op_set_field(fw, &obj, &vidx, &v, vt, fvy, pos.clone());
+            self.op_set_field(fw, &obj, &vidx, &v, vt, fvy, pos.clone(), f_v);
             // zero the err slot by its word spelling
             let ez = fw.v();
             fw.op(&format!("    {} = arith.constant 0 : i64", ez));
@@ -115,9 +120,9 @@ impl ModEmitter {
             fw.op(&format!(
                 "    {} = arith.constant {} : i64",
                 eidx,
-                enc_i_lit(self.field_index(inst, "e") as i64)
+                enc_i_lit(f_e as i64)
             ));
-            self.op_set_field(fw, &obj, &eidx, &ez, fey, fey, pos.clone());
+            self.op_set_field(fw, &obj, &eidx, &ez, fey, fey, pos.clone(), f_e);
         } else {
             // zero the v slot
             let vz = fw.v();
@@ -126,16 +131,16 @@ impl ModEmitter {
             fw.op(&format!(
                 "    {} = arith.constant {} : i64",
                 vidx,
-                enc_i_lit(self.field_index(inst, "v") as i64)
+                enc_i_lit(f_v as i64)
             ));
-            self.op_set_field(fw, &obj, &vidx, &vz, fey, fvy, pos.clone());
+            self.op_set_field(fw, &obj, &vidx, &vz, fey, fvy, pos.clone(), f_v);
             let eidx = fw.v();
             fw.op(&format!(
                 "    {} = arith.constant {} : i64",
                 eidx,
-                enc_i_lit(self.field_index(inst, "e") as i64)
+                enc_i_lit(f_e as i64)
             ));
-            self.op_set_field(fw, &obj, &eidx, &v, vt, fey, pos.clone());
+            self.op_set_field(fw, &obj, &eidx, &v, vt, fey, pos.clone(), f_e);
         }
         (obj, ity)
     }
@@ -694,7 +699,7 @@ impl ModEmitter {
                         enc_i_lit(idx as i64)
                     ));
                     let ft2 = self.ty_of(&fty);
-                    self.op_set_field(fw, &r2, &zi, &iv, iit, ft2, ix.pos.clone());
+                    self.op_set_field(fw, &r2, &zi, &iv, iit, ft2, ix.pos.clone(), idx);
                 }
             }
         }
@@ -1287,18 +1292,35 @@ impl ModEmitter {
         vt: TyId,
         ft: TyId,
         pos: Pos,
+        field_idx: usize,
     ) {
-        let _ = pos;
+        // A3 (store-face family): Pass 1 decides whether this field face
+        // boxes the word; Pass 2 replays that decision instead of re-deriving
+        // it from the field surface. `pos` + `field_idx` identify the store
+        // (one source position can store several fields).
+        let boxed = if self.check_mode {
+            let b = self.field_box_face(ft);
+            self.record_field_box(&pos, field_idx, b);
+            b
+        } else {
+            match self.planned_field_box(&pos, field_idx) {
+                Some(b) => b,
+                None => {
+                    debug_assert!(
+                        false,
+                        "field-box plan miss: frame={} pos={}:{} field={}",
+                        self.cur_frame, pos.line, pos.col, field_idx
+                    );
+                    self.field_box_face(ft)
+                }
+            }
+        };
         // patch 42: value-optional fields box bare scalar stores (nil /
         // already-opt words pass through untouched); `dyn` fields auto-box
         // builtin values into a synthetic object
-        let (v, _vt2) = if self.opt_inner(ft).is_some()
-            || self.weak_inner(ft).is_some()
-            || matches!(self.r.get(ft), Ty::Dyn(_))
-        {
-            self.coerce_word_to(fw, v, vt, ft)
-        } else {
-            (v.to_string(), vt)
+        let (v, _vt2) = match boxed {
+            Some(to) => self.coerce_word_to(fw, v, vt, to),
+            None => (v.to_string(), vt),
         };
         let _ = _vt2;
         // de-tag: reference fields release the overwritten word and retain
