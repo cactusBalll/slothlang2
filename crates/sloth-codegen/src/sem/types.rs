@@ -400,6 +400,182 @@ impl ModEmitter {
         }
     }
 
+    /// A3 (store-face family): the coercion of a value into an object field
+    /// `fty` (`o.f = v`). `float?` fields take the f64 promotion route
+    /// (`dfo`), fixed-width integer fields narrow, everything else binds the
+    /// word as-is — `op_set_field` boxes value-optional / `dyn` fields itself.
+    pub(crate) fn field_store_face(&self, fty: TyId, vty: TyId) -> StoreFace {
+        let dfo = !self.is_float(fty) && matches!(self.opt_inner(fty), Some((_, true)));
+        if (self.is_float(fty) || dfo) && !self.is_float(vty) {
+            StoreFace::IntToFloat
+        } else if !dfo && self.is_int_like(fty) && self.is_int_like(vty) {
+            StoreFace::Coerce(fty)
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (store-face family): the coercion of a value into an inherited
+    /// field slot (`super.f = v`). Unlike the plain object-field route this
+    /// one only ever narrows fixed widths — it never promotes to `f64`.
+    pub(crate) fn super_store_face(&self, fty: TyId, vty: TyId) -> StoreFace {
+        if self.is_int_like(fty) && self.is_int_like(vty) {
+            StoreFace::Coerce(fty)
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (let-initializer family): the store face of an initializer of type
+    /// `t` against its declared surface `dt`: fixed floats promote the int
+    /// word, fixed-width integers narrow, value-optional / Weak / `any`
+    /// declarations box; every other surface stores the word unchanged.
+    pub(crate) fn let_store_face(&self, dt: TyId, t: TyId) -> StoreFace {
+        if self.is_float(dt) && !self.is_float(t) {
+            StoreFace::IntToFloat
+        } else if self.is_int_like(dt) && self.is_int_like(t) {
+            StoreFace::Coerce(dt)
+        } else if self.opt_inner(dt).is_some()
+            || self.weak_inner(dt).is_some()
+            || matches!(self.r.get(dt), Ty::Any)
+        {
+            StoreFace::Coerce(dt)
+        } else {
+            StoreFace::Identity
+        }
+    }
+
+    /// A3 (let-initializer family): the declared-surface type rewrite of a
+    /// `let`/`var` binding — type-only, the word itself is untouched (the
+    /// store face handles the word). Declared `dyn T` always records the dyn
+    /// surface, `Array<dyn T>` adopts it for a list literal, and a trait-name
+    /// declaration records the value as `dyn Trait`.
+    pub(crate) fn declared_surface_ty(&mut self, dt: TyId, t: TyId) -> TyId {
+        match self.r.get(dt).clone() {
+            Ty::Dyn(_) => dt,
+            Ty::Array(el) => match self.r.get(el) {
+                Ty::Dyn(_) => match self.r.get(t) {
+                    Ty::Array(_) => dt,
+                    _ => t,
+                },
+                _ => t,
+            },
+            Ty::Named(n, _) if self.traits.contains_key(n.as_str()) => match self.r.get(t) {
+                Ty::Named(_, _) => self.r.mk(Ty::Dyn(n)),
+                _ => t,
+            },
+            _ => t,
+        }
+    }
+
+    /// A3 (let-initializer family): does a declared `dyn T` initializer box
+    /// its value? Diagnoses the surfaces the trait does not cover (a class
+    /// without `impl T`, or a non-object value the trait cannot hold).
+    fn let_dyn_box(&mut self, pos: &Pos, dt: TyId, t: TyId) -> Option<TyId> {
+        let tn = match self.r.get(dt).clone() {
+            Ty::Dyn(n) => n,
+            _ => return None,
+        };
+        let reject = |this: &mut Self| {
+            let got = this.surface_name(this.r.get(t));
+            this.err_diff(pos, "initializer", &format!("dyn {}", tn), &got);
+        };
+        let boxed = match self.r.get(t).clone() {
+            // already dyn / nil literal: the surface records the declaration
+            Ty::Dyn(_) | Ty::Unit => false,
+            // a concrete class must actually `impl` the trait (design §19.4):
+            // nominal, not structural
+            Ty::Named(c, _) => {
+                if !self.impl_chain_has(&c, &tn) {
+                    reject(self);
+                }
+                false
+            }
+            _ => {
+                // builtin value types box when the trait is satisfied; str /
+                // Array / Map / tensor / fn surfaces have no object handle to
+                // hand the dyn call site (D1)
+                if self.value_kind(t).is_some() && self.value_impls_trait(&tn) {
+                    true
+                } else {
+                    reject(self);
+                    false
+                }
+            }
+        };
+        if boxed {
+            Some(dt)
+        } else {
+            None
+        }
+    }
+
+    /// A3 (let-initializer family): the declared-surface diagnostics of a
+    /// `let`/`var` initializer (Pass 1 only): a float value stored into a
+    /// non-float surface, and structural surface conflicts.
+    fn check_let_decl_surface(&mut self, pos: &Pos, dt: TyId, t: TyId) {
+        let df = self.is_float(dt);
+        let vf = self.is_float(t);
+        if !df && vf && self.opt_inner(dt).is_none() && !matches!(self.r.get(dt), Ty::Any) {
+            let got = self.surface_name(self.r.get(t));
+            self.err_diff(pos, "initializer", "non-float surface", &got);
+        } else if !(df && !vf) {
+            let dts = self.r.get(dt).clone();
+            let vts = self.r.get(t).clone();
+            if !self.surface_compat(&dts, &vts) {
+                let dn = self.surface_name(&dts);
+                let vn = self.surface_name(&vts);
+                self.err_diff(pos, "initializer", &dn, &vn);
+            }
+        }
+    }
+
+    /// A3 (let-initializer family): derive the plan of one `let`/`var`
+    /// initializer — the `dyn` boxing decision, the store face against the
+    /// declared surface, and the surface the binding records. Pass 1 runs it
+    /// (and owns the diagnostics); Pass 2 replays the frozen plan and only
+    /// falls back to this for synthetic id-less declarations.
+    pub(crate) fn derive_let_plan(
+        &mut self,
+        pos: &Pos,
+        decl: Option<TyId>,
+        init_ty: TyId,
+    ) -> crate::sem::LetPlan {
+        let Some(dt) = decl else {
+            return crate::sem::LetPlan {
+                dyn_box: None,
+                face: StoreFace::Identity,
+                bind_ty: init_ty,
+            };
+        };
+        // declared `dyn T` decides boxing before the surface rewrite below
+        // rewrites the recorded type (it always records the dyn surface)
+        let dyn_box = if matches!(self.r.get(dt), Ty::Dyn(_)) {
+            self.let_dyn_box(pos, dt, init_ty)
+        } else {
+            None
+        };
+        let t = self.declared_surface_ty(dt, init_ty);
+        let face = self.let_store_face(dt, t);
+        if self.check_mode {
+            self.check_let_decl_surface(pos, dt, t);
+        }
+        // a non-identity face stores into `dt`; a reference-optional
+        // declaration keeps the handle word and only records the Opt surface
+        // so `is nil` narrowing / later assigns see it (patch 42)
+        let bind_ty =
+            if !matches!(face, StoreFace::Identity) || matches!(self.r.get(dt), Ty::Opt(_)) {
+                dt
+            } else {
+                t
+            };
+        crate::sem::LetPlan {
+            dyn_box,
+            face,
+            bind_ty,
+        }
+    }
+
     /// Send marker (design §4.2, first cut): a value is shareable across a
     /// thread boundary unless it contains a thread-confined `Fiber<Y>`.
     /// Shallow structural walk (class internals are not traversed — see

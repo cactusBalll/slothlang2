@@ -352,6 +352,42 @@ impl ModEmitter {
         }
     }
 
+    /// A3 (let-initializer family): materialise a replayed `let`/`var`
+    /// initializer plan: box the word into the declared `dyn` surface when
+    /// `sem` chose to, apply the store face, then record the planned binding
+    /// surface.
+    pub(crate) fn apply_let_plan(
+        &mut self,
+        fw: &mut FnWalk,
+        v: String,
+        t: TyId,
+        plan: crate::sem::LetPlan,
+    ) -> (String, TyId) {
+        let (v, t) = match plan.dyn_box {
+            Some(dt) => {
+                let tn = match self.r.get(dt).clone() {
+                    Ty::Dyn(n) => n,
+                    other => {
+                        debug_assert!(
+                            false,
+                            "dyn box surface is not a dyn type: {}",
+                            self.surface_name(&other)
+                        );
+                        String::new()
+                    }
+                };
+                (self.emit_dyn_box(fw, &v, t, &tn), t)
+            }
+            None => (v, t),
+        };
+        if matches!(plan.face, crate::sem::StoreFace::Identity) {
+            (v, plan.bind_ty)
+        } else {
+            let (v, _) = self.apply_store_face(fw, &v, t, plan.face);
+            (v, plan.bind_ty)
+        }
+    }
+
     /// bind a word into a declared surface (patch 42/43 entry): value
     /// optionals box up, Weak targets wrap in a weak box, else as-is
     pub(crate) fn coerce_word_to(

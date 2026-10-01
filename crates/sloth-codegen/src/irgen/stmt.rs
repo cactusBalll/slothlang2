@@ -97,166 +97,13 @@ impl ModEmitter {
                         out
                     }
                 };
-                // declared `dyn T`: auto-box builtin value types so the dyn
-                // surface always holds a real object handle (see dynbox.rs)
-                let (v, t) = if let Some(te) = ty {
-                    let dt0 = self.ty_of(te);
-                    if let Ty::Dyn(tn) = self.r.get(dt0).clone() {
-                        match self.r.get(t).clone() {
-                            // already dyn / nil literal pass through
-                            Ty::Dyn(_) | Ty::Unit => (v, dt0),
-                            // a concrete class must actually `impl` the trait
-                            // (design §19.4): nominal, not structural
-                            Ty::Named(c, _) => {
-                                if self.impl_chain_has(&c, &tn) {
-                                    (v, dt0)
-                                } else {
-                                    let got = self.surface_name(self.r.get(t));
-                                    self.err_diff(
-                                        &s.pos,
-                                        "initializer",
-                                        &format!("dyn {}", tn),
-                                        &got,
-                                    );
-                                    (v, t)
-                                }
-                            }
-                            _ => {
-                                if self.value_kind(t).is_some() {
-                                    if self.value_impls_trait(&tn) {
-                                        let b = self.emit_dyn_box(fw, &v, t, &tn);
-                                        (b, dt0)
-                                    } else {
-                                        let got = self.surface_name(self.r.get(t));
-                                        self.err_diff(
-                                            &s.pos,
-                                            "initializer",
-                                            &format!("dyn {}", tn),
-                                            &got,
-                                        );
-                                        (v, t)
-                                    }
-                                } else {
-                                    // no dyn box for str/Array/Map/tensor/fn/...
-                                    // — reject instead of handing the dyn call
-                                    // site a raw handle with no vtable (D1)
-                                    let got = self.surface_name(self.r.get(t));
-                                    self.err_diff(
-                                        &s.pos,
-                                        "initializer",
-                                        &format!("dyn {}", tn),
-                                        &got,
-                                    );
-                                    (v, t)
-                                }
-                            }
-                        }
-                    } else {
-                        (v, t)
-                    }
-                } else {
-                    (v, t)
-                };
-                // declared `dyn T` / trait positions coerce the binding's type
-                let t = match ty {
-                    Some(te) => {
-                        let dt = self.ty_of(te);
-                        match self.r.get(dt) {
-                            Ty::Dyn(_) => dt,
-                            // declared Array<dyn T> coerces a list literal binding
-                            Ty::Array(el) => match self.r.get(*el) {
-                                Ty::Dyn(_) => match self.r.get(t) {
-                                    Ty::Array(_) => dt,
-                                    _ => t,
-                                },
-                                _ => t,
-                            },
-                            Ty::Named(n, _) if self.traits.contains_key(n.as_str()) => {
-                                // only coerce actual object values (class instances)
-                                match self.r.get(t) {
-                                    Ty::Named(_, _) => self.r.mk(Ty::Dyn(n.clone())),
-                                    _ => t,
-                                }
-                            }
-                            _ => t,
-                        }
-                    }
-                    None => t,
-                };
-                let _ = ty;
-                // declared scalar-kind conflict check (MVP: word-family match)
-                let (v, t) = match ty {
-                    Some(te) => {
-                        let dt = self.ty_of(te);
-                        let df = self.is_float(dt);
-                        let vf = self.is_float(t);
-
-                        if df && !vf {
-                            // promote the int word to an f64 word
-                            (self.int_to_f64_word(fw, &v, t), dt)
-                        } else if !df
-                            && vf
-                            && self.opt_inner(dt).is_none()
-                            && !matches!(self.r.get(dt), Ty::Any)
-                        {
-                            self.err_diff(
-                                &s.pos,
-                                "initializer",
-                                "non-float surface",
-                                &self.surface_name(self.r.get(t)),
-                            );
-                            (v, t)
-                        } else {
-                            // declared word-surface check (patch #22):
-                            // cross-kind i64-word declarations (int/str/bool/
-                            // class/array/map) conflict structurally
-                            let dts = self.r.get(dt).clone();
-                            let vts = self.r.get(t).clone();
-                            if !self.surface_compat(&dts, &vts) {
-                                self.err_diff(
-                                    &s.pos,
-                                    "initializer",
-                                    &self.surface_name(&dts),
-                                    &self.surface_name(&vts),
-                                );
-                            }
-                            // fixed-width integer binding: coerce the word to
-                            // the declared surface (and record it)
-                            if self.is_int_like(dt) && self.is_int_like(t) {
-                                let vc = self.coerce_int_word(fw, &v, dt);
-                                (vc, dt)
-                            } else {
-                                (v, t)
-                            }
-                        }
-                    }
-                    None => (v, t),
-                };
-                // patch 42: declared value-optional face (`int?` etc) boxes
-                // the payload word (nil/Unit inits stay the raw nil word);
-                // the binding surface records the Opt type itself
-                let (v, t) = if ty.is_some() {
-                    let dtr42 = ty.clone().unwrap();
-                    let dt = self.ty_of(&dtr42);
-                    if self.opt_inner(dt).is_some()
-                        || self.weak_inner(dt).is_some()
-                        || matches!(self.r.get(dt).clone(), Ty::Any)
-                    {
-                        // value-optional: box the payload word; `any`: box into
-                        // a runtime-typed cell
-                        let (vc, _tc2) = self.coerce_word_to(fw, &v, t, dt);
-                        (vc, dt)
-                    } else if matches!(self.r.get(dt).clone(), Ty::Opt(_)) {
-                        // reference-optional: the handle word is already the
-                        // representation, just record the Opt surface so
-                        // `is nil` narrowing / later assigns see it
-                        (v, dt)
-                    } else {
-                        (v, t)
-                    }
-                } else {
-                    (v, t)
-                };
+                // A3 (let-initializer family): `sem` derives the declared-surface
+                // plan — `dyn` boxing, the initializer's store face (promotion /
+                // boxing / narrowing) and the surface the binding records — and
+                // freezes it against the statement id; Pass 2 replays it.
+                let decl = ty.as_ref().map(|te| self.ty_of(te));
+                let plan = self.let_plan(s.id, &s.pos, decl, t);
+                let (v, t) = self.apply_let_plan(fw, v, t, plan);
                 // a `unit` initializer has no word: keep the store well-formed
                 // and diagnose the binding (probe containers/x7); `let _ = …`
                 // discards deliberately, and an already-reported error should
@@ -368,14 +215,34 @@ impl ModEmitter {
                                     enc_i_lit(idx as i64)
                                 ));
                                 let fty = self.field_type(&cur, f);
-                                let mut v = v;
-                                let mut vty = vty;
-                                if self.is_int_like(fty) && self.is_int_like(vty) {
-                                    v = self.coerce_int_word(fw, &v, fty);
-                                    vty = fty;
+                                // A3 (store-face family): replay the field
+                                // coercion decided in Pass 1 (`super` never
+                                // promotes to f64, only fixed-width narrows)
+                                let face = if self.check_mode {
+                                    let f = self.super_store_face(fty, vty);
+                                    self.record_assign_face(s.id, f);
+                                    f
+                                } else if s.id == 0 {
+                                    self.super_store_face(fty, vty)
                                 } else {
+                                    match self.planned_assign_face(s.id) {
+                                        Some(f) => f,
+                                        None => {
+                                            debug_assert!(
+                                                false,
+                                                "assign-face plan miss: frame={} stmt={}",
+                                                self.cur_frame, s.id
+                                            );
+                                            self.super_store_face(fty, vty)
+                                        }
+                                    }
+                                };
+                                if self.check_mode
+                                    && matches!(face, crate::sem::StoreFace::Identity)
+                                {
                                     self.check_field_surface(&s.pos, f, fty, vty);
                                 }
+                                let (v, vty) = self.apply_store_face(fw, &v, vty, face);
                                 self.op_set_field(fw, &rv, &zi, &v, vty, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;
@@ -434,30 +301,48 @@ impl ModEmitter {
                                     zi,
                                     enc_i_lit(idx as i64)
                                 ));
-                                // f64 field route: int words promote; float->i64 rejects
+                                // f64 field route: int words promote; float->i64
+                                // rejects. A3 (store-face family): replay the
+                                // coercion decided in Pass 1.
                                 let fty = self.field_type(&c, f);
-                                let mut vc = v.clone();
-                                let mut vct = vty;
-                                let dfo = !self.is_float(fty)
-                                    && matches!(self.opt_inner(fty), Some((_, true)));
-                                if (self.is_float(fty) || dfo) && !self.is_float(vty) {
-                                    vc = self.int_to_f64_word(fw, &v, vty);
-                                    vct = self.r.mk(Ty::F64);
-                                } else if !dfo && !self.is_float(fty) && self.is_float(vty) {
-                                    self.err_diff(
-                                        &s.pos,
-                                        &format!("field assignment `{}`", f),
-                                        "non-float surface",
-                                        "float",
-                                    );
-                                } else if !dfo {
-                                    if self.is_int_like(fty) && self.is_int_like(vct) {
-                                        vc = self.coerce_int_word(fw, &vc, fty);
-                                        vct = fty;
-                                    } else {
-                                        self.check_field_surface(&s.pos, f, fty, vct);
+                                let face = if self.check_mode {
+                                    let f = self.field_store_face(fty, vty);
+                                    self.record_assign_face(s.id, f);
+                                    f
+                                } else if s.id == 0 {
+                                    self.field_store_face(fty, vty)
+                                } else {
+                                    match self.planned_assign_face(s.id) {
+                                        Some(f) => f,
+                                        None => {
+                                            debug_assert!(
+                                                false,
+                                                "assign-face plan miss: frame={} stmt={}",
+                                                self.cur_frame, s.id
+                                            );
+                                            self.field_store_face(fty, vty)
+                                        }
+                                    }
+                                };
+                                if self.check_mode
+                                    && matches!(face, crate::sem::StoreFace::Identity)
+                                {
+                                    let dfo = !self.is_float(fty)
+                                        && matches!(self.opt_inner(fty), Some((_, true)));
+                                    if !dfo {
+                                        if !self.is_float(fty) && self.is_float(vty) {
+                                            self.err_diff(
+                                                &s.pos,
+                                                &format!("field assignment `{}`", f),
+                                                "non-float surface",
+                                                "float",
+                                            );
+                                        } else {
+                                            self.check_field_surface(&s.pos, f, fty, vty);
+                                        }
                                     }
                                 }
+                                let (vc, vct) = self.apply_store_face(fw, &v, vty, face);
                                 self.op_set_field(fw, &recv, &zi, &vc, vct, fty, s.pos.clone());
                                 fw.rc_flush();
                                 return;

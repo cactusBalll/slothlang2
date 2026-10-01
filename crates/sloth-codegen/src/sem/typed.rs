@@ -40,6 +40,24 @@ pub enum StoreFace {
     Coerce(TyId),
 }
 
+/// A3 (let-initializer family): the plan `sem` froze for one `let`/`var`
+/// declaration. It captures everything the declaration branch used to derive
+/// on the fly from the declared surface: the optional `dyn` boxing of the
+/// initializer, the word store face (promotion / boxing / narrowing) and the
+/// surface the binding is finally recorded with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LetPlan {
+    /// `Some(dyn surface)`: box the produced word into that `dyn T` surface
+    /// (`emit_dyn_box`); `None` = store the word unboxed.
+    pub dyn_box: Option<TyId>,
+    /// store face of the initializer against the declared surface.
+    pub face: StoreFace,
+    /// the binding's recorded surface: the declared-surface rewrites
+    /// (declared `dyn T`, `Array<dyn T>`, trait name, fixed-width `int`,
+    /// value/reference optional) folded on top of the initializer type.
+    pub bind_ty: TyId,
+}
+
 /// Pass-1 typed products consumed by Pass 2.
 #[derive(Default, Clone)]
 pub struct TypedTables {
@@ -90,4 +108,8 @@ pub struct TypedTables {
     /// `push` call site -> store face of the pushed value, keyed by
     /// `(frame, line, col)` (A3, store-face family).
     pub push_faces: HashMap<SiteKey, StoreFace>,
+    /// `let`/`var` declaration -> initializer plan (`dyn` box / store face /
+    /// binding surface), keyed by `(frame, StmtId)`. Pass 1 derives it and
+    /// freezes it; Pass 2 replays it (A3, store-face family).
+    pub let_plans: HashMap<(String, u32), LetPlan>,
 }

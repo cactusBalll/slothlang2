@@ -190,6 +190,10 @@ pub struct ModEmitter {
     /// A3 store-face plan: the pushed-value coercion of every `push` call site,
     /// keyed by `(frame, line, col)`. Pass 2 replays it.
     pub(crate) push_faces: HashMap<crate::sem::SiteKey, crate::sem::StoreFace>,
+    /// A3 let-initializer plan: the `dyn` box / store face / binding surface
+    /// of every `let`/`var` declaration, keyed by `(frame, StmtId)`. Pass 2
+    /// replays it.
+    pub(crate) let_plans: HashMap<(String, u32), crate::sem::LetPlan>,
     /// payload `Y` of a fiber entry lambda about to be emitted: consumed by
     /// `emit_func_env` so `fiber.yield` in the body can be type-checked
     pub(crate) pending_fiber_payload: Option<TyId>,
@@ -329,6 +333,7 @@ impl ModEmitter {
             tensor_shapes: HashMap::new(),
             assign_faces: HashMap::new(),
             push_faces: HashMap::new(),
+            let_plans: HashMap::new(),
             pending_fiber_payload: None,
             hidden_classes: HashSet::new(),
         }
@@ -349,6 +354,7 @@ impl ModEmitter {
             tensor_shapes: std::mem::take(&mut self.tensor_shapes),
             assign_faces: std::mem::take(&mut self.assign_faces),
             push_faces: std::mem::take(&mut self.push_faces),
+            let_plans: std::mem::take(&mut self.let_plans),
         }
     }
 
@@ -365,6 +371,7 @@ impl ModEmitter {
         self.tensor_shapes = t.tensor_shapes;
         self.assign_faces = t.assign_faces;
         self.push_faces = t.push_faces;
+        self.let_plans = t.let_plans;
     }
 
     /// A3 (container-hint family): the store face `sem` chose for the
@@ -558,6 +565,64 @@ impl ModEmitter {
             ),
             None => {
                 self.push_faces.insert(key, face);
+            }
+        }
+    }
+
+    /// A3 (let-initializer family): the initializer plan `sem` froze for the
+    /// `let`/`var` statement `id` (Pass 2 only).
+    pub(crate) fn planned_let_plan(&self, id: u32) -> Option<crate::sem::LetPlan> {
+        if self.check_mode || id == 0 {
+            return None;
+        }
+        self.let_plans.get(&(self.cur_frame.clone(), id)).copied()
+    }
+
+    /// A3: freeze the initializer plan of the `let`/`var` statement `id`
+    /// (Pass 1 only; see [`Self::record_assign_face`] for the write-once rule).
+    pub(crate) fn record_let_plan(&mut self, id: u32, plan: crate::sem::LetPlan) {
+        if !self.check_mode || id == 0 {
+            return;
+        }
+        let key = (self.cur_frame.clone(), id);
+        match self.let_plans.get(&key) {
+            Some(prev) => debug_assert!(
+                prev == &plan,
+                "conflicting let plan at stmt {}: {:?} vs {:?}",
+                id,
+                prev,
+                plan
+            ),
+            None => {
+                self.let_plans.insert(key, plan);
+            }
+        }
+    }
+
+    /// A3 (let-initializer family): the initializer plan of the `let`/`var`
+    /// statement `id`. Pass 1 derives it (and freezes it); Pass 2 replays the
+    /// frozen plan, falling back to a local derivation for synthetic id-less
+    /// declarations (top-level `var` prelude statements).
+    pub(crate) fn let_plan(
+        &mut self,
+        id: u32,
+        pos: &Pos,
+        decl: Option<TyId>,
+        init_ty: TyId,
+    ) -> crate::sem::LetPlan {
+        if self.check_mode {
+            let plan = self.derive_let_plan(pos, decl, init_ty);
+            self.record_let_plan(id, plan);
+            plan
+        } else if id == 0 {
+            self.derive_let_plan(pos, decl, init_ty)
+        } else {
+            match self.planned_let_plan(id) {
+                Some(plan) => plan,
+                None => {
+                    debug_assert!(false, "let-plan miss: frame={} stmt={}", self.cur_frame, id);
+                    self.derive_let_plan(pos, decl, init_ty)
+                }
             }
         }
     }
