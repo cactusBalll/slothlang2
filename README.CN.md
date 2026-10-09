@@ -1,5 +1,7 @@
 # sloth-lang 2.0（slothlang2）
 
+![架构](docs/arch.jpeg)
+
 [English](README.md) | [简体中文](README.CN.md)
 
 一门静态类型、AOT 编译的系统级语言，采用 **Rust 前端 + MLIR/LLVM 后端**。

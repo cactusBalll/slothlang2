@@ -1,5 +1,7 @@
 # sloth-lang 2.0 (slothlang2)
 
+![architecture](docs/arch.jpeg)
+
 [English](README.md) | [简体中文](README.CN.md)
 
 A statically typed, AOT-compiled systems language built on a **Rust frontend +
